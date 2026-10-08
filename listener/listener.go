@@ -10,6 +10,7 @@ import (
 	"github.com/metacubex/mihomo/adapter/inbound"
 	C "github.com/metacubex/mihomo/constant"
 	LC "github.com/metacubex/mihomo/listener/config"
+	"github.com/metacubex/mihomo/listener/dnsproxy"
 	"github.com/metacubex/mihomo/listener/http"
 	"github.com/metacubex/mihomo/listener/mixed"
 	"github.com/metacubex/mihomo/listener/redir"
@@ -39,6 +40,7 @@ var (
 	tproxyUDPListener   *tproxy.UDPListener
 	mixedListener       *mixed.Listener
 	mixedUDPLister      *socks.UDPListener
+	dnsProxyListener    *dnsproxy.Listener
 	tunnelTCPListeners  = map[string]*LT.Listener{}
 	tunnelUDPListeners  = map[string]*LT.PacketConn{}
 	inboundListeners    = map[string]C.InboundListener{}
@@ -48,17 +50,18 @@ var (
 	tuicListener        *tuic.Listener
 
 	// lock for recreate function
-	socksMux   sync.Mutex
-	httpMux    sync.Mutex
-	redirMux   sync.Mutex
-	tproxyMux  sync.Mutex
-	mixedMux   sync.Mutex
-	tunnelMux  sync.Mutex
-	inboundMux sync.Mutex
-	tunMux     sync.Mutex
-	ssMux      sync.Mutex
-	vmessMux   sync.Mutex
-	tuicMux    sync.Mutex
+	socksMux    sync.Mutex
+	httpMux     sync.Mutex
+	redirMux    sync.Mutex
+	tproxyMux   sync.Mutex
+	mixedMux    sync.Mutex
+	dnsProxyMux sync.Mutex
+	tunnelMux   sync.Mutex
+	inboundMux  sync.Mutex
+	tunMux      sync.Mutex
+	ssMux       sync.Mutex
+	vmessMux    sync.Mutex
+	tuicMux     sync.Mutex
 
 	LastTunConf  LC.Tun
 	LastTuicConf LC.TuicServer
@@ -70,6 +73,7 @@ type Ports struct {
 	RedirPort         int    `json:"redir-port"`
 	TProxyPort        int    `json:"tproxy-port"`
 	MixedPort         int    `json:"mixed-port"`
+	DNSProxyPort      int    `json:"dns-proxy-port"`
 	ShadowSocksConfig string `json:"ss-config"`
 	VmessConfig       string `json:"vmess-config"`
 }
@@ -495,6 +499,34 @@ func ReCreateMixed(port int, tunnel C.Tunnel) {
 	log.Infoln("Mixed(http+socks) proxy listening at: %s", mixedListener.Address())
 }
 
+// ReCreateDNSProxy manages the top-level DNS-only mixed port. Like mixed-port,
+// zero disables it and binding follows allow-lan / bind-address. The listener
+// owns both the TCP and UDP socket, so a partial bind never remains active.
+func ReCreateDNSProxy(port int, tunnel C.Tunnel) {
+	dnsProxyMux.Lock()
+	defer dnsProxyMux.Unlock()
+
+	addr := genAddr(bindAddress, port, allowLan)
+	if dnsProxyListener != nil {
+		if dnsProxyListener.RawAddress() == addr {
+			return
+		}
+		_ = dnsProxyListener.Close()
+		dnsProxyListener = nil
+	}
+	if portIsZero(addr) {
+		return
+	}
+
+	listener, err := dnsproxy.NewDefault(addr, tunnel)
+	if err != nil {
+		log.Errorln("Start DNS-only mixed proxy server error: %s", err)
+		return
+	}
+	dnsProxyListener = listener
+	log.Infoln("DNS-only mixed proxy listening at: %s", listener.Address())
+}
+
 func ReCreateTun(tunConf LC.Tun, tunnel C.Tunnel) {
 	tunConf.Sort()
 
@@ -687,6 +719,13 @@ func GetPorts() *Ports {
 		ports.MixedPort = port
 	}
 
+	dnsProxyMux.Lock()
+	if dnsProxyListener != nil {
+		_, portStr, _ := net.SplitHostPort(dnsProxyListener.Address())
+		ports.DNSProxyPort, _ = strconv.Atoi(portStr)
+	}
+	dnsProxyMux.Unlock()
+
 	if shadowSocksListener != nil {
 		ports.ShadowSocksConfig = shadowSocksListener.Config()
 	}
@@ -725,5 +764,6 @@ func closeTunListener() {
 }
 
 func Cleanup() {
+	ReCreateDNSProxy(0, nil)
 	closeTunListener()
 }

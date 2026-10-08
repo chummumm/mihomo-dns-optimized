@@ -1,8 +1,15 @@
 # DNS Route Kernel
 
-基于 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) 稳定版维护的独立派生项目，增加 **可选的 DNS 专用 SOCKS5 / HTTP CONNECT 入口**。
+基于 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) 稳定版维护的独立派生项目，增加与 `mixed-port` 同级的 **DNS 专用混合代理端口 `dns-proxy-port`**。
 
 SmartDNS 经此入口发送到 `IP:53` 的普通 DNS 查询，会读取每条查询的域名，复用现有 `rules` / `rule-providers` 选择出口。同一 TCP 连接或 UDP 会话中的不同域名也独立分流；其他目标端口在拨号前拒绝。无需 FakeIP，无需另写一份 DNS 域名规则。
+
+```yaml
+mixed-port: 7890
+dns-proxy-port: 7853
+```
+
+配置非零端口即启用，设为 `0` 或省略即关闭，与 `mixed-port` 一致。HTTP CONNECT、SOCKS4/4a、SOCKS5 TCP 和 UDP 均默认支持，无额外协议开关；认证、LAN 访问、绑定地址等沿用原版全局配置。该端口只接受发往解析器字面量 IP 的 `53` 端口的有效 DNS。
 
 - [配置与工作原理](docs/dns-proxy.md)
 - [Mihomo 最小配置](docs/dns-proxy.example.yaml) · [SmartDNS 接入示例](docs/smartdns-dns-proxy.conf)

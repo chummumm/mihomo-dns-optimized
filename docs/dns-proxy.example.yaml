@@ -1,14 +1,25 @@
 # 可直接用于 -t 配置校验的最小示例；没有节点账号或远程规则集。
-# 接入现有配置时，只合并 listeners 中的新条目，并保留自己的 rules。
+# 接入现有配置时，只增加顶层 dns-proxy-port，并保留自己的 rules。
 mode: rule
 log-level: info
 
-listeners:
-  - name: smartdns-in
-    type: dns-proxy
-    listen: 127.0.0.1
-    port: 7853
-    enable: true
+# 与 mixed-port 同级；0 或省略关闭，非零端口默认支持全部混合代理协议。
+mixed-port: 7890
+dns-proxy-port: 7853
+allow-lan: false
+
+# 可选：与 mixed-port 共用的原版全局字段，不需要单独的 users 配置。
+# authentication:
+#   - "smartdns:replace-with-your-own-password"
+# skip-auth-prefixes:
+#   - 127.0.0.1/32
+# bind-address: '*'
+# lan-allowed-ips:
+#   - 0.0.0.0/0
+#   - ::/0
+# lan-disallowed-ips: []
+# inbound-tfo: false
+# inbound-mptcp: false
 
 # 内置 DNS 不是这个入口的前提；本最小示例交给 SmartDNS 解析。
 # 原配置使用 redir-host 时可以继续保留，不需要 FakeIP。

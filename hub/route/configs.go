@@ -39,6 +39,7 @@ type configSchema struct {
 	RedirPort         *int                     `json:"redir-port"`
 	TProxyPort        *int                     `json:"tproxy-port"`
 	MixedPort         *int                     `json:"mixed-port"`
+	DNSProxyPort      *int                     `json:"dns-proxy-port"`
 	Tun               *tunSchema               `json:"tun"`
 	TuicServer        *tuicServerSchema        `json:"tuic-server"`
 	ShadowSocksConfig *string                  `json:"ss-config"`
@@ -374,6 +375,7 @@ func patchConfigs(w http.ResponseWriter, r *http.Request) {
 	listener.ReCreateRedir(pointerOrDefault(general.RedirPort, ports.RedirPort), tunnel.Tunnel)
 	listener.ReCreateTProxy(pointerOrDefault(general.TProxyPort, ports.TProxyPort), tunnel.Tunnel)
 	listener.ReCreateMixed(pointerOrDefault(general.MixedPort, ports.MixedPort), tunnel.Tunnel)
+	listener.ReCreateDNSProxy(pointerOrDefault(general.DNSProxyPort, ports.DNSProxyPort), tunnel.Tunnel)
 	listener.ReCreateTun(pointerOrDefaultTun(general.Tun, listener.LastTunConf), tunnel.Tunnel)
 	listener.ReCreateShadowSocks(pointerOrDefault(general.ShadowSocksConfig, ports.ShadowSocksConfig), tunnel.Tunnel)
 	listener.ReCreateVmess(pointerOrDefault(general.VmessConfig, ports.VmessConfig), tunnel.Tunnel)

@@ -55,13 +55,6 @@ func ParseListener(mapping map[string]any) (C.InboundListener, error) {
 			return nil, err
 		}
 		listener, err = IN.NewMixed(mixedOption)
-	case "dns-proxy":
-		dnsProxyOption := &IN.DNSProxyOption{Enable: true}
-		err = decoder.Decode(mapping, dnsProxyOption)
-		if err != nil {
-			return nil, err
-		}
-		listener, err = IN.NewDNSProxy(dnsProxyOption)
 	case "tunnel":
 		tunnelOption := &IN.TunnelOption{}
 		err = decoder.Decode(mapping, tunnelOption)

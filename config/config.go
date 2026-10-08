@@ -76,6 +76,7 @@ type Inbound struct {
 	RedirPort         int            `json:"redir-port"`
 	TProxyPort        int            `json:"tproxy-port"`
 	MixedPort         int            `json:"mixed-port"`
+	DNSProxyPort      int            `json:"dns-proxy-port"`
 	Tun               LC.Tun         `json:"tun"`
 	TuicServer        LC.TuicServer  `json:"tuic-server"`
 	ShadowSocksConfig string         `json:"ss-config"`
@@ -406,6 +407,7 @@ type RawConfig struct {
 	RedirPort                     int                     `yaml:"redir-port" json:"redir-port"`
 	TProxyPort                    int                     `yaml:"tproxy-port" json:"tproxy-port"`
 	MixedPort                     int                     `yaml:"mixed-port" json:"mixed-port"`
+	DNSProxyPort                  int                     `yaml:"dns-proxy-port" json:"dns-proxy-port"`
 	ShadowSocksConfig             string                  `yaml:"ss-config" json:"ss-config"`
 	VmessConfig                   string                  `yaml:"vmess-config" json:"vmess-config"`
 	InboundTfo                    bool                    `yaml:"inbound-tfo" json:"inbound-tfo"`
@@ -768,6 +770,7 @@ func parseGeneral(cfg *RawConfig) (*General, error) {
 			RedirPort:         cfg.RedirPort,
 			TProxyPort:        cfg.TProxyPort,
 			MixedPort:         cfg.MixedPort,
+			DNSProxyPort:      cfg.DNSProxyPort,
 			ShadowSocksConfig: cfg.ShadowSocksConfig,
 			VmessConfig:       cfg.VmessConfig,
 			AllowLan:          cfg.AllowLan,
