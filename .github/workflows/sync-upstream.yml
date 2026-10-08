@@ -1,0 +1,138 @@
+name: Sync stable upstream
+
+on:
+  schedule:
+    - cron: "23 20 * * *" # 04:23 Asia/Shanghai; GitHub may delay scheduled runs.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Test the latest stable merge without pushing or publishing
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-stable-upstream
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+  SKIP_INTEROP_TEST: "1"
+  SKIP_CONCURRENT_TEST: "1"
+
+jobs:
+  sync:
+    if: github.repository == 'chummumm/mihomo-dns-optimized' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    outputs:
+      changed: ${{ steps.push.outputs.changed }}
+      commit: ${{ steps.push.outputs.commit }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Find the latest stable release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release=$(gh api repos/MetaCubeX/mihomo/releases/latest)
+          tag=$(jq -er 'select(.draft == false and .prerelease == false) | .tag_name' <<< "$release")
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            printf 'Unsupported stable release tag: %s\n' "$tag" >&2
+            exit 1
+          }
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+      - name: Prepare upstream merge and preserve fork automation
+        id: merge
+        env:
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # Execute an immutable copy; merging cannot rewrite the running script.
+          cp scripts/upstream-sync.sh "$RUNNER_TEMP/upstream-sync.sh"
+          bash "$RUNNER_TEMP/upstream-sync.sh" "$UPSTREAM_TAG"
+      - name: Set up upstream-compatible Go
+        if: steps.merge.outputs.changed == 'true'
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: "1.26"
+          go-download-base-url: https://github.com/MetaCubeX/go/releases/download/build
+          cache: true
+      - name: Test the merged candidate before pushing
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          set -euo pipefail
+          bash scripts/ci-check.sh test
+          bash scripts/ci-check.sh build amd64 "$RUNNER_TEMP/sync-amd64" "${UPSTREAM_TAG}-dns-sync-check" "$(date -u +%FT%TZ)"
+          bash scripts/ci-check.sh build arm64 "$RUNNER_TEMP/sync-arm64" "${UPSTREAM_TAG}-dns-sync-check" "$(date -u +%FT%TZ)"
+      - name: Commit and push the tested merge
+        id: push
+        if: steps.merge.outputs.changed == 'true' && !inputs.dry_run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_COMMIT: ${{ steps.merge.outputs.base_commit }}
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Do not overwrite a user's commit made while tests were running.
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          if [[ "$(git rev-parse refs/remotes/origin/main)" != "$BASE_COMMIT" ]]; then
+            printf 'main changed while testing. Nothing pushed; rerun sync on the new main.\n' >&2
+            exit 1
+          fi
+          git diff --exit-code
+          git commit -m "Merge upstream ${UPSTREAM_TAG} into DNS optimized fork"
+          auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=$auth_header" push origin HEAD:refs/heads/main
+          {
+            printf 'changed=true\n'
+            printf 'commit=%s\n' "$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+      - name: Summarize sync outcome
+        if: always()
+        env:
+          MERGED: ${{ steps.merge.outputs.changed }}
+          PUSHED: ${{ steps.push.outputs.changed }}
+          TARGET_TAG: ${{ steps.upstream.outputs.tag }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          {
+            printf '## Stable upstream sync\n\n'
+            printf '* Upstream tag: `%s`\n' "$TARGET_TAG"
+            printf '* Job status: `%s`\n' "$JOB_STATUS"
+            printf '* Candidate changed: `%s`\n' "${MERGED:-false}"
+            printf '* Pushed: `%s`\n' "${PUSHED:-false}"
+            printf '* Dry run: `%s`\n\n' "${DRY_RUN:-false}"
+            printf 'Conflicts and failed tests stop the update. No force push or upstream workflow replacement is performed.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build-updated-core:
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    permissions:
+      contents: write
+    # A GITHUB_TOKEN push does not trigger another push workflow. Reuse the build
+    # workflow explicitly so each successful update produces downloadable binaries.
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.sync.outputs.commit }}
+      publish_release: true

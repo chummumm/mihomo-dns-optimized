@@ -1,6 +1,17 @@
-name: Bootstrap cloud build
+name: Build DNS optimized
 
 on:
+  push:
+    branches: [main]
+    tags: ["dns-v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish a release for this main-branch commit
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       ref:
