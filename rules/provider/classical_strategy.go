@@ -19,6 +19,12 @@ func (c *classicalStrategy) Behavior() P.RuleBehavior {
 	return P.Classical
 }
 
+// Rules exposes this strategy's immutable rule snapshot. Callers must not
+// modify the returned slice or its rules.
+func (c *classicalStrategy) Rules() []C.Rule {
+	return c.rules
+}
+
 func (c *classicalStrategy) Match(metadata *C.Metadata, helper C.RuleMatchHelper) bool {
 	for _, rule := range c.rules {
 		if m, _ := rule.Match(metadata, helper); m {

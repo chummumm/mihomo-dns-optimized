@@ -1,0 +1,108 @@
+name: Initialize DNS fork
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/bootstrap.yml
+      - .bootstrap/dns-fork.patch.gz
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: initial-source-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    if: github.repository == 'chummumm/mihomo-dns-optimized' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.import.outputs.commit }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Import verified source with complete upstream history
+        id: import
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_UPSTREAM: "88dcbf7f1614a67c3b36b848ee3592dfa92ada36"
+          EXPECTED_TREE: "8881f3b8e3eae1905b79de722633fb9dee2d6016"
+          EXPECTED_PATCH_SHA256: "aa25288cdee0ed507985facf3479d7c22a354878a31495d5790f866d45ae03fc"
+        run: |
+          set -euo pipefail
+          bootstrap_commit=$(git rev-parse HEAD)
+          cp .bootstrap/dns-fork.patch.gz "$RUNNER_TEMP/dns-fork.patch.gz"
+          printf '%s  %s\n' "$EXPECTED_PATCH_SHA256" "$RUNNER_TEMP/dns-fork.patch.gz" | sha256sum --check -
+          gzip -dc "$RUNNER_TEMP/dns-fork.patch.gz" > "$RUNNER_TEMP/dns-fork.patch"
+          git fetch --no-tags https://github.com/MetaCubeX/mihomo.git refs/tags/v1.19.32
+          upstream_commit=$(git rev-parse 'FETCH_HEAD^{commit}')
+          [[ "$upstream_commit" == "$EXPECTED_UPSTREAM" ]]
+          git switch --detach "$upstream_commit"
+          git apply --index --check "$RUNNER_TEMP/dns-fork.patch"
+          git apply --index "$RUNNER_TEMP/dns-fork.patch"
+          git diff --cached --check
+          source_tree=$(git write-tree)
+          [[ "$source_tree" == "$EXPECTED_TREE" ]]
+          # The runner only writes source code. Workflow changes are finalized
+          # separately through the user's authorized GitHub connection.
+          git restore --source="$bootstrap_commit" --staged --worktree -- .github/workflows
+          import_tree=$(git write-tree)
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          source_commit=$(git commit-tree "$import_tree" -p "$upstream_commit" -p "$bootstrap_commit" <<'MESSAGE'
+          Add domain-routed DNS-only SOCKS5 and HTTP CONNECT inbound
+
+          Import the complete upstream v1.19.32 history and the locally tested
+          DNS ingress, query routing, configuration examples, and cloud CI.
+          Preserve initialization ancestry; never force-push or reset main.
+          MESSAGE
+          )
+          git merge-base --is-ancestor "$bootstrap_commit" "$source_commit"
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          [[ "$(git rev-parse refs/remotes/origin/main)" == "$bootstrap_commit" ]] || {
+            printf 'main changed during import; refusing to overwrite it.\n' >&2
+            exit 1
+          }
+          auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=$auth_header" push origin "$source_commit:refs/heads/main"
+          printf 'Source imported at %s; awaiting authorized workflow finalization.\n' "$source_commit"
+          finalized=false
+          for attempt in $(seq 1 90); do
+            git fetch --quiet --no-tags origin refs/heads/main:refs/remotes/origin/main
+            final_commit=$(git rev-parse refs/remotes/origin/main)
+            if [[ "$final_commit" != "$source_commit" ]]; then
+              git merge-base --is-ancestor "$source_commit" "$final_commit"
+              [[ "$(git rev-parse "$final_commit^{tree}")" == "$EXPECTED_TREE" ]]
+              finalized=true
+              break
+            fi
+            sleep 10
+          done
+          "$finalized" || { printf 'Workflow finalization timed out. Source is preserved on main.\n' >&2; exit 1; }
+          printf 'commit=%s\n' "$final_commit" >> "$GITHUB_OUTPUT"
+          {
+            printf '## Verified source import\n\n'
+            printf '* Upstream: `%s`\n' "$upstream_commit"
+            printf '* Source tree: `%s`\n' "$source_tree"
+            printf '* Source commit: `%s`\n' "$final_commit"
+            printf '* All upstream history and initialization ancestry preserved.\n'
+            printf '* Temporary import files are absent from the completed source tree.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: import
+    permissions:
+      contents: write
+    uses: ./.github/workflows/bootstrap-build.yml
+    with:
+      ref: ${{ needs.import.outputs.commit }}
+      publish_release: true

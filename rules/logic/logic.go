@@ -176,6 +176,13 @@ func (logic *Logic) RuleType() C.RuleType {
 	return logic.ruleType
 }
 
+// Rules exposes the immutable child rules for consumers that can evaluate only
+// part of the connection metadata (for example a DNS question's domain name).
+// Callers must not modify the returned slice or its rules.
+func (logic *Logic) Rules() []C.Rule {
+	return logic.rules
+}
+
 func matchSubRules(metadata *C.Metadata, name string, subRules map[string][]C.Rule, helper C.RuleMatchHelper) (bool, string) {
 	for _, rule := range subRules[name] {
 		if m, a := rule.Match(metadata, helper); m {
@@ -183,7 +190,7 @@ func matchSubRules(metadata *C.Metadata, name string, subRules map[string][]C.Ru
 				m, a = matchSubRules(metadata, rule.Adapter(), subRules, helper)
 			}
 			if m && (a == "PASS-RULE" || (helper.CheckPassRule != nil && helper.CheckPassRule(a))) {
-				continue 
+				continue
 			}
 			return m, a
 		}

@@ -1,0 +1,20 @@
+# 可直接用于 -t 配置校验的最小示例；没有节点账号或远程规则集。
+# 接入现有配置时，只合并 listeners 中的新条目，并保留自己的 rules。
+mode: rule
+log-level: info
+
+listeners:
+  - name: smartdns-in
+    type: dns-proxy
+    listen: 127.0.0.1
+    port: 7853
+    enable: true
+
+# 内置 DNS 不是这个入口的前提；本最小示例交给 SmartDNS 解析。
+# 原配置使用 redir-host 时可以继续保留，不需要 FakeIP。
+dns:
+  enable: false
+
+rules:
+  - DOMAIN-SUFFIX,example.com,DIRECT
+  - MATCH,DIRECT
