@@ -268,7 +268,9 @@ rules:
                             check_answer(read_frame(conn), query, expected)
                     print("PASS SOCKS5 CONNECT: persistent TCP and unchanged IPv6 resolver target")
 
-                    conn, reply, relay = socks_request(dns_port, ("0.0.0.0", 0), command=3)
+                    # SmartDNS sends an unspecified client IP with the resolver
+                    # port before binding its own ephemeral UDP source port.
+                    conn, reply, relay = socks_request(dns_port, ("0.0.0.0", 53), command=3)
                     with conn, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
                         assert reply == 0
                         udp.bind(("127.0.0.1", 0))
@@ -301,7 +303,7 @@ rules:
                         udp.sendto(b"\x00\x00\x00" + encode_address(*resolver) + blocked, relay)
                         _, response = decode_packet(udp.recvfrom(65535)[0])
                         assert response[3] & 15 == 5, "REJECT did not return DNS REFUSED"
-                    print("PASS SOCKS5 UDP: per-datagram routes, IPv4/IPv6 targets, drop/REFUSED, malformed and fragmented packets")
+                    print("PASS SOCKS5 UDP: SmartDNS ASSOCIATE, per-datagram routes, IPv4/IPv6 targets, drop/REFUSED, malformed and fragmented packets")
 
                     with record_lock:
                         before = len(records)

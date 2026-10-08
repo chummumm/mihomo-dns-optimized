@@ -389,6 +389,36 @@ func TestUDPAssociationCloseCancelsOutstandingExchange(t *testing.T) {
 	}
 }
 
+func TestSmartDNSUDPAssociateUnspecifiedAddressWithResolverPort(t *testing.T) {
+	for _, endpoint := range []string{"0.0.0.0:53", "[::]:53"} {
+		t.Run(endpoint, func(t *testing.T) {
+			r := new(recordingExchanger)
+			l := testListener(t, r)
+			control := testConn(t, l.Address())
+			code, address := socksRequest(t, control, endpoint, socks5.CmdUDPAssociate, nil)
+			if code != 0 {
+				t.Fatalf("SmartDNS-style UDP association rejected: %d", code)
+			}
+			client := udpClient(t)
+			if client.LocalAddr().(*net.UDPAddr).Port == 53 {
+				t.Fatal("test must use an ephemeral client source port")
+			}
+			sendUDP(t, client, address.UDPAddr(), "8.8.8.8:53", "claude.ai.", 30, 0)
+			receiveUDP(t, client, "claude.ai.", 30)
+			// The first accepted source is still pinned after accommodating
+			// SmartDNS's unspecified address; another socket cannot use it.
+			other := udpClient(t)
+			sendUDP(t, other, address.UDPAddr(), "8.8.8.8:53", "wrong-source.example.", 31, 0)
+			sendUDP(t, client, address.UDPAddr(), "8.8.8.8:53", "example.cn.", 32, 0)
+			receiveUDP(t, client, "example.cn.", 32)
+			queries := r.snapshot()
+			if len(queries) != 2 || queries[0].name != "claude.ai." || queries[1].name != "example.cn." {
+				t.Fatalf("incorrect source-port pinning: %+v", queries)
+			}
+		})
+	}
+}
+
 func TestMalformedTCPFrameIsDropped(t *testing.T) {
 	r := new(recordingExchanger)
 	l := testListener(t, r)

@@ -23,10 +23,15 @@ Actions artifact 保留 30 天。解压后需要给二进制增加执行权限�
 原生 amd64 二进制还会运行本机端到端测试；这些测试使用本地模拟 DNS/SOCKS
 服务，不访问用户节点。arm64 为交叉编译，不声称执行了 arm64 二进制测试。
 
-手动运行 `Build DNS optimized` 并勾选 `publish_release`，或者推送形如
-`dns-v1.19.32.1` 的版本标签，可把构建结果发布到 GitHub Releases。
-发布只在本仓库进行，已有同名 release 不会被覆盖。自动上游更新成功后也会创建
-以源码提交标识的 release。
+推送 `main` 后，测试和两个架构的编译全部成功，会自动把构建结果发布到
+GitHub Releases，提供持久下载。Pull Request 只测试和上传 Actions artifact。
+手动运行 `Build DNS optimized` 并勾选 `publish_release`、推送形如
+`dns-v1.19.32.1` 的版本标签，以及自动上游更新成功后，也会发布 release。
+发布只在本仓库进行，已有同名 release 的附件不会被覆盖。
+
+发布任务按仓库串行执行。新 release 创建时先不标记 Latest，附件上传后重新读取
+当前 `main` 的提交；只有它仍等于这次的构建提交，才更新 Latest。较旧提交的构建
+仍保留下载，但不会因完成较晚或重跑而覆盖新版本的 Latest 链接。
 
 ## 自动跟随上游
 

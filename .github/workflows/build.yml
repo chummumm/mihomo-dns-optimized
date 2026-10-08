@@ -128,12 +128,17 @@ jobs:
     if: >-
       github.repository == 'chummumm/mihomo-dns-optimized' &&
       github.event_name != 'pull_request' &&
-      (startsWith(github.ref, 'refs/tags/dns-v') ||
+      ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+       startsWith(github.ref, 'refs/tags/dns-v') ||
        (inputs.publish_release && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
+    concurrency:
+      # Serialize publishers across main, tag, manual, and reusable build runs.
+      group: dns-release-publish-${{ github.repository }}
+      cancel-in-progress: false
     steps:
       - name: Download both architectures
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -154,19 +159,29 @@ jobs:
           cat ./*.sha256 > SHA256SUMS
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             printf 'Release %s already exists; published assets are not overwritten.\n' "$RELEASE_TAG"
-            exit 0
+          else
+            {
+              printf 'Mihomo DNS optimized `%s`\n\n' "$BUILD_VERSION"
+              printf 'Source commit: `%s`\n\n' "$BUILD_SHA"
+              printf 'Linux amd64 (GOAMD64=v1) and arm64; gVisor enabled; CGO disabled.\n\n'
+              printf 'Uncompress the matching `.gz`, mark it executable, and follow `docs/dns-proxy.md`.\n'
+              printf 'DNS-specific ingress is opt-in. Existing listeners keep their upstream behavior.\n'
+            } > "$RUNNER_TEMP/release-notes.txt"
+            # Creating an older build must never move the repository's Latest link.
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$BUILD_SHA" \
+              --title "$BUILD_VERSION" \
+              --notes-file "$RUNNER_TEMP/release-notes.txt" \
+              --latest=false \
+              ./*.gz SHA256SUMS
           fi
-          {
-            printf 'Mihomo DNS optimized `%s`\n\n' "$BUILD_VERSION"
-            printf 'Source commit: `%s`\n\n' "$BUILD_SHA"
-            printf 'Linux amd64 (GOAMD64=v1) and arm64; gVisor enabled; CGO disabled.\n\n'
-            printf 'Uncompress the matching `.gz`, mark it executable, and follow `docs/dns-proxy.md`.\n'
-            printf 'DNS-specific ingress is opt-in. Existing listeners keep their upstream behavior.\n'
-          } > "$RUNNER_TEMP/release-notes.txt"
-          gh release create "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$BUILD_SHA" \
-            --title "$BUILD_VERSION" \
-            --notes-file "$RUNNER_TEMP/release-notes.txt" \
-            --latest \
-            ./*.gz SHA256SUMS
+          # Re-read main after upload, immediately before promoting the release.
+          # A slow or rerun older build keeps its download without replacing Latest.
+          current_main=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$BUILD_SHA" == "$current_main" ]]; then
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --latest
+          else
+            printf 'Build %s is not current main (%s); Latest is unchanged.\n' "$BUILD_SHA" "$current_main"
+          fi

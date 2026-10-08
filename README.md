@@ -10,7 +10,7 @@ SmartDNS 经此入口发送到 `IP:53` 的普通 DNS 查询，会读取每条查
 - [稳定版上游同步](https://github.com/chummumm/mihomo-dns-optimized/actions/workflows/sync-upstream.yml)
 - [编译产物、发布与同步说明](docs/upstream-sync.md)
 
-GitHub Actions 构建 Linux amd64（v1 指令集）和 arm64，包含 `with_gvisor`。每日北京时间约 04:23 检查上游稳定版，先合并、测试并编译，再更新本仓库。冲突、测试失败或分支并发变更会停止同步，不覆盖本仓库改动。
+GitHub Actions 构建 Linux amd64（v1 指令集）和 arm64，包含 `with_gvisor`。`main` 更新且验证成功后自动发布下载包。每日北京时间约 04:23 检查上游稳定版，先合并、测试并编译，再更新本仓库。冲突、测试失败或分支并发变更会停止同步，不覆盖本仓库改动。
 
 以下保留上游项目说明、致谢和许可声明。此派生项目与 MetaCubeX 团队无隶属关系。
 

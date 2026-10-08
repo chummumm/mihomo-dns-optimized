@@ -162,6 +162,8 @@ python3 scripts/test-dns-proxy.py /tmp/dns-route-kernel
 
 测试通过两个本地模拟 SOCKS5 出口，验证 HTTP CONNECT、SOCKS5 TCP、同一 UDP 会话的多域名分流、IPv4 / IPv6 解析器、选择组实时切换，以及非 `53`、非法 DNS 和分片数据包拒绝。使用保留的测试 IP，不需要公网 DNS，也不占用特权端口。
 
+另外已用官方 SmartDNS `Release48.4`（`1.2026.08.05-0921`）进行实际客户端联调：带认证的 SOCKS5 UDP、SOCKS5 TCP、HTTP CONNECT TCP 三种方式均通过连续两域名分流验证。入口兼容 SmartDNS 在未指定客户端 IP 的 UDP ASSOCIATE 请求中仍填写解析器端口的行为，随后按真实首包固定 UDP 源端口。
+
 ## 实现位置与参考
 
 - [DNS 入口](../listener/dnsproxy/listener.go)

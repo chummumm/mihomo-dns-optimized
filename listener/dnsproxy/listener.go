@@ -221,7 +221,13 @@ func (l *Listener) handleSOCKS(conn *bufferedConn) {
 		if !ok || (!ip.IsUnspecified() && ip.Unmap() != peer.Addr().Unmap()) {
 			return nil, socks5.ErrConnectionNotAllowed
 		}
-		clientPort = uint16(client.Port)
+		// SmartDNS sends an unspecified client address with the resolver's
+		// port (53), then creates its UDP socket on an ephemeral local port.
+		// Treat an unspecified address as an unknown endpoint and pin the
+		// first valid packet from the authenticated TCP peer instead.
+		if !ip.IsUnspecified() {
+			clientPort = uint16(client.Port)
+		}
 		local, err := netip.ParseAddrPort(conn.LocalAddr().String())
 		if err != nil {
 			return nil, socks5.ErrAddressNotSupported
