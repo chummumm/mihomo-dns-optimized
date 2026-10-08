@@ -1,21 +1,22 @@
 # DNS Route Kernel
 
-基于 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) 稳定版维护的独立派生项目，增加与 `mixed-port` 同级的 **DNS 专用混合代理端口 `dns-proxy-port`**。
-
-SmartDNS 经此入口发送到 `IP:53` 的普通 DNS 查询，会读取每条查询的域名，复用现有 `rules` / `rule-providers` 选择出口。同一 TCP 连接或 UDP 会话中的不同域名也独立分流；其他目标端口在拨号前拒绝。无需 FakeIP，无需另写一份 DNS 域名规则。
+基于 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) 稳定版维护的独立派生项目，通过一个全局开关，让普通 DNS 查询按查询域名复用现有 `rules` / `rule-providers` 分流，无需另外维护一份 DNS 域名规则。
 
 ```yaml
 mixed-port: 7890
-dns-proxy-port: 7853
+mode: rule
+dns-rule-routing: true
 ```
 
-配置非零端口即启用，设为 `0` 或省略即关闭，与 `mixed-port` 一致。HTTP CONNECT、SOCKS4/4a、SOCKS5 TCP 和 UDP 均默认支持，无额外协议开关；认证、LAN 访问、绑定地址等沿用原版全局配置。该端口只接受发往解析器字面量 IP 的 `53` 端口的有效 DNS。
+`dns-rule-routing` 默认 `false`。开启后，在 Rule 模式且入站没有固定 `proxy:` 时，普通入站中发往解析器 `53` 端口的明文 TCP / UDP DNS 会逐条查询选路。同一 TCP 连接或 UDP 会话里的不同域名可以走不同出口。**非 53 流量和首份负载未识别为普通 DNS 的流量继续走原流程。** 不增加监听端口或 listener 类型，Global / Direct 模式和固定出站保留原行为。
 
-域名规则、域名规则集和 MRS 继续使用上游匹配实现；新增适配只处理 DNS 查询阶段能够判断的规则条件。报文解析复用项目已有的 `miekg/dns`，并检查完整长度、记录计数、OPT 结构及响应关联。普通查询支持 HTTPS / SVCB、DNSSEC 数据和 EDNS 扩展；具体覆盖、已验证场景和不支持的协议用途见[DNS 报文覆盖与边界](docs/dns-proxy.md)。
+SmartDNS 可以继续监听 `6053` / `6553`，通过现有 `mixed-port: 7890` 发送普通 DNS 上游查询。内置 `dns.listen` 和 TUN DNS 劫持继续提供本地 DNS 服务，其符合范围的上游查询共享相同选路核心。外部 DNS 识别不要求启用内置 DNS，也不依赖普通 sniffer。此功能不使用 FakeIP；启用内置 DNS 时使用 `redir-host`。
 
-正在交换的 DNS 查询接入原版面板连接列表与流量统计，展示查询域名、解析器、规则和出口链，并支持关闭。查询完成后移出活动列表；短查询可能在面板两次刷新之间结束。
+匹配时，域名来自当前 QNAME；网站目标 IP 尚未知，不能拿解析器 IP 代替。来源、入站、进程、端口和网络信息仍按真实查询保留，并按原规则顺序参与匹配。选中策略组后固定本次查询的实际出口，再向原解析器发送 DNS；不会为选路再次解析待查域名。
 
-- [配置与工作原理](docs/dns-proxy.md)
+报文解析复用项目已有的 `miekg/dns`，并检查完整长度、记录计数、OPT 结构及响应关联。支持普通 HTTPS / SVCB 查询、DNSSEC 数据及 EDNS 扩展；DoH / DoT / DoQ 不属于本功能的自动分类范围，仍按原有连接处理。正在交换的查询接入原版连接面板和流量统计；短查询可能在两次面板刷新之间结束。
+
+- [配置与工作原理](docs/dns-proxy.md) · [完整行为约定](docs/dns-rule-routing-design.md)
 - [Mihomo 最小配置](docs/dns-proxy.example.yaml) · [SmartDNS 接入示例](docs/smartdns-dns-proxy.conf)
 - [云编译](https://github.com/chummumm/mihomo-dns-optimized/actions/workflows/build.yml) · [下载发布](https://github.com/chummumm/mihomo-dns-optimized/releases)
 - [稳定版上游同步](https://github.com/chummumm/mihomo-dns-optimized/actions/workflows/sync-upstream.yml)

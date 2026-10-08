@@ -57,7 +57,7 @@ var (
 	udpInOnce sync.Once
 
 	// Outbound Rule
-	mode = Rule
+	mode = atomic.NewInt32Enum(Rule)
 
 	// default timeout for UDP session
 	udpTimeout = 60 * time.Second
@@ -249,12 +249,12 @@ func UpdateSniffer(dispatcher *sniffer.Dispatcher) {
 
 // Mode return current mode
 func Mode() TunnelMode {
-	return mode
+	return mode.Load()
 }
 
 // SetMode change the mode of tunnel
 func SetMode(m TunnelMode) {
-	mode = m
+	mode.Store(m)
 }
 
 func FindProcessMode() process.FindProcessMode {
@@ -323,12 +323,34 @@ func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err erro
 		}
 		return
 	}
+	helper := newRuleMatchHelper(metadata, true)
+	switch Mode() {
+	case Direct:
+		proxy = proxies["DIRECT"]
+	case Global:
+		proxy = proxies["GLOBAL"]
+	default:
+		proxy, rule, err = match(metadata, helper)
+	}
+	return
+}
+
+// DNS questions retain real source/process metadata but must not resolve the
+// queried website just to decide how that DNS question should be routed.
+func newRuleMatchHelper(metadata *C.Metadata, allowResolveIP bool, processOrigin ...*C.Metadata) C.RuleMatchHelper {
+	processMetadata := metadata
+	if len(processOrigin) != 0 && processOrigin[0] != nil {
+		// Internal DNS has its own transport network/port, while process
+		// lookup still belongs to the original application socket.
+		processMetadata = processOrigin[0].Clone()
+	}
 	var (
-		resolved             bool
-		attemptProcessLookup = metadata.Type != C.INNER
+		resolved bool
+		// dns.listen uses INNER but still has a real client source tuple.
+		attemptProcessLookup = processMetadata.Type != C.INNER || (!allowResolveIP && processMetadata.InName == "DNS" && processMetadata.SourceValid())
 	)
 
-	if node, ok := resolver.DefaultHosts.Search(metadata.Host, false); ok {
+	if node, ok := resolver.DefaultHosts.Search(metadata.Host, false); allowResolveIP && ok {
 		metadata.DstIP, _ = node.RandIP()
 		resolved = true
 	}
@@ -336,7 +358,7 @@ func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err erro
 	helper := C.RuleMatchHelper{
 		ResolveIP: func() {
 			if !resolved && metadata.Host != "" && !metadata.Resolved() {
-				ctx, cancel := context.WithTimeout(context.Background(), resolver.DefaultDNSTimeout)
+				ctx, cancel := context.WithTimeout(icontext.WithDNSRoutingMetadata(context.Background(), metadata), resolver.DefaultDNSTimeout)
 				defer cancel()
 				ip, err := resolver.ResolveIP(ctx, metadata.Host)
 				if err != nil {
@@ -353,21 +375,22 @@ func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err erro
 				attemptProcessLookup = false
 				if !features.CMFA {
 					// normal check for process
-					uid, path, err := process.FindProcessName(metadata.NetWork.String(), metadata.SrcIP, int(metadata.SrcPort))
+					uid, path, err := process.FindProcessName(processMetadata.NetWork.String(), processMetadata.SrcIP, int(processMetadata.SrcPort))
 					if err != nil {
 						log.Debugln("[Process] find process error for %s: %v", metadata.String(), err)
 					} else {
 						metadata.Process = filepath.Base(path)
 						metadata.ProcessPath = path
 						metadata.Uid = uid
+						processMetadata.Process, processMetadata.ProcessPath, processMetadata.Uid = metadata.Process, path, uid
 
-						if pkg, err := process.FindPackageName(metadata); err == nil { // for android (not CMFA) package names
+						if pkg, err := process.FindPackageName(processMetadata); err == nil { // for android (not CMFA) package names
 							metadata.Process = pkg
 						}
 					}
 				} else {
 					// check package names
-					pkg, err := process.FindPackageName(metadata)
+					pkg, err := process.FindPackageName(processMetadata)
 					if err != nil {
 						log.Debugln("[Process] find process error for %s: %v", metadata.String(), err)
 					} else {
@@ -398,16 +421,10 @@ func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err erro
 		helper.FindProcess = nil
 	}
 
-	switch mode {
-	case Direct:
-		proxy = proxies["DIRECT"]
-	case Global:
-		proxy = proxies["GLOBAL"]
-	// Rule
-	default:
-		proxy, rule, err = match(metadata, helper)
+	if !allowResolveIP {
+		helper.ResolveIP = nil
 	}
-	return
+	return helper
 }
 
 // processUDP starts a loop to handle udp packet
@@ -430,6 +447,9 @@ func handleUDPConn(packet C.PacketAdapter) {
 		return
 	}
 	fixMetadata(metadata) // fix some metadata not set via metadata.SetRemoteAddr or metadata.SetRemoteAddress
+	if tryHandleDNSUDP(packet) {
+		return
+	}
 
 	if err := preHandleMetadata(metadata.Clone()); err != nil { // precheck without modify metadata
 		packet.Drop()
@@ -466,6 +486,7 @@ func handleUDPConn(packet C.PacketAdapter) {
 			dialMetadata := metadata.Pure()
 			ctx, cancel := context.WithTimeout(context.Background(), C.DefaultUDPTimeout)
 			defer cancel()
+			ctx = icontext.WithDNSFixedOutbound(icontext.WithDNSRoutingMetadata(ctx, metadata), proxy)
 			rawPc, err := retry(ctx, func(ctx context.Context) (C.PacketConn, error) {
 				return proxy.ListenPacketContext(ctx, dialMetadata)
 			}, func(err error) {
@@ -515,6 +536,9 @@ func handleTCPConn(connCtx C.ConnContext) {
 		return
 	}
 	fixMetadata(metadata) // fix some metadata not set via metadata.SetRemoteAddr or metadata.SetRemoteAddress
+	if tryHandleDNSTCP(connCtx) {
+		return
+	}
 
 	preHandleFailed := false
 	if err := preHandleMetadata(metadata); err != nil {
@@ -573,6 +597,7 @@ func handleTCPConn(connCtx C.ConnContext) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), C.DefaultTCPTimeout)
 	defer cancel()
+	ctx = icontext.WithDNSFixedOutbound(icontext.WithDNSRoutingMetadata(ctx, metadata), proxy)
 	remoteConn, err := retry(ctx, func(ctx context.Context) (remoteConn C.Conn, err error) {
 		remoteConn, err = proxy.DialContext(ctx, dialMetadata)
 		if err != nil {
@@ -642,9 +667,9 @@ func logMetadata(metadata *C.Metadata, rule C.Rule, remoteConn C.Connection) {
 		} else {
 			log.Infoln("[%s] %s --> %s match %s using %s", strings.ToUpper(metadata.NetWork.String()), metadata.SourceDetail(), metadata.RemoteAddress(), rule.RuleType().String(), remoteConn.Chains().String())
 		}
-	case mode == Global:
+	case Mode() == Global:
 		log.Infoln("[%s] %s --> %s using GLOBAL", strings.ToUpper(metadata.NetWork.String()), metadata.SourceDetail(), metadata.RemoteAddress())
-	case mode == Direct:
+	case Mode() == Direct:
 		log.Infoln("[%s] %s --> %s using DIRECT", strings.ToUpper(metadata.NetWork.String()), metadata.SourceDetail(), metadata.RemoteAddress())
 	default:
 		log.Infoln("[%s] %s --> %s doesn't match any rule using %s", strings.ToUpper(metadata.NetWork.String()), metadata.SourceDetail(), metadata.RemoteAddress(), remoteConn.Chains().String())
@@ -652,8 +677,32 @@ func logMetadata(metadata *C.Metadata, rule C.Rule, remoteConn C.Connection) {
 }
 
 func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, error) {
+	return matchWithOptions(metadata, helper, ruleMatchOptions{})
+}
+
+type ruleMatchOptions struct {
+	evaluate      func(C.Rule, *C.Metadata, C.RuleMatchHelper) (bool, string)
+	dnsQuery      bool
+	deferUDPCheck bool // A DNS plan may choose its upstream transport later.
+}
+
+// Ordinary traffic and DNS queries share rule order, sub-rule entry points,
+// PASS handling and fallback. Only unavailable DNS destination data needs an
+// alternate evaluator; it never replaces the domain rule implementations.
+func matchWithOptions(metadata *C.Metadata, helper C.RuleMatchHelper, options ruleMatchOptions) (C.Proxy, C.Rule, error) {
 	configMux.RLock()
 	defer configMux.RUnlock()
+	if resolveIP := helper.ResolveIP; resolveIP != nil {
+		helper.ResolveIP = func() {
+			// Internal DNS can enter this matcher again. Holding a read lock
+			// across that lookup deadlocks when a configuration writer queues
+			// between the two read locks. No configuration maps are accessed
+			// here until resolution finishes and the lock has been reacquired.
+			configMux.RUnlock()
+			defer configMux.RLock()
+			resolveIP()
+		}
+	}
 
 	var rematchChain []string
 	for {
@@ -661,17 +710,32 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, err
 		var rematchRule C.Rule
 	GetRules:
 		for _, rule := range getRules(metadata) {
-			if matched, ada := rule.Match(metadata, helper); matched {
+			var matched bool
+			var ada string
+			if options.evaluate == nil {
+				matched, ada = rule.Match(metadata, helper)
+			} else {
+				matched, ada = options.evaluate(rule, metadata, helper)
+			}
+			if matched {
 				adapter, ok := proxies[ada]
 				if !ok {
 					continue
 				}
 
 				// parse multi-layer nesting
+				depth := 0
 				for adapter := adapter; adapter != nil; adapter = adapter.Unwrap(metadata, false) {
+					if options.dnsQuery && depth >= dnsProxyMaxDepth {
+						return nil, rule, errors.New("DNS outbound group nesting is too deep or cyclic")
+					}
+					depth++
 					if adapter.Type() == C.Pass {
 						log.Debugln("%s match Pass rule", adapter.Name())
 						continue GetRules
+					}
+					if options.dnsQuery && (adapter.Type() == C.Rematch || adapter.Type() == C.Dns) {
+						return nil, rule, fmt.Errorf("DNS query routing cannot use outbound type %s", adapter.Type())
 					}
 					if adapter.Type() == C.Rematch {
 						log.Debugln("%s match Rematch rule", adapter.Name())
@@ -681,7 +745,10 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, err
 					}
 				}
 
-				if metadata.NetWork == C.UDP && !adapter.SupportUDP() {
+				if !options.deferUDPCheck && metadata.NetWork == C.UDP && !adapter.SupportUDP() {
+					if options.dnsQuery {
+						return nil, rule, fmt.Errorf("DNS outbound %q does not support UDP", adapter.Name())
+					}
 					log.Debugln("%s UDP is not supported", adapter.Name())
 					continue
 				}

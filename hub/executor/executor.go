@@ -102,6 +102,12 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	updateSniffer(cfg.Sniffer)
 	updateHosts(cfg.Hosts)
 	updateGeneral(cfg.General, true)
+	// Do not change this in temporaryUpdateGeneral while merely parsing a
+	// candidate config: resolver policy and the classifier change together.
+	tunnel.SetDNSRuleRouting(cfg.General.DNSRuleRouting)
+	if cfg.General.DNSRuleRouting {
+		log.Infoln("DNS rule routing enabled; nameserver-policy and domain fallback policies are inactive")
+	}
 	updateDNS(cfg.DNS, cfg.General.IPv6)
 	updateNTP(cfg.NTP) // initialize NTP after DNS because an NTP server may be a hostname.
 	updateListeners(cfg.General, cfg.Listeners, force)
@@ -140,7 +146,6 @@ func GetGeneral() *config.General {
 			RedirPort:         ports.RedirPort,
 			TProxyPort:        ports.TProxyPort,
 			MixedPort:         ports.MixedPort,
-			DNSProxyPort:      ports.DNSProxyPort,
 			Tun:               listener.GetTunConf(),
 			TuicServer:        listener.GetTuicConf(),
 			ShadowSocksConfig: ports.ShadowSocksConfig,
@@ -154,12 +159,13 @@ func GetGeneral() *config.General {
 			InboundTfo:        inbound.Tfo(),
 			InboundMPTCP:      inbound.MPTCP(),
 		},
-		Mode:         tunnel.Mode(),
-		UnifiedDelay: adapter.UnifiedDelay.Load(),
-		LogLevel:     log.Level(),
-		IPv6:         !resolver.DisableIPv6,
-		Interface:    dialer.DefaultInterface.Load(),
-		RoutingMark:  int(dialer.DefaultRoutingMark.Load()),
+		DNSRuleRouting: tunnel.DNSRuleRoutingEnabled(),
+		Mode:           tunnel.Mode(),
+		UnifiedDelay:   adapter.UnifiedDelay.Load(),
+		LogLevel:       log.Level(),
+		IPv6:           !resolver.DisableIPv6,
+		Interface:      dialer.DefaultInterface.Load(),
+		RoutingMark:    int(dialer.DefaultRoutingMark.Load()),
 		GeoXUrl: config.GeoXUrl{
 			GeoIp:   geodata.GeoIpUrl(),
 			Mmdb:    geodata.MmdbUrl(),
@@ -203,7 +209,6 @@ func updateListeners(general *config.General, listeners map[string]C.InboundList
 	listener.ReCreateRedir(general.RedirPort, tunnel.Tunnel)
 	listener.ReCreateTProxy(general.TProxyPort, tunnel.Tunnel)
 	listener.ReCreateMixed(general.MixedPort, tunnel.Tunnel)
-	listener.ReCreateDNSProxy(general.DNSProxyPort, tunnel.Tunnel)
 	listener.ReCreateShadowSocks(general.ShadowSocksConfig, tunnel.Tunnel)
 	listener.ReCreateVmess(general.VmessConfig, tunnel.Tunnel)
 	listener.ReCreateTuic(general.TuicServer, tunnel.Tunnel)
@@ -244,12 +249,32 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 		resolver.DefaultService = nil
 		resolver.ProxyServerHostResolver = nil
 		resolver.DirectHostResolver = nil
+		if c.DNSRuleRouting {
+			// External DNS classification also works without the local DNS
+			// service. Keep an independent infrastructure resolver so resolver
+			// and proxy hostnames cannot fall back into the system/business DNS.
+			r := dns.NewResolver(dns.Config{
+				Default:           c.DefaultNameserver,
+				ProxyServer:       c.ProxyServerNameserver,
+				ProxyServerPolicy: c.ProxyServerPolicy,
+				IPv6:              c.IPv6 && generalIPv6,
+				IPv6Timeout:       c.IPv6Timeout,
+				CacheAlgorithm:    c.CacheAlgorithm,
+				CacheMaxSize:      c.CacheMaxSize,
+			})
+			if r.ProxyResolver.Invalid() {
+				resolver.ProxyServerHostResolver = r.ProxyResolver
+			} else {
+				resolver.ProxyServerHostResolver = r.BootstrapResolver
+			}
+		}
 		dns.ReCreateServer("", nil, nil)
 		return
 	}
 
 	ipv6 := c.IPv6 && generalIPv6
 	r := dns.NewResolver(dns.Config{
+		RuleRouting:          c.DNSRuleRouting,
 		Main:                 c.NameServer,
 		Fallback:             c.Fallback,
 		IPv6:                 ipv6,
@@ -290,6 +315,8 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 
 	if r.ProxyResolver.Invalid() {
 		resolver.ProxyServerHostResolver = r.ProxyResolver
+	} else if c.DNSRuleRouting {
+		resolver.ProxyServerHostResolver = r.BootstrapResolver
 	} else {
 		resolver.ProxyServerHostResolver = r.Resolver
 	}
@@ -386,15 +413,22 @@ func updateUpdater(cfg *config.Config) {
 //go:linkname temporaryUpdateGeneral github.com/metacubex/mihomo/config.temporaryUpdateGeneral
 func temporaryUpdateGeneral(general *config.General) func() {
 	oldGeneral := GetGeneral()
-	updateGeneral(general, false)
+	// Parsing geodata/providers needs transport settings, not a temporary
+	// routing policy. Changing mode/process policy here would affect live
+	// connections even when the candidate configuration is later rejected.
+	updateGeneralSettings(general, false)
 	return func() {
-		updateGeneral(oldGeneral, false)
+		updateGeneralSettings(oldGeneral, false)
 	}
 }
 
 func updateGeneral(general *config.General, logging bool) {
 	tunnel.SetMode(general.Mode)
 	tunnel.SetFindProcessMode(general.FindProcessMode)
+	updateGeneralSettings(general, logging)
+}
+
+func updateGeneralSettings(general *config.General, logging bool) {
 	resolver.DisableIPv6 = !general.IPv6
 
 	dialer.SetTcpConcurrent(general.TCPConcurrent)

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/common/arc"
+	"github.com/metacubex/mihomo/common/contextutils"
 	"github.com/metacubex/mihomo/common/lru"
 	"github.com/metacubex/mihomo/common/singleflight"
 	"github.com/metacubex/mihomo/component/resolver"
@@ -48,6 +49,8 @@ type Resolver struct {
 	cache                 dnsCache
 	policy                []dnsPolicy
 	defaultResolver       *Resolver
+	ruleRouting           bool
+	bootstrap             bool
 }
 
 func (r *Resolver) LookupIPPrimaryIPv4(ctx context.Context, host string) (ips []netip.Addr, err error) {
@@ -153,11 +156,18 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 	if len(m.Question) == 0 {
 		return nil, errors.New("should have one question at least")
 	}
+	// A cache refresh or shared lookup can outlive the caller. Keep its query
+	// immutable even when the caller reuses or changes the original message.
+	m = m.Copy()
+	ctx, msg, err = r.prepareDNSRouting(ctx, m)
+	if err != nil || msg != nil {
+		return msg, err
+	}
 	continueFetch := false
 	defer func() {
 		if continueFetch || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), resolver.DefaultDNSTimeout)
+				ctx, cancel := context.WithTimeout(contextutils.WithoutCancel(ctx), resolver.DefaultDNSTimeout)
 				defer cancel()
 				_, _ = r.exchangeWithoutCache(ctx, m) // ignore result, just for putMsgToCache
 			}()
@@ -166,8 +176,9 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 
 	q := m.Question[0]
 	domain := msgToDomain(m)
-	msg, expireTime, hit := getMsgFromCache(r.cache, q)
+	msg, expireTime, hit := getMsgFromCache(r.cache, dnsCacheKey(ctx, q))
 	if hit {
+		msg.Id = m.Id
 		log.Debugln("[DNS] cache hit %s --> %s, expire at %s", domain, msgToLogString(msg), expireTime.Format("2006-01-02 15:04:05"))
 		now := time.Now()
 		if expireTime.Before(now) {
@@ -185,11 +196,12 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 // ExchangeWithoutCache a batch of dns request, and it do NOT GET from cache
 func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.Msg, err error) {
 	q := m.Question[0]
+	key := dnsCacheKey(ctx, q)
 
 	retryNum := 0
 	retryMax := 3
 	fn := func() (result *D.Msg, err error) {
-		ctx, cancel := context.WithTimeout(context.Background(), resolver.DefaultDNSTimeout) // reset timeout in singleflight
+		ctx, cancel := context.WithTimeout(contextutils.WithoutCancel(ctx), resolver.DefaultDNSTimeout) // preserve the caller's DNS route while sharing the lookup
 		defer cancel()
 		cache := false
 
@@ -202,7 +214,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 			}
 
 			if cache {
-				putMsgToCache(r.cache, q, result)
+				putMsgToCache(r.cache, key, q, result)
 			}
 		}()
 
@@ -220,7 +232,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 		return
 	}
 
-	ch := r.group.DoChan(q.String(), fn)
+	ch := r.group.DoChan(key, fn)
 
 	var result singleflight.Result[*D.Msg]
 
@@ -236,7 +248,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 				result := <-ch
 				ret, err, shared := result.Val, result.Err, result.Shared
 				if err != nil && !shared && ret.Opcode < retryMax { // retry
-					r.group.DoChan(q.String(), fn)
+					r.group.DoChan(key, fn)
 				}
 			}()
 			return nil, ctx.Err()
@@ -245,7 +257,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 
 	ret, err, shared := result.Val, result.Err, result.Shared
 	if err != nil && !shared && ret.Opcode < retryMax { // retry
-		r.group.DoChan(q.String(), fn)
+		r.group.DoChan(key, fn)
 	}
 
 	if err == nil {
@@ -253,6 +265,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 		if shared {
 			msg = msg.Copy()
 		}
+		msg.Id = m.Id
 	}
 
 	return
@@ -469,6 +482,7 @@ type Policy struct {
 }
 
 type Config struct {
+	RuleRouting          bool
 	Main, Fallback       []NameServer
 	Default              []NameServer
 	ProxyServer          []NameServer
@@ -499,8 +513,9 @@ func (config Config) newCache() dnsCache {
 
 type Resolvers struct {
 	*Resolver
-	ProxyResolver  *Resolver
-	DirectResolver *Resolver
+	ProxyResolver     *Resolver
+	DirectResolver    *Resolver
+	BootstrapResolver *Resolver
 }
 
 func (rs Resolvers) ClearCache() {
@@ -525,6 +540,7 @@ func NewResolverFromClient(client dnsClient) *Resolver {
 
 func NewResolver(config Config) (rs Resolvers) {
 	defaultResolver := &Resolver{
+		bootstrap:   true,
 		main:        transform(config.Default, nil),
 		cache:       config.newCache(),
 		ipv6Timeout: time.Duration(config.IPv6Timeout) * time.Millisecond,
@@ -595,6 +611,7 @@ func NewResolver(config Config) (rs Resolvers) {
 	}
 
 	r := &Resolver{
+		ruleRouting: config.RuleRouting,
 		ipv6:        config.IPv6,
 		main:        cacheTransform(config.Main),
 		cache:       config.newCache(),
@@ -603,9 +620,11 @@ func NewResolver(config Config) (rs Resolvers) {
 	}
 	r.defaultResolver = defaultResolver
 	rs.Resolver = r
+	rs.BootstrapResolver = defaultResolver
 
 	if len(config.ProxyServer) != 0 {
 		rs.ProxyResolver = &Resolver{
+			bootstrap:   true,
 			ipv6:        config.IPv6,
 			main:        cacheTransform(config.ProxyServer),
 			cache:       config.newCache(),
@@ -616,6 +635,7 @@ func NewResolver(config Config) (rs Resolvers) {
 
 	if len(config.DirectServer) != 0 {
 		rs.DirectResolver = &Resolver{
+			ruleRouting: config.RuleRouting,
 			ipv6:        config.IPv6,
 			main:        cacheTransform(config.DirectServer),
 			cache:       config.newCache(),

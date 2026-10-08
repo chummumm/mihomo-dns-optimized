@@ -7,8 +7,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/metacubex/mihomo/adapter/inbound"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
+	icontext "github.com/metacubex/mihomo/context"
 	"github.com/metacubex/mihomo/listener/sing"
 	"github.com/metacubex/mihomo/log"
 
@@ -30,6 +32,7 @@ func (h *ListenerHandler) ShouldHijackDns(targetAddr netip.AddrPort) bool {
 func (h *ListenerHandler) NewConnection(ctx context.Context, conn net.Conn, metadata M.Metadata) error {
 	if h.ShouldHijackDns(metadata.Destination.AddrPort()) {
 		log.Debugln("[DNS] hijack tcp:%s", metadata.Destination.String())
+		ctx = h.dnsRoutingContext(ctx, metadata.Source, metadata.Destination, conn.LocalAddr(), C.TCP)
 		return resolver.RelayDnsConn(ctx, conn, resolver.DefaultDnsReadTimeout)
 	}
 	return h.ListenerHandler.NewConnection(ctx, conn, metadata)
@@ -39,6 +42,11 @@ func (h *ListenerHandler) NewPacket(ctx context.Context, key netip.AddrPort, buf
 	if h.ShouldHijackDns(metadata.Destination.AddrPort()) {
 		log.Debugln("[DNS] hijack udp:%s from %s", metadata.Destination.String(), metadata.Source.String())
 		writer := init(nil)
+		var local net.Addr
+		if addressed, ok := writer.(interface{ LocalAddr() net.Addr }); ok {
+			local = addressed.LocalAddr()
+		}
+		ctx = h.dnsRoutingContext(ctx, metadata.Source, metadata.Destination, local, C.UDP)
 		rwOptions := network.ReadWaitOptions{
 			FrontHeadroom: network.CalculateFrontHeadroom(writer),
 			RearHeadroom:  network.CalculateRearHeadroom(writer),
@@ -96,11 +104,26 @@ func (h *ListenerHandler) NewPacketConnection(ctx context.Context, conn network.
 				}
 				return err
 			}
-			go relayDnsPacket(ctx, readBuff, rwOptions, dest, &mutex, &writer)
+			queryCtx := h.dnsRoutingContext(ctx, metadata.Source, dest, conn.LocalAddr(), C.UDP)
+			go relayDnsPacket(queryCtx, readBuff, rwOptions, dest, &mutex, &writer)
 		}
 		return nil
 	}
 	return h.ListenerHandler.NewPacketConnection(ctx, conn, metadata)
+}
+
+// Hijacked DNS remains a local resolver service, including the synthetic TUN
+// gateway addresses. Carry its real inbound policy and source to the service;
+// the service chooses an actual upstream before applying DNS rule routing.
+func (h *ListenerHandler) dnsRoutingContext(ctx context.Context, source, destination M.Socksaddr, local net.Addr, network C.NetWork) context.Context {
+	metadata := &C.Metadata{Type: h.Type, NetWork: network}
+	inbound.ApplyAdditions(metadata, inbound.WithSrcAddr(source), inbound.WithDstAddr(destination))
+	if local != nil {
+		inbound.ApplyAdditions(metadata, inbound.WithInAddr(local))
+	}
+	inbound.ApplyAdditions(metadata, h.Additions...)
+	inbound.ApplyAdditions(metadata, sing.AdditionsFromContext(ctx)...)
+	return icontext.WithDNSRoutingInbound(icontext.WithDNSRoutingMetadata(ctx, metadata))
 }
 
 func relayDnsPacket(ctx context.Context, readBuff *buf.Buffer, rwOptions network.ReadWaitOptions, dest M.Socksaddr, mutex *sync.Mutex, writer *network.PacketWriter) {

@@ -14,7 +14,7 @@ type Tunnel interface {
 	NatTable() NatTable
 }
 
-// DNSExchanger is an optional capability for DNS-only proxy inbounds. Each call
+// DNSExchanger exchanges detected DNS messages from ordinary inbounds. Each call
 // exchanges one wire-format DNS message using resolverMetadata as the transport
 // destination; routing is selected independently for every query's question.
 // Keeping it separate from Tunnel leaves existing inbounds and tunnel adapters

@@ -47,6 +47,7 @@ import (
 // General config
 type General struct {
 	Inbound
+	DNSRuleRouting    bool                    `json:"dns-rule-routing"`
 	Mode              T.TunnelMode            `json:"mode"`
 	UnifiedDelay      bool                    `json:"unified-delay"`
 	LogLevel          log.LogLevel            `json:"log-level"`
@@ -76,7 +77,6 @@ type Inbound struct {
 	RedirPort         int            `json:"redir-port"`
 	TProxyPort        int            `json:"tproxy-port"`
 	MixedPort         int            `json:"mixed-port"`
-	DNSProxyPort      int            `json:"dns-proxy-port"`
 	Tun               LC.Tun         `json:"tun"`
 	TuicServer        LC.TuicServer  `json:"tuic-server"`
 	ShadowSocksConfig string         `json:"ss-config"`
@@ -146,6 +146,7 @@ type NTP struct {
 
 // DNS config
 type DNS struct {
+	DNSRuleRouting        bool
 	Enable                bool
 	PreferH3              bool
 	IPv6                  bool
@@ -407,7 +408,8 @@ type RawConfig struct {
 	RedirPort                     int                     `yaml:"redir-port" json:"redir-port"`
 	TProxyPort                    int                     `yaml:"tproxy-port" json:"tproxy-port"`
 	MixedPort                     int                     `yaml:"mixed-port" json:"mixed-port"`
-	DNSProxyPort                  int                     `yaml:"dns-proxy-port" json:"dns-proxy-port"`
+	DNSRuleRouting                bool                    `yaml:"dns-rule-routing" json:"dns-rule-routing"`
+	LegacyDNSProxyPort            *int                    `yaml:"dns-proxy-port,omitempty" json:"dns-proxy-port,omitempty"`
 	ShadowSocksConfig             string                  `yaml:"ss-config" json:"ss-config"`
 	VmessConfig                   string                  `yaml:"vmess-config" json:"vmess-config"`
 	InboundTfo                    bool                    `yaml:"inbound-tfo" json:"inbound-tfo"`
@@ -760,6 +762,9 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 func temporaryUpdateGeneral(general *General) func()
 
 func parseGeneral(cfg *RawConfig) (*General, error) {
+	if cfg.LegacyDNSProxyPort != nil && *cfg.LegacyDNSProxyPort != 0 {
+		return nil, errors.New("dns-proxy-port has been removed; use dns-rule-routing: true with an existing mixed-port or another inbound")
+	}
 	if cfg.GlobalClientFingerprint != "" {
 		log.Errorln("The `global-client-fingerprint` configuration is removed, please set `client-fingerprint` directly on the proxy instead")
 	}
@@ -770,7 +775,6 @@ func parseGeneral(cfg *RawConfig) (*General, error) {
 			RedirPort:         cfg.RedirPort,
 			TProxyPort:        cfg.TProxyPort,
 			MixedPort:         cfg.MixedPort,
-			DNSProxyPort:      cfg.DNSProxyPort,
 			ShadowSocksConfig: cfg.ShadowSocksConfig,
 			VmessConfig:       cfg.VmessConfig,
 			AllowLan:          cfg.AllowLan,
@@ -781,12 +785,13 @@ func parseGeneral(cfg *RawConfig) (*General, error) {
 			InboundTfo:        cfg.InboundTfo,
 			InboundMPTCP:      cfg.InboundMPTCP,
 		},
-		UnifiedDelay: cfg.UnifiedDelay,
-		Mode:         cfg.Mode,
-		LogLevel:     cfg.LogLevel,
-		IPv6:         cfg.IPv6,
-		Interface:    cfg.Interface,
-		RoutingMark:  cfg.RoutingMark,
+		DNSRuleRouting: cfg.DNSRuleRouting,
+		UnifiedDelay:   cfg.UnifiedDelay,
+		Mode:           cfg.Mode,
+		LogLevel:       cfg.LogLevel,
+		IPv6:           cfg.IPv6,
+		Interface:      cfg.Interface,
+		RoutingMark:    cfg.RoutingMark,
 		GeoXUrl: GeoXUrl{
 			GeoIp:   cfg.GeoXUrl.GeoIp,
 			Mmdb:    cfg.GeoXUrl.Mmdb,
@@ -1416,15 +1421,27 @@ func parseNameServerPolicy(nsPolicy *orderedmap.OrderedMap[string, any], adapter
 
 func parseDNS(rawCfg *RawConfig, ruleProviders map[string]P.RuleProvider) (*DNS, error) {
 	cfg := rawCfg.DNS
+	if rawCfg.DNSRuleRouting {
+		// Work on a copy: disabling the feature on the next full reload must
+		// restore the user's original resolver policy, not a mutated config.
+		cfg.NameServerPolicy = nil
+		cfg.DirectNameServerFollowPolicy = false
+		cfg.FallbackFilter.Domain = nil
+		cfg.FallbackFilter.GeoSite = nil
+		if cfg.Enable && cfg.EnhancedMode == C.DNSFakeIP {
+			return nil, errors.New("dns-rule-routing requires real DNS answers; set dns.enhanced-mode to redir-host")
+		}
+	}
 	if cfg.Enable && len(cfg.NameServer) == 0 {
 		return nil, fmt.Errorf("if DNS configuration is turned on, NameServer cannot be empty")
 	}
 
-	if cfg.RespectRules && len(cfg.ProxyServerNameserver) == 0 {
+	if cfg.RespectRules && len(cfg.ProxyServerNameserver) == 0 && !rawCfg.DNSRuleRouting {
 		return nil, fmt.Errorf("if “respect-rules” is turned on, “proxy-server-nameserver” cannot be empty")
 	}
 
 	dnsCfg := &DNS{
+		DNSRuleRouting:    rawCfg.DNSRuleRouting,
 		Enable:            cfg.Enable,
 		Listen:            cfg.Listen,
 		ListenRoutingMark: cfg.ListenRoutingMark,

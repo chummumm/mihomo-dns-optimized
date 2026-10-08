@@ -1,5 +1,5 @@
-// Package dnsmessage validates the DNS wire messages accepted by the dedicated
-// DNS proxy ingress. It does not resolve names or validate DNSSEC signatures.
+// Package dnsmessage validates wire messages for DNS classification and routing.
+// It does not resolve names or validate DNSSEC signatures.
 package dnsmessage
 
 import (

@@ -3,6 +3,7 @@ package resolver
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"time"
@@ -79,6 +80,9 @@ func RelayDnsConn(ctx context.Context, conn net.Conn, readTimeout time.Duration)
 			return nil
 		}()
 		if err != nil {
+			if errors.Is(err, ErrDNSDrop) {
+				continue
+			}
 			return err
 		}
 	}
@@ -93,6 +97,9 @@ func relayDnsPacket(ctx context.Context, payload []byte, target []byte, maxSize 
 
 	r, err := ServeMsg(ctx, msg)
 	if err != nil {
+		if errors.Is(err, ErrDNSDrop) {
+			return nil, err
+		}
 		m := new(D.Msg)
 		m.SetRcode(msg, D.RcodeServerFailure)
 		return m.PackBuffer(target)

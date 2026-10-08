@@ -20,6 +20,10 @@ func (rs *RuleSet) RuleType() C.RuleType {
 	return C.RuleSet
 }
 
+// SourceIP reports whether this rule set swaps source and destination fields.
+// Partial metadata evaluators must apply the same swap to field availability.
+func (rs *RuleSet) SourceIP() bool { return rs.isSrc }
+
 func (rs *RuleSet) Match(metadata *C.Metadata, helper C.RuleMatchHelper) (bool, string) {
 	if provider, ok := rs.getProvider(); ok {
 		if rs.isSrc {

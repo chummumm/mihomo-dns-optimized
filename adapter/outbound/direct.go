@@ -8,6 +8,7 @@ import (
 	"github.com/metacubex/mihomo/component/loopback"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
+	icontext "github.com/metacubex/mihomo/context"
 )
 
 type Direct struct {
@@ -22,6 +23,7 @@ type DirectOption struct {
 
 // DialContext implements C.ProxyAdapter
 func (d *Direct) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
+	ctx = icontext.WithDNSFixedOutbound(ctx, d)
 	if err := d.loopBack.CheckConn(metadata); err != nil {
 		return nil, err
 	}
@@ -50,6 +52,7 @@ func (d *Direct) ListenPacketContext(ctx context.Context, metadata *C.Metadata) 
 }
 
 func (d *Direct) ResolveUDP(ctx context.Context, metadata *C.Metadata) error {
+	ctx = icontext.WithDNSFixedOutbound(ctx, d)
 	if (!metadata.Resolved() || resolver.DirectHostResolver != resolver.DefaultResolver) && metadata.Host != "" {
 		ip, err := resolveIPWithResolver(ctx, metadata.Host, d.prefer, resolver.DirectHostResolver)
 		if err != nil {

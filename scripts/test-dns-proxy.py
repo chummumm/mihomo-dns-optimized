@@ -10,6 +10,7 @@ import contextlib
 import ipaddress
 import json
 import pathlib
+import os
 import socket
 import socketserver
 import struct
@@ -18,6 +19,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+import urllib.error
 
 
 def read_exact(conn, size):
@@ -31,12 +33,18 @@ def read_exact(conn, size):
 
 
 def encode_address(host, port):
-    addr = ipaddress.ip_address(host)
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        encoded = host.encode("ascii")
+        return b"\x03" + bytes([len(encoded)]) + encoded + struct.pack("!H", port)
     return bytes([1 if addr.version == 4 else 4]) + addr.packed + struct.pack("!H", port)
 
 
 def read_address(conn):
     kind = read_exact(conn, 1)[0]
+    if kind == 3:
+        return read_exact(conn, read_exact(conn, 1)[0]).decode("ascii"), struct.unpack("!H", read_exact(conn, 2))[0]
     if kind not in (1, 4):
         raise AssertionError("expected a literal resolver IP")
     host = str(ipaddress.ip_address(read_exact(conn, 4 if kind == 1 else 16)))
@@ -46,6 +54,11 @@ def read_address(conn):
 def decode_packet(packet):
     assert packet[:3] == b"\x00\x00\x00", "invalid SOCKS5 UDP envelope"
     kind = packet[3]
+    if kind == 3:
+        size = packet[4]
+        host = packet[5 : 5 + size].decode("ascii")
+        port = struct.unpack("!H", packet[5 + size : 7 + size])[0]
+        return (host, port), packet[7 + size :]
     assert kind in (1, 4)
     size = 4 if kind == 1 else 16
     host = str(ipaddress.ip_address(packet[4 : 4 + size]))
@@ -109,6 +122,7 @@ class MockSOCKS(socketserver.ThreadingTCPServer):
     def __init__(self, answer, records, lock):
         self.answer, self.records, self.record_lock = answer, records, lock
         self.connections = 0
+        self.raw_records = []
         self.held_queries = {}
         super().__init__(("127.0.0.1", 0), MockHandler)
 
@@ -127,6 +141,7 @@ class MockSOCKS(socketserver.ThreadingTCPServer):
 
     def respond(self, wire, target, network):
         assert target[1] == 53, "non-DNS destination reached outbound"
+        ipaddress.ip_address(target[0])  # The resolver hostname must be bootstrapped before DNS routing.
         name = question_name(wire)
         with self.record_lock:
             self.records.append((self.answer, name, target, network))
@@ -139,6 +154,23 @@ class MockSOCKS(socketserver.ThreadingTCPServer):
         if name == "truncated.example":
             return struct.pack("!6H", struct.unpack("!H", wire[:2])[0], 0x8380, 1, 0, 0, 0) + wire[12:]
         return make_answer(wire, self.answer)
+
+    def respond_or_echo(self, wire, target, network):
+        ordinary = False
+        if target[1] == 53 and len(wire) >= 17:
+            _, flags, questions, answers, authority, additional = struct.unpack("!6H", wire[:12])
+            try:
+                name = question_name(wire)
+                ordinary = (flags & 0xFA0F == 0 and questions == 1 and
+                            answers == authority == additional == 0 and
+                            len(question(name)) == len(wire))
+            except (IndexError, UnicodeDecodeError, ValueError):
+                pass
+        if ordinary:
+            return self.respond(wire, target, network)
+        with self.record_lock:
+            self.raw_records.append((target, network, wire))
+        return wire
 
 
 class MockHandler(socketserver.BaseRequestHandler):
@@ -157,25 +189,30 @@ class MockHandler(socketserver.BaseRequestHandler):
             target = read_address(conn)
             if command == 1:
                 conn.sendall(b"\x05\x00\x00" + encode_address("127.0.0.1", 0))
-                wire = read_frame(conn)
-                conn.sendall(frame(self.server.respond(wire, target, "tcp")))
+                while True:
+                    if target[1] == 53:
+                        wire = read_frame(conn)
+                        conn.sendall(frame(self.server.respond_or_echo(wire, target, "tcp")))
+                    else:
+                        wire = conn.recv(65535)
+                        if not wire:
+                            return
+                        conn.sendall(self.server.respond_or_echo(wire, target, "tcp"))
             elif command == 3:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
                     udp.bind(("127.0.0.1", 0))
                     udp.settimeout(8)
                     conn.sendall(b"\x05\x00\x00" + encode_address(*udp.getsockname()))
-                    packet, peer = udp.recvfrom(65535)
-                    target, wire = decode_packet(packet)
-                    response = self.server.respond(wire, target, "udp")
-                    if question_name(wire) == "retry.example":
-                        wrong_id = struct.pack("!H", (struct.unpack("!H", wire[:2])[0] + 1) % 65536) + response[2:]
-                        wrong_question = make_answer(question("mismatch.example", struct.unpack("!H", wire[:2])[0]), self.server.answer)
-                        for unrelated in (wrong_id, wrong_question):
-                            udp.sendto(b"\x00\x00\x00" + encode_address(*target) + unrelated, peer)
-                    udp.sendto(b"\x00\x00\x00" + encode_address(*target) + response, peer)
-                    with contextlib.suppress(EOFError, OSError):
-                        while conn.recv(1024):
-                            pass
+                    while True:
+                        packet, peer = udp.recvfrom(65535)
+                        target, wire = decode_packet(packet)
+                        response = self.server.respond_or_echo(wire, target, "udp")
+                        if response != wire and question_name(wire) == "retry.example":
+                            wrong_id = struct.pack("!H", (struct.unpack("!H", wire[:2])[0] + 1) % 65536) + response[2:]
+                            wrong_question = make_answer(question("mismatch.example", struct.unpack("!H", wire[:2])[0]), self.server.answer)
+                            for unrelated in (wrong_id, wrong_question):
+                                udp.sendto(b"\x00\x00\x00" + encode_address(*target) + unrelated, peer)
+                        udp.sendto(b"\x00\x00\x00" + encode_address(*target) + response, peer)
             else:
                 raise AssertionError("unexpected SOCKS command")
         except (EOFError, OSError):
@@ -237,20 +274,14 @@ def api_request(port, path="/configs", body=None, method="GET"):
         return json.loads(payload) if payload else None
 
 
-def expect_port_closed(port):
-    try:
-        with connect(port):
-            raise AssertionError(f"disabled DNS proxy still accepts TCP on {port}")
-    except ConnectionRefusedError:
-        pass
-
-
 def wait_dns_connections(api_port, host=None, minimum_upload_total=None):
     deadline = time.monotonic() + 2
     while True:
         snapshot = api_request(api_port, "/connections")
         entries = [entry for entry in snapshot.get("connections") or []
-                   if entry["metadata"].get("inboundName") == "DEFAULT-DNS-PROXY"]
+                   if entry["metadata"].get("inboundName") in ("DEFAULT-MIXED", "DEFAULT-SOCKS")
+                   and int(entry["metadata"].get("destinationPort", 0)) == 53
+                   and entry["metadata"].get("host")]
         if host is None and not entries:
             return snapshot, None
         if host is not None:
@@ -394,25 +425,130 @@ def check_rule_control_actions(dns_port, resolver, expected_answer):
     print("PASS rule controls: real round-robin PASS cursor unchanged; TCP/UDP PASS and SUB-RULE PASS-RULE continue past UDP-disabled control groups")
 
 
+def check_builtin_dns(config, api_port, upstream_a, upstream_b):
+    dns_port = unused_port()
+    builtin_config = config.replace("  enable: false\n", f"""  enable: true
+  listen: 127.0.0.1:{dns_port}
+  enhanced-mode: redir-host
+  use-hosts: false
+  respect-rules: false
+  nameserver: [203.0.113.53]
+  # This unavailable old policy must be inactive when the switch is enabled.
+  nameserver-policy:
+    'second.example': [127.0.0.1:9]
+""")
+    builtin_config = builtin_config.replace("  - DOMAIN,first.example,A\n", f"""  - AND,((DOMAIN,builtin-udp.example),(IN-NAME,DNS),(IN-PORT,{dns_port}),(SRC-IP-CIDR,127.0.0.1/32),(DST-PORT,53),(NETWORK,udp)),B
+  - AND,((DOMAIN,builtin-tcp.example),(IN-NAME,DNS),(IN-PORT,{dns_port}),(SRC-IP-CIDR,127.0.0.1/32),(DST-PORT,53),(NETWORK,tcp)),B
+  - DOMAIN,first.example,A
+""")
+    api_request(api_port, "/configs", {"payload": builtin_config}, "PUT")
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            with connect(dns_port):
+                break
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise AssertionError("built-in DNS server failed to start")
+            time.sleep(0.05)
+
+    with connect(dns_port) as tcp:
+        for index, (name, answer) in enumerate((("first.example", upstream_a.answer),
+                                               ("second.example", upstream_b.answer),
+                                               ("builtin-tcp.example", upstream_b.answer))):
+            query = question(name, 501 + index)
+            tcp.sendall(frame(query))
+            check_answer(read_frame(tcp), query, answer)
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+        udp.bind(("127.0.0.1", 0))
+        udp.settimeout(3)
+
+        def exchange(query):
+            udp.sendto(query, ("127.0.0.1", dns_port))
+            return udp.recvfrom(65535)[0]
+
+        for index, (name, answer) in enumerate((("first.example", upstream_a.answer),
+                                               ("second.example", upstream_b.answer),
+                                               ("builtin-udp.example", upstream_b.answer))):
+            query = question(name, 511 + index)
+            check_answer(exchange(query), query, answer)
+
+        # Keep the same source socket so this is a real cache-key collision if
+        # the selected leaf is missing from the resolver's route scope.
+        for index, upstream in enumerate((upstream_a, upstream_b, upstream_b)):
+            api_request(api_port, "/proxies/Chosen", {"name": "A" if upstream is upstream_a else "B"}, "PUT")
+            query = question("selector.example", 520 + index)
+            check_answer(exchange(query), query, upstream.answer)
+
+        query = question("blocked.example", 530)
+        response = exchange(query)
+        assert response[:2] == query[:2] and response[3] & 15 == 5
+        udp.settimeout(0.4)
+        udp.sendto(question("drop.example", 531), ("127.0.0.1", dns_port))
+        try:
+            udp.recvfrom(65535)
+            raise AssertionError("built-in REJECT-DROP replied instead of dropping")
+        except socket.timeout:
+            pass
+        udp.settimeout(3)
+
+        with upstream_b.hold("visible.example", "udp") as gate:
+            query = question("visible.example", 540)
+            udp.sendto(query, ("127.0.0.1", dns_port))
+            deadline = time.monotonic() + 3
+            while True:
+                matches = [item for item in (api_request(api_port, "/connections").get("connections") or [])
+                           if item["metadata"].get("inboundName") == "DNS" and
+                           item["metadata"].get("host") == "visible.example"]
+                if matches:
+                    break
+                if time.monotonic() >= deadline:
+                    raise AssertionError("built-in DNS query missing from dashboard")
+                time.sleep(0.03)
+            metadata = matches[0]["metadata"]
+            assert int(metadata["sourcePort"]) == udp.getsockname()[1]
+            assert int(metadata["inboundPort"]) == dns_port
+            assert int(metadata["destinationPort"]) == 53 and metadata["destinationIP"] == "203.0.113.53"
+            assert matches[0]["chains"][:3] == ["B", "Chosen", "DNSOuter"]
+            gate.set()
+            check_answer(udp.recvfrom(65535)[0], query, upstream_b.answer)
+    print("PASS built-in DNS TCP/UDP: QNAME routing, real IN/SRC/transport metadata, disabled nameserver-policy, selector-aware cache/ID, REJECT/DROP and dashboard")
+
+
 def run(binary):
     records, record_lock = [], threading.Lock()
     upstream_a = MockSOCKS("198.51.100.11", records, record_lock)
     upstream_b = MockSOCKS("198.51.100.22", records, record_lock)
     for upstream in (upstream_a, upstream_b):
         threading.Thread(target=upstream.serve_forever, daemon=True).start()
-    dns_port, api_port, mixed_port = unused_port(), unused_port(), unused_port()
+    mixed_port, api_port, fixed_port, scoped_port = [unused_port() for _ in range(4)]
     resolver = ("203.0.113.53", 53)
     resolver_v6 = ("2001:db8::53", 53)
+    process_name = pathlib.Path(os.readlink('/proc/self/exe')).name
     config = f"""mode: rule
 log-level: debug
 external-controller: 127.0.0.1:{api_port}
 mixed-port: {mixed_port}
-dns-proxy-port: {dns_port}
+dns-rule-routing: true
 allow-lan: false
-# Like mixed-port, allow-lan: false overrides this non-local bind address.
 bind-address: 192.0.2.1
+find-process-mode: strict
+hosts:
+  resolver.bootstrap.test: 203.0.113.53
 dns:
   enable: false
+listeners:
+  - name: FixedDNS
+    type: mixed
+    listen: 127.0.0.1
+    port: {fixed_port}
+    proxy: B
+  - name: ScopedDNS
+    type: mixed
+    listen: 127.0.0.1
+    port: {scoped_port}
+    rule: ScopedRules
 proxies:
   - name: A
     type: socks5
@@ -425,6 +561,9 @@ proxies:
     port: {upstream_b.server_address[1]}
     udp: true
 proxy-groups:
+  - name: GLOBAL
+    type: select
+    proxies: [A, B]
   - name: Chosen
     type: select
     proxies: [A, B]
@@ -434,8 +573,6 @@ proxy-groups:
   - name: PassRoundRobin
     type: load-balance
     strategy: round-robin
-    # Whitespace is skipped by the upstream health checker, keeping this
-    # fixture offline and both round-robin candidates in their initial state.
     url: " "
     disable-udp: true
     proxies: [PASS, A]
@@ -447,7 +584,18 @@ sub-rules:
   DNSControl:
     - MATCH,PassRuleGroup
     - MATCH,B
+  ScopedRules:
+    - MATCH,B
 rules:
+  # These rules must NOT use the resolver IP as the queried website IP.
+  - IP-CIDR,203.0.113.53/32,A,no-resolve
+  - IP-CIDR6,2001:db8::53/128,A,no-resolve
+  - NOT,((IP-CIDR,10.0.0.0/8)),A
+  # Available DNS connection attributes remain usable in the normal order.
+  - AND,((DOMAIN,inbound.example),(IN-NAME,DEFAULT-MIXED)),B
+  - AND,((DOMAIN,source.example),(SRC-IP-CIDR,127.0.0.1/32)),B
+  - AND,((DOMAIN,transport.example),(DST-PORT,53),(NETWORK,tcp)),B
+  - AND,((DOMAIN,process.example),(PROCESS-NAME,{process_name})),B
   - DOMAIN,pass-control.example,PassRoundRobin
   - DOMAIN,pass-control.example,B
   - SUB-RULE,(DOMAIN,sub-control.example),DNSControl
@@ -460,35 +608,43 @@ rules:
   - DOMAIN,drop.example,REJECT-DROP
   - MATCH,A
 """
+
+    def tcp_query(port, query, expected, target=resolver):
+        conn, reply, _ = socks_request(port, target)
+        with conn:
+            assert reply == 0
+            conn.sendall(frame(query))
+            check_answer(read_frame(conn), query, expected)
+
     try:
-        with tempfile.TemporaryDirectory(prefix="dns-proxy-e2e-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="dns-rule-routing-e2e-") as tmp:
             config_dir = pathlib.Path(tmp)
             config_file = config_dir / "config.yaml"
             config_file.write_text(config, encoding="utf-8")
-            subprocess.run([str(binary), "-t", "-d", str(config_dir), "-f", str(config_file)], check=True, timeout=30, capture_output=True)
+            subprocess.run([str(binary), "-t", "-d", str(config_dir), "-f", str(config_file)],
+                           check=True, timeout=30, capture_output=True)
             with (config_dir / "mihomo.log").open("w+") as log:
-                proc = subprocess.Popen([str(binary), "-d", str(config_dir), "-f", str(config_file)], stdout=log, stderr=subprocess.STDOUT)
+                proc = subprocess.Popen([str(binary), "-d", str(config_dir), "-f", str(config_file)],
+                                        stdout=log, stderr=subprocess.STDOUT)
                 try:
                     deadline = time.monotonic() + 15
                     while True:
                         if proc.poll() is not None:
                             raise AssertionError("binary exited during startup")
                         try:
-                            with connect(dns_port):
+                            general = api_request(api_port)
+                            with connect(mixed_port):
                                 break
-                        except OSError:
+                        except (OSError, urllib.error.URLError):
                             if time.monotonic() >= deadline:
                                 raise AssertionError("listener failed to start")
                             time.sleep(0.05)
-
-                    general = api_request(api_port)
-                    assert general["dns-proxy-port"] == dns_port
+                    assert general["dns-rule-routing"] is True
+                    assert "dns-proxy-port" not in general
                     assert general["mixed-port"] == mixed_port
-                    with connect(mixed_port):
-                        pass
 
                     q1, q2 = question("first.example", 101), question("second.example", 102)
-                    conn, status = http_request(dns_port, resolver, frame(q1))
+                    conn, status = http_request(mixed_port, resolver, frame(q1))
                     with conn:
                         assert status == 200
                         check_answer(read_frame(conn), q1, upstream_a.answer)
@@ -500,189 +656,159 @@ rules:
                         api_request(api_port, "/proxies/Chosen", {"name": "B"}, "PUT")
                         conn.sendall(frame(chosen))
                         check_answer(read_frame(conn), chosen, upstream_b.answer)
-                    print("PASS HTTP CONNECT: pipelined first frame, per-question routes, live selector change")
+                    print("PASS HTTP CONNECT on original mixed: pipelined first frame, per-query routes and live selector change")
 
-                    conn, reply, _ = socks_request(dns_port, resolver_v6)
+                    conn, reply, _ = socks_request(mixed_port, resolver_v6)
                     with conn:
                         assert reply == 0
                         for query, expected in ((q1, upstream_a.answer), (q2, upstream_b.answer)):
                             conn.sendall(frame(query))
                             check_answer(read_frame(conn), query, expected)
-                    print("PASS SOCKS5 CONNECT: persistent TCP and unchanged IPv6 resolver target")
-
                     for use_4a, target in ((False, resolver), (True, resolver), (True, resolver_v6)):
-                        conn, reply = socks4_request(dns_port, target, use_4a)
+                        conn, reply = socks4_request(mixed_port, target, use_4a)
                         with conn:
-                            assert reply == 90, "SOCKS4/4a DNS CONNECT rejected"
+                            assert reply == 90
                             for query, expected in ((q1, upstream_a.answer), (q2, upstream_b.answer)):
                                 conn.sendall(frame(query))
                                 check_answer(read_frame(conn), query, expected)
-                    print("PASS SOCKS4/4a: persistent TCP, per-question routes, literal IPv4/IPv6 resolver targets")
+                    tcp_query(mixed_port, q2, upstream_b.answer, ("resolver.bootstrap.test", 53))
+                    print("PASS SOCKS4/4a/5 TCP: persistent per-query routes, IPv4/IPv6 and independently bootstrapped resolver hostname")
 
-                    # SmartDNS sends an unspecified client IP with the resolver
-                    # port before binding its own ephemeral UDP source port.
-                    conn, reply, relay = socks_request(dns_port, ("0.0.0.0", 53), command=3)
+                    for name in ("inbound.example", "source.example", "transport.example"):
+                        tcp_query(mixed_port, question(name), upstream_b.answer)
+                    process_query = question("process.example")
+                    conn, reply, _ = socks_request(mixed_port, resolver)
+                    with conn:
+                        assert reply == 0
+                        conn.sendall(frame(process_query))
+                        process_response = read_frame(conn)
+                    if process_response[-4:] == ipaddress.ip_address(upstream_b.answer).packed:
+                        check_answer(process_response, process_query, upstream_b.answer)
+                        print("PASS original PROCESS-NAME lookup: real client process matched")
+                    else:
+                        # Some hosted containers deny NETLINK_SOCK_DIAG. Keep
+                        # the upstream fallback semantics; do not hide any
+                        # other lookup failure or accept an arbitrary route.
+                        log.flush()
+                        diagnostic = (config_dir / "mihomo.log").read_text()
+                        assert "[Process] find process error for process.example: socket: operation not permitted" in diagnostic, diagnostic
+                        check_answer(process_response, process_query, upstream_a.answer)
+                        print("SKIP native process identification: environment denies diagnostic socket; upstream no-process fallback verified (rule metadata is covered by Go tests)")
+                    tcp_query(fixed_port, q1, upstream_b.answer)
+                    tcp_query(scoped_port, q1, upstream_b.answer)
+                    print("PASS original metadata/rules: IN-NAME, source, TCP/53, fixed outbound and inbound sub-rule")
+
+                    conn, reply, relay = socks_request(mixed_port, ("0.0.0.0", 53), command=3)
                     with conn, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
                         assert reply == 0
                         udp.bind(("127.0.0.1", 0))
                         udp.settimeout(3)
-                        # A malformed first DNS packet from another source port
-                        # must neither dial upstream nor pin this association.
-                        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as noise:
-                            noise.bind(("127.0.0.1", 0))
-                            noise.settimeout(0.2)
-                            noise.sendto(b"\x00\x00\x00" + encode_address(*resolver) + b"\x00" * 12, relay)
-                            try:
-                                noise.recvfrom(65535)
-                                raise AssertionError("malformed first DNS packet received a reply")
-                            except socket.timeout:
-                                pass
-                        for query, expected, target in ((q1, upstream_a.answer, resolver), (q2, upstream_b.answer, resolver), (q2, upstream_b.answer, resolver_v6)):
+                        for query, expected, target in ((q1, upstream_a.answer, resolver),
+                                                        (q2, upstream_b.answer, resolver),
+                                                        (q2, upstream_b.answer, resolver_v6)):
                             udp.sendto(b"\x00\x00\x00" + encode_address(*target) + query, relay)
-                            packet, _ = udp.recvfrom(65535)
-                            original_target, answer = decode_packet(packet)
-                            assert original_target == target, "resolver destination was changed"
-                            check_answer(answer, query, expected)
-                        with record_lock:
-                            before = len(records)
-                            connections_before = upstream_a.connections + upstream_b.connections
-                        udp.settimeout(0.2)
-                        for packet in (
-                            b"\x00\x00\x00" + encode_address(resolver[0], 443) + q1,
-                            b"\x00\x00\x01" + encode_address(*resolver) + q1,
-                            b"\x00\x01\x00" + encode_address(*resolver) + q1,
-                            b"\x00\x00\x00\x04\x20",  # Truncated IPv6 target.
-                            b"\x00\x00\x00" + encode_address(*resolver) + b"\x00" * 12,
-                            b"\x00\x00\x00" + encode_address(*resolver) + question("drop.example"),
-                            *(b"\x00\x00\x00" + encode_address(*resolver) + invalid for invalid in malformed_queries(q1)),
-                        ):
-                            udp.sendto(packet, relay)
-                            try:
-                                udp.recvfrom(65535)
-                                raise AssertionError("forbidden UDP packet received a reply")
-                            except socket.timeout:
-                                pass
-                        with record_lock:
-                            assert len(records) == before, "forbidden UDP packet reached an outbound"
-                            assert upstream_a.connections + upstream_b.connections == connections_before, "forbidden UDP packet dialed an outbound"
+                            target_back, response = decode_packet(udp.recvfrom(65535)[0])
+                            assert target_back == target
+                            check_answer(response, query, expected)
                         blocked = question("blocked.example")
-                        udp.settimeout(3)
                         udp.sendto(b"\x00\x00\x00" + encode_address(*resolver) + blocked, relay)
                         _, response = decode_packet(udp.recvfrom(65535)[0])
-                        assert response[3] & 15 == 5, "REJECT did not return DNS REFUSED"
-                    print("PASS SOCKS5 UDP: SmartDNS ASSOCIATE, valid-first-packet source pinning, per-datagram routes, IPv4/IPv6, drop/REFUSED, strict DNS and envelope validation")
+                        assert response[3] & 15 == 5
+                        udp.settimeout(0.25)
+                        udp.sendto(b"\x00\x00\x00" + encode_address(*resolver) + question("drop.example"), relay)
+                        try:
+                            udp.recvfrom(65535)
+                            raise AssertionError("REJECT-DROP produced a response")
+                        except socket.timeout:
+                            pass
+                    print("PASS SOCKS5 UDP association: independent queries, IPv4/IPv6, REFUSED and silent REJECT-DROP")
 
                     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
                         udp.bind(("127.0.0.1", 0))
                         udp.settimeout(3)
-                        for query, expected, target in ((q1, upstream_a.answer, resolver), (q2, upstream_b.answer, resolver_v6)):
-                            udp.sendto(b"\x00\x00\x00" + encode_address(*target) + query, ("127.0.0.1", dns_port))
+                        for query, expected, target in ((q1, upstream_a.answer, resolver),
+                                                        (q2, upstream_b.answer, resolver_v6)):
+                            udp.sendto(b"\x00\x00\x00" + encode_address(*target) + query, ("127.0.0.1", mixed_port))
                             packet, source = udp.recvfrom(65535)
-                            original_target, response = decode_packet(packet)
-                            assert source[1] == dns_port, "fixed UDP entry did not reply from configured port"
-                            assert original_target == target
+                            target_back, response = decode_packet(packet)
+                            assert source[1] == mixed_port and target_back == target
                             check_answer(response, query, expected)
-                        with record_lock:
-                            connections_before = upstream_a.connections + upstream_b.connections
-                        udp.settimeout(0.2)
-                        for packet in (
-                            b"\x00\x00\x00" + encode_address(resolver[0], 22) + q1,
-                            b"\x00\x00\x00" + encode_address(*resolver) + b"\x00" * 12,
-                            q1,  # Bare DNS is not SOCKS5 UDP, even on this port.
-                        ):
-                            udp.sendto(packet, ("127.0.0.1", dns_port))
-                            try:
-                                udp.recvfrom(65535)
-                                raise AssertionError("forbidden fixed-port UDP packet received a reply")
-                            except socket.timeout:
-                                pass
-                        with record_lock:
-                            assert upstream_a.connections + upstream_b.connections == connections_before, "forbidden fixed-port UDP dialed an outbound"
-                    print("PASS same-port SOCKS5 UDP: independent routes, unchanged targets, non-53/malformed/bare DNS discarded without dialing")
+                        # The same public port remains a normal UDP proxy.
+                        raw = b"ordinary-udp-payload"
+                        target = (resolver[0], 443)
+                        udp.sendto(b"\x00\x00\x00" + encode_address(*target) + raw, ("127.0.0.1", mixed_port))
+                        target_back, response = decode_packet(udp.recvfrom(65535)[0])
+                        assert target_back == target and response == raw
+                    print("PASS fixed mixed UDP: query routing and unchanged non-53 forwarding")
 
-                    with record_lock:
-                        before = len(records)
-                        connections_before = upstream_a.connections + upstream_b.connections
-                    for forbidden_port in (22, 443, 853):
-                        target = (resolver[0], forbidden_port)
-                        conn, status = http_request(dns_port, target)
-                        with conn:
-                            assert status == 403
-                        conn, reply, _ = socks_request(dns_port, target)
-                        with conn:
-                            assert reply == 2, "SOCKS5 non-53 CONNECT accepted"
-                        for use_4a in (False, True):
-                            conn, reply = socks4_request(dns_port, target, use_4a)
-                            with conn:
-                                assert reply == 91, "SOCKS4/4a non-53 CONNECT accepted"
-                    with connect(dns_port) as conn:
-                        conn.sendall(b"GET http://example.invalid/ HTTP/1.1\r\nHost: example.invalid\r\n\r\n")
-                        assert b" 405 " in conn.recv(1024)
-                    # A successful CONNECT to port 53 is not an opaque tunnel.
-                    # Non-DNS bytes must close it before an upstream connection.
+                    # Normal mixed protocols keep their original non-DNS use.
+                    raw = b"ordinary-tcp-payload"
                     for protocol in ("http", "socks5", "socks4", "socks4a"):
-                        for invalid in malformed_queries(q1):
-                            if protocol == "http":
-                                conn, reply = http_request(dns_port, resolver)
-                                assert reply == 200
-                            elif protocol == "socks5":
-                                conn, reply, _ = socks_request(dns_port, resolver)
-                                assert reply == 0
-                            else:
-                                conn, reply = socks4_request(dns_port, resolver, protocol == "socks4a")
-                                assert reply == 90
-                            with conn:
-                                conn.sendall(frame(invalid))
-                                assert conn.recv(1) == b"", f"{protocol} forwarded malformed DNS traffic on port 53"
-                    with connect(dns_port) as conn:
-                        conn.sendall(b"\x04\x01\x00\x35\x00\x00\x00\x01\x00\x00")
-                        assert read_exact(conn, 8)[1] == 91, "empty SOCKS4a hostname was accepted"
-                    with record_lock:
-                        assert len(records) == before, "forbidden request reached an outbound"
-                        assert upstream_a.connections + upstream_b.connections == connections_before, "forbidden TCP request dialed an outbound"
-                        assert all(target in (resolver, resolver_v6) for _, _, target, _ in records)
-                    print("PASS all TCP protocols: non-53 destinations and non-DNS payloads rejected before any outbound dial")
+                        target = (resolver[0], 443)
+                        if protocol == "http":
+                            conn, reply = http_request(mixed_port, target)
+                            assert reply == 200
+                        elif protocol == "socks5":
+                            conn, reply, _ = socks_request(mixed_port, target)
+                            assert reply == 0
+                        else:
+                            conn, reply = socks4_request(mixed_port, target, protocol == "socks4a")
+                            assert reply == 90
+                        with conn:
+                            conn.sendall(raw)
+                            assert read_exact(conn, len(raw)) == raw
+                        # A non-DNS first frame on 53 must be replayed exactly.
+                        conn, reply, _ = socks_request(mixed_port, resolver)
+                        invalid = malformed_queries(q1)[0 if protocol == "http" else 1]
+                        with conn:
+                            assert reply == 0
+                            conn.sendall(frame(invalid))
+                            assert read_frame(conn) == invalid
+                    print("PASS ordinary traffic: all mixed TCP protocols keep non-53 access; non-DNS first frame on 53 replays byte-for-byte")
 
-                    check_reply_compatibility(dns_port, resolver, upstream_a.answer)
-                    check_rule_control_actions(dns_port, resolver, upstream_b.answer)
-                    check_dashboard_connections(dns_port, api_port, resolver, upstream_b)
+                    check_reply_compatibility(mixed_port, resolver, upstream_a.answer)
+                    check_rule_control_actions(mixed_port, resolver, upstream_b.answer)
+                    check_dashboard_connections(mixed_port, api_port, resolver, upstream_b)
 
-                    # The new field follows the same live configuration paths as
-                    # mixed-port, and closing it also closes existing sessions.
-                    held, reply, _ = socks_request(dns_port, resolver)
+                    # GLOBAL bypasses QNAME, and changing mode also ends a
+                    # previously classified persistent connection on next query.
+                    held, reply, _ = socks_request(mixed_port, resolver)
                     assert reply == 0
-                    api_request(api_port, body={"dns-proxy-port": 0}, method="PATCH")
+                    held.sendall(frame(q2))
+                    check_answer(read_frame(held), q2, upstream_b.answer)
+                    api_request(api_port, body={"mode": "global"}, method="PATCH")
                     with held:
-                        assert held.recv(1) == b"", "disabled port left an active DNS connection open"
-                    expect_port_closed(dns_port)
-                    assert api_request(api_port)["dns-proxy-port"] == 0
-                    with connect(mixed_port):
-                        pass
+                        held.sendall(frame(q2))
+                        assert held.recv(1) == b"", "old DNS connection ignored Global mode"
+                    tcp_query(mixed_port, q2, upstream_a.answer)
+                    tcp_query(fixed_port, q1, upstream_b.answer)
+                    api_request(api_port, body={"mode": "rule"}, method="PATCH")
+                    tcp_query(mixed_port, q2, upstream_b.answer)
+                    print("PASS Global mode bypass, fixed outbound precedence and existing DNS TCP mode transition")
 
-                    moved_port = unused_port()
-                    api_request(api_port, body={"dns-proxy-port": moved_port}, method="PATCH")
-                    assert api_request(api_port)["dns-proxy-port"] == moved_port
-                    conn, reply, _ = socks_request(moved_port, resolver)
-                    with conn:
-                        assert reply == 0
-                        conn.sendall(frame(q2))
-                        check_answer(read_frame(conn), q2, upstream_b.answer)
-                    expect_port_closed(dns_port)
+                    # A scalar PATCH cannot leave resolver policy half changed.
+                    try:
+                        api_request(api_port, body={"dns-rule-routing": False, "mode": "global"}, method="PATCH")
+                        raise AssertionError("partial DNS switch PATCH was accepted")
+                    except urllib.error.HTTPError as error:
+                        assert error.code == 400
+                    assert api_request(api_port)["dns-rule-routing"] is True
+                    assert api_request(api_port)["mode"] == "rule"
 
-                    # A full forced reload exercises RawConfig -> General ->
-                    # executor, including a missing field disabling the port.
-                    without_dns_port = config.replace(f"dns-proxy-port: {dns_port}\n", "")
-                    api_request(api_port, "/configs?force=true", {"payload": without_dns_port}, "PUT")
-                    expect_port_closed(moved_port)
-                    assert api_request(api_port)["dns-proxy-port"] == 0
-                    api_request(api_port, "/configs?force=true", {"payload": config}, "PUT")
-                    assert api_request(api_port)["dns-proxy-port"] == dns_port
-                    conn, status = http_request(dns_port, resolver, frame(q1))
-                    with conn:
-                        assert status == 200
-                        check_answer(read_frame(conn), q1, upstream_a.answer)
-                    print("PASS top-level config: mixed coexists; GET/PATCH close, reopen and move; full reload handles omitted and configured ports")
-                    print(f"PASS actual binary end-to-end: {len(records)} independently routed DNS exchanges")
+                    disabled_config = config.replace("dns-rule-routing: true\n", "")
+                    api_request(api_port, "/configs", {"payload": disabled_config}, "PUT")
+                    assert api_request(api_port)["dns-rule-routing"] is False
+                    tcp_query(mixed_port, q2, upstream_a.answer)
+                    api_request(api_port, "/configs", {"payload": config}, "PUT")
+                    assert api_request(api_port)["dns-rule-routing"] is True
+                    tcp_query(mixed_port, q2, upstream_b.answer)
+                    print("PASS full reload toggles classifier while retaining the existing mixed port; unsafe scalar PATCH rejected atomically")
+                    check_builtin_dns(config, api_port, upstream_a, upstream_b)
+                    with record_lock:
+                        assert all(target[1] == 53 and target[0] in (resolver[0], resolver_v6[0])
+                                   for _, _, target, _ in records)
+                        exchange_count = len(records)
+                    print(f"PASS actual binary end-to-end: {exchange_count} DNS exchanges plus ordinary TCP/UDP forwarding")
                 except BaseException:
                     log.flush()
                     log.seek(0)

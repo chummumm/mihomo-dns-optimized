@@ -107,23 +107,10 @@ type User struct {
 
 // ServerHandshake fast-tracks SOCKS initialization to get target address to connect on server side.
 func ServerHandshake(rw net.Conn, authenticator auth.Authenticator) (addr Addr, command Command, user string, err error) {
-	return ServerHandshakeWithHandler(rw, authenticator, nil)
-}
-
-// ServerHandshakeWithHandler authenticates a SOCKS5 request, then optionally
-// validates it before sending a success reply. The handler returns the address
-// to advertise in the reply (for example, an association-specific UDP socket).
-// Returning a SOCKS Error rejects the request with that reply code.
-// A nil handler retains ServerHandshake's behavior.
-func ServerHandshakeWithHandler(rw net.Conn, authenticator auth.Authenticator, handler func(Addr, Command, string) (net.Addr, error)) (addr Addr, command Command, user string, err error) {
 	// Read RFC 1928 for request and reply structure and sizes.
 	buf := make([]byte, MaxAddrLen)
 	// read VER, NMETHODS, METHODS
 	if _, err = io.ReadFull(rw, buf[:2]); err != nil {
-		return
-	}
-	if handler != nil && buf[0] != Version {
-		err = errors.New("SOCKS version error")
 		return
 	}
 	nmethods := buf[1]
@@ -133,17 +120,6 @@ func ServerHandshakeWithHandler(rw net.Conn, authenticator auth.Authenticator, h
 
 	if nmethods == 1 && buf[0] == 0x02 /* will use password */ && authenticator == nil {
 		authenticator = auth.AlwaysValid
-	}
-	if handler != nil {
-		method := byte(0)
-		if authenticator != nil {
-			method = 2
-		}
-		if !bytes.Contains(buf[:nmethods], []byte{method}) {
-			_, _ = rw.Write([]byte{Version, 0xff})
-			err = ErrAuth
-			return
-		}
 	}
 
 	// write VER METHOD
@@ -155,11 +131,6 @@ func ServerHandshakeWithHandler(rw net.Conn, authenticator auth.Authenticator, h
 		// Get header
 		header := make([]byte, 2)
 		if _, err = io.ReadFull(rw, header); err != nil {
-			return
-		}
-		if handler != nil && header[0] != 1 {
-			_, _ = rw.Write([]byte{1, 1})
-			err = ErrAuth
 			return
 		}
 
@@ -212,11 +183,6 @@ func ServerHandshakeWithHandler(rw net.Conn, authenticator auth.Authenticator, h
 	if _, err = io.ReadFull(rw, buf[:3]); err != nil {
 		return
 	}
-	if handler != nil && (buf[0] != Version || buf[2] != 0) {
-		_, _ = rw.Write([]byte{Version, byte(ErrGeneralFailure), 0, AtypIPv4, 0, 0, 0, 0, 0, 0})
-		err = ErrGeneralFailure
-		return
-	}
 
 	command = buf[1]
 	addr, err = ReadAddr(rw, buf)
@@ -227,20 +193,7 @@ func ServerHandshakeWithHandler(rw net.Conn, authenticator auth.Authenticator, h
 	switch command {
 	case CmdConnect, CmdUDPAssociate:
 		// Acquire server listened address info
-		boundAddr := rw.LocalAddr()
-		if handler != nil {
-			boundAddr, err = handler(addr, command, user)
-			if err != nil {
-				code := ErrGeneralFailure
-				var socksErr Error
-				if errors.As(err, &socksErr) {
-					code = socksErr
-				}
-				_, _ = rw.Write([]byte{Version, byte(code), 0, AtypIPv4, 0, 0, 0, 0, 0, 0})
-				return
-			}
-		}
-		localAddr := ParseAddrToSocksAddr(boundAddr)
+		localAddr := ParseAddrToSocksAddr(rw.LocalAddr())
 		if localAddr == nil {
 			err = ErrAddressNotSupported
 		} else {
@@ -251,9 +204,6 @@ func ServerHandshakeWithHandler(rw net.Conn, authenticator auth.Authenticator, h
 		fallthrough
 	default:
 		err = ErrCommandNotSupported
-		if handler != nil {
-			_, _ = rw.Write([]byte{Version, byte(ErrCommandNotSupported), 0, AtypIPv4, 0, 0, 0, 0, 0, 0})
-		}
 	}
 
 	return

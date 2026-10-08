@@ -44,13 +44,6 @@ var (
 var subnet = netip.PrefixFrom(netip.IPv4Unspecified(), 24)
 
 func ServerHandshake(rw io.ReadWriter, authenticator auth.Authenticator) (addr string, command Command, user string, err error) {
-	return ServerHandshakeWithHandler(rw, authenticator, nil)
-}
-
-// ServerHandshakeWithHandler allows a restricted inbound to validate the
-// authenticated destination before a success reply. A nil handler preserves
-// ServerHandshake's behavior, including SOCKS4's USERID-only authentication.
-func ServerHandshakeWithHandler(rw io.ReadWriter, authenticator auth.Authenticator, handler func(string, Command, string) error) (addr string, command Command, user string, err error) {
 	var req [8]byte
 	if _, err = io.ReadFull(rw, req[:]); err != nil {
 		return
@@ -63,9 +56,6 @@ func ServerHandshakeWithHandler(rw io.ReadWriter, authenticator auth.Authenticat
 
 	if command = req[1]; command != CmdConnect {
 		err = errCommandNotSupported
-		if handler != nil {
-			_, _ = rw.Write([]byte{0, RequestRejected, 0, 0, 0, 0, 0, 0})
-		}
 		return
 	}
 
@@ -103,17 +93,6 @@ func ServerHandshakeWithHandler(rw io.ReadWriter, authenticator auth.Authenticat
 	// SOCKS4 only support USERID auth.
 	if authenticator == nil || authenticator.Verify(user, "") {
 		code = RequestGranted
-		if handler != nil {
-			// A SOCKS4a marker requires a nonempty host. Restricted inbounds
-			// must not mistake the marker address for the actual destination.
-			// Keep the original handshake's behavior when no handler is used.
-			if isReservedIP(dstIP) && host == "" {
-				err = ErrRequestRejected
-				code = RequestRejected
-			} else if err = handler(addr, command, user); err != nil {
-				code = RequestRejected
-			}
-		}
 	} else {
 		code = RequestIdentdMismatched
 		err = ErrRequestIdentdMismatched

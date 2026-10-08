@@ -11,12 +11,14 @@ case "${1:-test}" in
   test)
     python3 scripts/test-upstream-sync.py
     CGO_ENABLED=0 go test -tags with_gvisor -count=1 -timeout=5m \
-      ./component/dnsmessage/... ./listener/dnsproxy/... ./transport/socks4/... ./transport/socks5/... \
+      ./adapter ./component/dnsmessage/... ./component/resolver/... ./context/... ./dns/... ./listener/sing_tun/... ./transport/socks4/... ./transport/socks5/... \
       ./tunnel/... ./rules/logic/... ./rules/provider/... ./config/... \
       ./hub/route/... ./hub/executor/...
-    # Top-level port tests cover defaults, lifecycle, binding, and global options.
-    CGO_ENABLED=0 go test -tags with_gvisor -count=1 -timeout=5m \
-      ./listener -run DNSProxy
+    CGO_ENABLED=1 go test -race -tags with_gvisor -count=1 -timeout=5m \
+      ./adapter ./component/dnsmessage/... ./component/resolver/... ./context/... ./dns/... \
+      ./listener/sing_tun/... ./tunnel/... ./rules/logic/... ./rules/provider/... \
+      ./config/... ./hub/route/... ./hub/executor/... \
+      -run 'DNSRouting|DNSRuleRouting|DNSProxy|DNSDrop'
     ;;
   build)
     arch=${2:?architecture required: amd64 or arm64}

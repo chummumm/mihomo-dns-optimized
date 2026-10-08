@@ -15,6 +15,7 @@ import (
 	"github.com/metacubex/mihomo/common/xsync"
 	"github.com/metacubex/mihomo/component/ca"
 	C "github.com/metacubex/mihomo/constant"
+	icontext "github.com/metacubex/mihomo/context"
 	"github.com/metacubex/mihomo/log"
 
 	"github.com/metacubex/http"
@@ -54,12 +55,17 @@ func (p *Proxy) AliveForTestUrl(url string) bool {
 
 // DialContext implements C.ProxyAdapter
 func (p *Proxy) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
+	// A group calls its selected child's Proxy method. Updating at each
+	// layer pins any subsequent local target lookup to the actual adapter,
+	// without selecting a round-robin/load-balance group a second time.
+	ctx = icontext.WithDNSFixedOutbound(ctx, p.ProxyAdapter)
 	conn, err := p.ProxyAdapter.DialContext(ctx, metadata)
 	return conn, err
 }
 
 // ListenPacketContext implements C.ProxyAdapter
 func (p *Proxy) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (C.PacketConn, error) {
+	ctx = icontext.WithDNSFixedOutbound(ctx, p.ProxyAdapter)
 	pc, err := p.ProxyAdapter.ListenPacketContext(ctx, metadata)
 	return pc, err
 }

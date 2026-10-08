@@ -165,7 +165,7 @@ jobs:
               printf 'Source commit: `%s`\n\n' "$BUILD_SHA"
               printf 'Linux amd64 (GOAMD64=v1) and arm64; gVisor enabled; CGO disabled.\n\n'
               printf 'Uncompress the matching `.gz`, mark it executable, and follow `docs/dns-proxy.md`.\n'
-              printf 'DNS-specific ingress is opt-in. Existing listeners keep their upstream behavior.\n'
+              printf 'Enable top-level `dns-rule-routing: true` for QNAME routing of plain TCP/UDP DNS on port 53 through existing inbounds. The default is false; see the migration and scope notes.\n'
             } > "$RUNNER_TEMP/release-notes.txt"
             # Creating an older build must never move the repository's Latest link.
             gh release create "$RELEASE_TAG" \

@@ -34,30 +34,31 @@ func configRouter() http.Handler {
 }
 
 type configSchema struct {
-	Port              *int                     `json:"port"`
-	SocksPort         *int                     `json:"socks-port"`
-	RedirPort         *int                     `json:"redir-port"`
-	TProxyPort        *int                     `json:"tproxy-port"`
-	MixedPort         *int                     `json:"mixed-port"`
-	DNSProxyPort      *int                     `json:"dns-proxy-port"`
-	Tun               *tunSchema               `json:"tun"`
-	TuicServer        *tuicServerSchema        `json:"tuic-server"`
-	ShadowSocksConfig *string                  `json:"ss-config"`
-	VmessConfig       *string                  `json:"vmess-config"`
-	TcptunConfig      *string                  `json:"tcptun-config"`
-	UdptunConfig      *string                  `json:"udptun-config"`
-	AllowLan          *bool                    `json:"allow-lan"`
-	SkipAuthPrefixes  *[]netip.Prefix          `json:"skip-auth-prefixes"`
-	LanAllowedIPs     *[]netip.Prefix          `json:"lan-allowed-ips"`
-	LanDisAllowedIPs  *[]netip.Prefix          `json:"lan-disallowed-ips"`
-	BindAddress       *string                  `json:"bind-address"`
-	Mode              *tunnel.TunnelMode       `json:"mode"`
-	LogLevel          *log.LogLevel            `json:"log-level"`
-	IPv6              *bool                    `json:"ipv6"`
-	Sniffing          *bool                    `json:"sniffing"`
-	TcpConcurrent     *bool                    `json:"tcp-concurrent"`
-	FindProcessMode   *process.FindProcessMode `json:"find-process-mode"`
-	InterfaceName     *string                  `json:"interface-name"`
+	Port               *int                     `json:"port"`
+	SocksPort          *int                     `json:"socks-port"`
+	RedirPort          *int                     `json:"redir-port"`
+	TProxyPort         *int                     `json:"tproxy-port"`
+	MixedPort          *int                     `json:"mixed-port"`
+	DNSRuleRouting     *bool                    `json:"dns-rule-routing"`
+	LegacyDNSProxyPort *int                     `json:"dns-proxy-port"`
+	Tun                *tunSchema               `json:"tun"`
+	TuicServer         *tuicServerSchema        `json:"tuic-server"`
+	ShadowSocksConfig  *string                  `json:"ss-config"`
+	VmessConfig        *string                  `json:"vmess-config"`
+	TcptunConfig       *string                  `json:"tcptun-config"`
+	UdptunConfig       *string                  `json:"udptun-config"`
+	AllowLan           *bool                    `json:"allow-lan"`
+	SkipAuthPrefixes   *[]netip.Prefix          `json:"skip-auth-prefixes"`
+	LanAllowedIPs      *[]netip.Prefix          `json:"lan-allowed-ips"`
+	LanDisAllowedIPs   *[]netip.Prefix          `json:"lan-disallowed-ips"`
+	BindAddress        *string                  `json:"bind-address"`
+	Mode               *tunnel.TunnelMode       `json:"mode"`
+	LogLevel           *log.LogLevel            `json:"log-level"`
+	IPv6               *bool                    `json:"ipv6"`
+	Sniffing           *bool                    `json:"sniffing"`
+	TcpConcurrent      *bool                    `json:"tcp-concurrent"`
+	FindProcessMode    *process.FindProcessMode `json:"find-process-mode"`
+	InterfaceName      *string                  `json:"interface-name"`
 }
 
 type tunSchema struct {
@@ -335,6 +336,18 @@ func patchConfigs(w http.ResponseWriter, r *http.Request) {
 		render.JSON(w, r, ErrBadRequest)
 		return
 	}
+	// This switch also rebuilds resolver policies and bootstrap paths. A
+	// scalar PATCH must never leave the old DNS resolver running underneath.
+	if general.DNSRuleRouting != nil {
+		render.Status(r, http.StatusBadRequest)
+		render.JSON(w, r, newError("dns-rule-routing requires a full configuration reload using PUT /configs"))
+		return
+	}
+	if general.LegacyDNSProxyPort != nil {
+		render.Status(r, http.StatusBadRequest)
+		render.JSON(w, r, newError("dns-proxy-port has been removed; use dns-rule-routing with an existing inbound"))
+		return
+	}
 
 	if general.AllowLan != nil {
 		listener.SetAllowLan(*general.AllowLan)
@@ -375,7 +388,6 @@ func patchConfigs(w http.ResponseWriter, r *http.Request) {
 	listener.ReCreateRedir(pointerOrDefault(general.RedirPort, ports.RedirPort), tunnel.Tunnel)
 	listener.ReCreateTProxy(pointerOrDefault(general.TProxyPort, ports.TProxyPort), tunnel.Tunnel)
 	listener.ReCreateMixed(pointerOrDefault(general.MixedPort, ports.MixedPort), tunnel.Tunnel)
-	listener.ReCreateDNSProxy(pointerOrDefault(general.DNSProxyPort, ports.DNSProxyPort), tunnel.Tunnel)
 	listener.ReCreateTun(pointerOrDefaultTun(general.Tun, listener.LastTunConf), tunnel.Tunnel)
 	listener.ReCreateShadowSocks(pointerOrDefault(general.ShadowSocksConfig, ports.ShadowSocksConfig), tunnel.Tunnel)
 	listener.ReCreateVmess(pointerOrDefault(general.VmessConfig, ports.VmessConfig), tunnel.Tunnel)

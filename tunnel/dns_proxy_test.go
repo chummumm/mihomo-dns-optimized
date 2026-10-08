@@ -18,6 +18,7 @@ import (
 	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/component/geodata"
 	"github.com/metacubex/mihomo/component/geodata/router"
+	"github.com/metacubex/mihomo/component/process"
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
 	R "github.com/metacubex/mihomo/rules"
@@ -32,15 +33,19 @@ import (
 
 func dnsProxyTestState(t *testing.T) {
 	t.Helper()
-	oldRules, oldSubRules, oldProviders, oldProxies, oldMode := rules, subRules, ruleProviders, proxies, mode
+	oldRules, oldSubRules, oldProviders, oldProxies, oldMode := rules, subRules, ruleProviders, proxies, Mode()
+	oldProcessMode := FindProcessMode()
+	SetFindProcessMode(process.FindProcessOff)
 	rules, subRules, ruleProviders = nil, make(map[string][]C.Rule), make(map[string]P.RuleProvider)
 	proxies = make(map[string]C.Proxy)
 	for _, name := range []string{"DIRECT", "GLOBAL", "AWS", "DMIT", "Philippines", "wrong"} {
 		proxies[name] = newDNSProxyTestProxy(newDNSProxyTestBase(name, C.Direct, true))
 	}
-	mode = Rule
+	SetMode(Rule)
 	t.Cleanup(func() {
-		rules, subRules, ruleProviders, proxies, mode = oldRules, oldSubRules, oldProviders, oldProxies, oldMode
+		rules, subRules, ruleProviders, proxies = oldRules, oldSubRules, oldProviders, oldProxies
+		SetMode(oldMode)
+		SetFindProcessMode(oldProcessMode)
 	})
 }
 
@@ -92,15 +97,10 @@ func TestDNSProxyDomainRulesAndProviders(t *testing.T) {
 	dnsProxyTestState(t)
 	ruleProviders["domain"] = RP.NewInlineProvider("domain", P.Domain, []string{"+.provider.example"}, R.ParseRule)
 	ruleProviders["classical"] = RP.NewInlineProvider("classical", P.Classical, []string{
-		"IP-CIDR,8.8.8.8/32", "DST-PORT,53", "NETWORK,udp", "DOMAIN-SUFFIX,classical.example",
+		"IP-CIDR,8.8.8.8/32", "DOMAIN-SUFFIX,classical.example",
 	}, R.ParseRule)
 	for _, text := range []string{
 		"IP-CIDR,8.8.8.8/32,wrong",
-		"SRC-IP-CIDR,127.0.0.0/8,wrong",
-		"DST-PORT,53,wrong",
-		"NETWORK,udp,wrong",
-		"PROCESS-NAME,smartdns,wrong",
-		"IN-USER,smartdns,wrong",
 		"NOT,((IP-CIDR,10.0.0.0/8)),wrong",
 		"DOMAIN,api.anthropic.com,Philippines",
 		"DOMAIN-SUFFIX,claude.ai,Philippines",
@@ -138,17 +138,17 @@ func TestDNSProxyDomainRulesAndProviders(t *testing.T) {
 func TestDNSProxyLogicalUnknownIsNotFalse(t *testing.T) {
 	dnsProxyTestState(t)
 	ruleProviders["mixed"] = RP.NewInlineProvider("mixed", P.Classical, []string{
-		"IP-CIDR,10.0.0.0/8", "NOT,((DST-PORT,443))", "DOMAIN,listed.example",
+		"IP-CIDR,10.0.0.0/8", "NOT,((IP-CIDR,192.168.0.0/16))", "DOMAIN,listed.example",
 	}, R.ParseRule)
 	for _, test := range []struct {
 		text, host   string
 		known, match bool
 	}{
 		{"NOT,((IP-CIDR,10.0.0.0/8)),AWS", "a.example", false, false},
-		{"AND,((DOMAIN,a.example),(DST-PORT,443)),AWS", "a.example", false, false},
-		{"AND,((DOMAIN,a.example),(DST-PORT,443)),AWS", "b.example", true, false},
-		{"OR,((DOMAIN,a.example),(DST-PORT,443)),AWS", "a.example", true, true},
-		{"OR,((DOMAIN,a.example),(DST-PORT,443)),AWS", "b.example", false, false},
+		{"AND,((DOMAIN,a.example),(IP-CIDR,10.0.0.0/8)),AWS", "a.example", false, false},
+		{"AND,((DOMAIN,a.example),(IP-CIDR,10.0.0.0/8)),AWS", "b.example", true, false},
+		{"OR,((DOMAIN,a.example),(IP-CIDR,10.0.0.0/8)),AWS", "a.example", true, true},
+		{"OR,((DOMAIN,a.example),(IP-CIDR,10.0.0.0/8)),AWS", "b.example", false, false},
 		{"AND,((DOMAIN,a.example),(NOT,((DOMAIN,b.example)))),AWS", "a.example", true, true},
 		{"RULE-SET,mixed,AWS", "listed.example", true, true},
 		{"RULE-SET,mixed,AWS", "unlisted.example", false, false},
@@ -330,13 +330,13 @@ func TestDNSProxyModeAndNoUDPFallback(t *testing.T) {
 	dnsProxyTestState(t)
 	rules = []C.Rule{dnsProxyTestRule(t, "MATCH,AWS")}
 	for value, want := range map[TunnelMode]string{Direct: "DIRECT", Global: "GLOBAL", Rule: "AWS"} {
-		mode = value
+		SetMode(value)
 		route, err := selectDNSProxy(&C.Metadata{Host: "example.com", NetWork: C.UDP})
 		if err != nil || route.proxy.Name() != want {
 			t.Fatalf("%s: got %+v, %v; want %s", value, route, err, want)
 		}
 	}
-	mode = Rule
+	SetMode(Rule)
 	proxies["AWS"] = newDNSProxyTestProxy(newDNSProxyTestBase("AWS", C.Http, false))
 	if _, err := selectDNSProxy(&C.Metadata{Host: "example.com", NetWork: C.UDP}); err == nil {
 		t.Fatal("UDP-unsupported selected node must fail, not fall back to DIRECT")
@@ -436,8 +436,8 @@ func TestDNSProxyEachQuerySelectsLiveGroupButDialsOriginalResolver(t *testing.T)
 	var seen []string
 	group := &dnsProxyTestAdapter{dnsProxyTestBase: newDNSProxyTestBase("live", C.Selector, true)}
 	group.choose = func(metadata *C.Metadata, touch bool) C.Proxy {
-		if metadata.DstIP.IsValid() || metadata.DstPort != 0 || metadata.SrcIP.IsValid() || metadata.InUser != "" {
-			t.Errorf("resolver metadata leaked into group selection: %+v", metadata)
+		if metadata.DstIP.IsValid() || metadata.DstPort != 53 || metadata.SrcIP.String() != "127.0.0.1" || metadata.InUser != "smartdns" {
+			t.Errorf("group selection lost real source attributes or used the resolver as the website IP: %+v", metadata)
 		}
 		if touch {
 			seen = append(seen, metadata.Host)
@@ -514,13 +514,12 @@ func TestDNSProxyRejectsNonDNSAndWrongDestinations(t *testing.T) {
 		})
 	}
 	for name, change := range map[string]func(*C.Metadata){
-		"HTTPS":              func(m *C.Metadata) { m.DstPort = 443 },
-		"DoT":                func(m *C.Metadata) { m.DstPort = 853 },
-		"hostname bootstrap": func(m *C.Metadata) { m.Host = "dns.example.com"; m.DstIP = netip.Addr{} },
-		"multicast":          func(m *C.Metadata) { m.DstIP = netip.MustParseAddr("ff02::fb") },
-		"broadcast":          func(m *C.Metadata) { m.DstIP = netip.MustParseAddr("255.255.255.255") },
-		"unspecified":        func(m *C.Metadata) { m.DstIP = netip.IPv4Unspecified() },
-		"invalid network":    func(m *C.Metadata) { m.NetWork = C.InvalidNet },
+		"HTTPS":           func(m *C.Metadata) { m.DstPort = 443 },
+		"DoT":             func(m *C.Metadata) { m.DstPort = 853 },
+		"multicast":       func(m *C.Metadata) { m.DstIP = netip.MustParseAddr("ff02::fb") },
+		"broadcast":       func(m *C.Metadata) { m.DstIP = netip.MustParseAddr("255.255.255.255") },
+		"unspecified":     func(m *C.Metadata) { m.DstIP = netip.IPv4Unspecified() },
+		"invalid network": func(m *C.Metadata) { m.NetWork = C.InvalidNet },
 	} {
 		t.Run(name, func(t *testing.T) {
 			resolver := dnsProxyTestResolver(C.UDP)
@@ -762,7 +761,7 @@ func TestDNSProxyConnectionStatisticsAndPanelClose(t *testing.T) {
 				outer.provider = "policy-provider"
 				route := dnsProxyRoute{
 					proxy: newDNSProxyTestProxy(leaf), rule: RC.NewDomainSuffix("example", "policy"),
-					groups: []C.Proxy{newDNSProxyTestProxy(outer), newDNSProxyTestProxy(inner)},
+					groups: []C.ProxyAdapter{newDNSProxyTestProxy(outer), newDNSProxyTestProxy(inner)},
 				}
 				var dialMetadata *C.Metadata
 				var releaseResponse func()

@@ -1,217 +1,173 @@
-# DNS 专用混合代理端口
+# DNS 按查询域名分流
 
-这个入口让 SmartDNS 发出的普通 DNS 查询，按查询中的域名（QNAME）复用 Mihomo 已有的分流规则选择出口。配置仍然只维护原来的 `rules`、`sub-rules` 和 `rule-providers`，不需要生成配置，也不需要另一份按域名划分的 DNS 策略表。
-
-该功能独立于 Mihomo 内置 DNS 的增强模式，不要求 FakeIP。使用真实 IP 时，原有 `enhanced-mode: redir-host` 可以保留。
-
-## 1. Mihomo 只增加一个顶层端口
-
-在原有配置里增加 `dns-proxy-port`，它和原版 `mixed-port` 同级：
+通过一个顶层开关，让普通 DNS 查询复用已有的 `rules` / `rule-providers` 选择出口。无需新增专用端口、listener 类型或另一套 DNS 域名规则。
 
 ```yaml
 mixed-port: 7890
-dns-proxy-port: 7853
+mode: rule
+dns-rule-routing: true
 ```
 
-与 `mixed-port` 一样，配置非零端口即启用；设为 `0` 或省略即关闭。没有额外的 `enable`、TCP 或 UDP 开关，也不需要在 `listeners` 中声明新 `type`。上一版的 `listeners: type: dns-proxy` 配置已移除，请替换成这个顶层字段。
+`dns-rule-routing` 默认 `false`。可以把这一行加入现有配置，继续使用原有 mixed、SOCKS、HTTP、透明代理或 TUN 入口。外部 DNS 分类不依赖 `dns.enable`，也不依赖普通 sniffer。本功能不使用 FakeIP；启用内置 DNS 时使用 `redir-host`。同时启用内置 FakeIP 与此开关会在配置校验时报告错误。
 
-`7853` 是本地代理入口的端口，TCP 和 UDP 共用这个数字；**被代理的 DNS 服务器目标端口必须为 `53`**。入口不直接接受裸 UDP DNS，SmartDNS 必须通过 SOCKS5 或 HTTP CONNECT 连接它。SOCKS4/4a TCP、SOCKS5 TCP / UDP、HTTP CONNECT TCP 均默认支持。
+配套文件：
 
-| 配置项 | 行为 |
+- [Mihomo 最小配置](dns-proxy.example.yaml)
+- [SmartDNS 接入模板](smartdns-dns-proxy.conf)
+- [完整设计与验收约定](dns-rule-routing-design.md)
+- [实施与复查记录](dns-rule-routing-validation.md)
+- [云编译、下载与上游同步](upstream-sync.md)
+
+## 生效条件与普通流量
+
+| 条件 | 行为 |
 | --- | --- |
-| `dns-proxy-port` | 新增的顶层代理端口，与 `mixed-port` 采用相同的启用和关闭方式 |
-| `allow-lan` / `bind-address` | 复用全局设置；`allow-lan: false` 时仅监听 `127.0.0.1`，启用 LAN 后按 `bind-address` 绑定 |
-| `authentication` | 复用全局 `用户名:密码` 列表，与普通 mixed 共用 |
-| `skip-auth-prefixes` | 复用全局免认证来源网段 |
-| `lan-allowed-ips` / `lan-disallowed-ips` | 复用全局来源访问控制 |
-| `inbound-tfo` / `inbound-mptcp` | 复用全局入站套接字设置，与 mixed 一致 |
+| 开关关闭 | 全部沿用原有流程 |
+| 入站配置固定 `proxy:` | 保留指定出站，不运行新增的 QNAME 选路 |
+| Global / Direct 模式 | 保留原模式，不运行新增的 QNAME 选路 |
+| Rule 模式、没有固定出站、普通明文 TCP / UDP 53 查询 | 按每个 DNS Query 的 QNAME 选择出口 |
+| 入站配置 `rule:` 子规则 | 保留该规则入口，仍可逐查询选路 |
+| 目标端口不是 53 | 正常执行原有转发流程 |
+| 首份负载未识别为支持的普通 DNS | 原样回到原有转发流程 |
 
-需要认证时直接使用原有全局字段，例如：
+开关开启后，普通网页、SSH 等流量不会因为目标端口不是 53 而被丢弃。这也不是一个阻止 DoH / DoT / DoQ 的防火墙开关。
 
-```yaml
-authentication:
-  - "smartdns:replace-with-your-own-password"
-```
+TCP 在确认首帧为 DNS 后，会持续按 DNS 长度帧处理。后续畸形帧会结束该 DNS 连接，不会改成任意字节透传。模式或开关发生变化时，已经接管的 TCP 连接会在处理下一条查询时重新检查；不再符合条件就结束连接，让客户端重连后执行当前模式。未收到新数据的连接仍受空闲超时限制。
 
-不为这个入口另设 `users`、`rule` 或 `proxy`。它始终复用主分流规则。SOCKS4 的 USERID 认证方式也沿用上游语义；带密码的认证请使用 SOCKS5 或 HTTP CONNECT。
+## 一个 Query 如何使用已有规则
 
-控制 API 的 `GET /configs` 会返回 `dns-proxy-port`，`PATCH /configs` 支持修改、关闭和重新启用该端口。配置文件中的端口变更沿用 mixed 的重载语义：`PUT /configs?force=true` 会更新入站，非强制重载保留当前端口。修改共享的 `allow-lan` / `bind-address` 时，普通 mixed 和 DNS 专用端口都会跟随更新。
+分类发生在公共 TCP / UDP 转发链中，位于反向域名映射、普通嗅探和 UDP NAT 固定出口之前。不同代理协议解包后共用同一处逻辑，不需要分别配置协议开关。
 
-## 2. SmartDNS 指向这个入口
-
-SOCKS5 同时支持 UDP DNS 和 TCP DNS。选中的节点如果不支持 UDP，使用 `server-tcp`：
-
-```conf
-proxy-server socks5://127.0.0.1:7853 -name mihomo-dns
-
-server-tcp 1.1.1.1:53 -proxy mihomo-dns
-server-tcp 8.8.8.8:53 -proxy mihomo-dns
-```
-
-需要 UDP，且分流可能选中的出口都支持 UDP 时，可以使用：
-
-```conf
-server 1.1.1.1:53 -proxy mihomo-dns
-server 8.8.8.8:53 -proxy mihomo-dns
-```
-
-也可以使用 HTTP 代理，但它只承载 TCP DNS：
-
-```conf
-proxy-server http://127.0.0.1:7853 -name mihomo-dns-http
-server-tcp 1.1.1.1:53 -proxy mihomo-dns-http
-```
-
-有认证时，代理 URL 使用 `socks5://用户名:密码@127.0.0.1:7853` 或对应的 HTTP URL；特殊字符按 URL 规则转义。
-
-原来的 SmartDNS `6053`、`6553` 监听端口可以继续保留。本功能不依赖这两个端口的分组名称。需要由 Mihomo 按域名决定出口的上游，统一加上指向新入口的 `-proxy mihomo-dns`。
-
-从这条链路移除 `server-https` / `server-tls` / `server-quic` 等加密 DNS 上游。专用入口只处理发往 `IP:53` 的普通 DNS；把 DoH 改到端口 `53` 也不会被当成 DNS 转发。
-
-[SmartDNS 最小接入示例](smartdns-dns-proxy.conf) 保留了 `6053` 和 `6553` 两个本地监听端口。该示例只展示接入，不包含私人节点或账号。
-
-## 3. 分流规则保持原样
-
-例如已有一个名为 `菲律宾` 的策略组，规则仍然直接写在原来的列表里：
-
-```yaml
-rules:
-  - DOMAIN-SUFFIX,claude.ai,菲律宾
-  - DOMAIN-SUFFIX,anthropic.com,菲律宾
-  # 其余规则保持原有顺序
-  - MATCH,你的默认策略组
-```
-
-上面是规则片段，不是完整的 Anthropic 域名列表。已经使用 Anthropic 规则集时，保留原来的 `RULE-SET,Anthropic,菲律宾` 即可，无须再抄一份域名到 SmartDNS。
-
-每条查询都会重新匹配规则，策略组也读取当前选择。即使 SmartDNS 使用同一个 UDP 会话、同一个长时间保持的 TCP 连接，查询不同域名仍然可以走不同出口。修改策略组选择后，下一条新查询生效；正在交换的查询继续使用已选定的节点。
-
-### 哪些规则参与匹配
-
-| 规则 | DNS 查询阶段的处理 |
+| 规则读取的信息 | DNS 查询时的含义 |
 | --- | --- |
-| `DOMAIN`、`DOMAIN-SUFFIX`、`DOMAIN-KEYWORD`、`DOMAIN-REGEX`、`DOMAIN-WILDCARD` | 按 QNAME 匹配 |
-| `GEOSITE` | 复用已加载的域名数据库 |
-| `RULE-SET`，`behavior: domain` | 复用已加载的域名规则集，支持原版 YAML、text 和 MRS 格式 |
-| `RULE-SET`，`behavior: classical` | 计算其中能用域名判断的部分 |
-| `AND`、`OR`、`NOT`、`SUB-RULE` | 只有能根据域名确定结果时才参与 |
-| `MATCH` | 正常作为最后的兜底规则 |
-| IP、GEOIP、进程、来源、端口、网络、入站等条件 | 无法代表原始业务连接，跳过 |
+| 域名、域名规则集 | 当前 Question 的 QNAME |
+| 网站目标 IP、目标 GEOIP / ASN | 尚未知，不能拿 DNS 解析器 IP 代替 |
+| DNS 解析器地址 | 仅用于将这条查询发往原解析器，不作为待查网站 IP |
+| 来源 IP / 端口、入站类型 / 名称 / 用户 | 保留真实查询的信息 |
+| PROCESS / UID | 保留原进程识别配置和识别结果 |
+| 网络、目标端口 | 实际 DNS 查询的网络信息和目标 53 端口 |
+| 入站 `rule:` | 从指定子规则开始匹配 |
 
-域名匹配没有另写一套后缀、正则或规则集算法：上述域名规则直接调用原规则对象的 `Match`，域名规则集继续使用原 provider 的 `Match` 和 `DomainSet`。MRS 只是规则集的存储格式，加载后也使用同一个匹配实现。匹配前仅把 QNAME 转为小写并去掉末尾根点；发往解析器的报文保留原始大小写。
+规则仍按现有顺序执行；来源、进程和入站规则没有新增的优先级。例如，把 `IN-NAME` 放在域名规则前面，仍可能先命中入站规则。经过 SmartDNS 汇聚后，进程通常是 SmartDNS，无法由这条 DNS 连接还原最初访问网站的应用。进程识别也取决于平台和运行权限。
 
-新增的是 DNS 查询阶段的规则适配：从原版已经解析好的逻辑规则、classical 规则集和子规则中，计算仅凭 QNAME 能确定的结果。因此它复用原版的域名匹配算法，但不声称与携带完整 IP、进程等信息的业务路由完全等价。`PASS` 和 `PASS-RULE` 继续沿用原版的规则遍历含义；检查这些控制动作时不推进轮询组，也不要求控制动作具备 UDP 传输能力。
+网站 IP 未知会传递到 `NOT` / `AND` / `OR`、classical provider 和子规则：`NOT(IP-CIDR,...)` 不能因为尚未解析出 IP 而错误命中。来源 IP 及带 `src` 参数的规则仍可判断。为了选路，不会再次解析当前 QNAME。
 
-这里需要区分两个地址：查询的域名决定**出口**；SmartDNS 指定的解析器 IP 决定**向谁请求 DNS**。例如 SmartDNS 查询 `1.1.1.1:53`，QNAME 命中 `菲律宾`，就通过该组当前节点向 `1.1.1.1:53` 查询。不会把请求错误地发到 `claude.ai:53`，也不会把 `1.1.1.1` 当作网站 IP 去匹配 GEOIP。
+域名叶子规则和域名规则集继续复用上游匹配算法。选中策略组后，使用 QNAME 选择一次实际出站，并在本次交换中固定该选择；拨号仍然发往原解析器的 IP:53，不按解析器地址重新选择负载均衡分支。
 
-DNS 查询还未拿到网站 IP，所以无法保证按 IP、进程或来源进行的业务分流在此阶段也得到同一结果。混合逻辑采用“已知真 / 已知假 / 无法判断”，例如 `NOT(IP-CIDR,...)` 不会因为没有网站 IP 而被误判为真。
+同一个 UDP socket 或 SOCKS 会话中的不同查询独立选路；同一 TCP 连接内的不同长度帧也独立选路。若选择了不支持所需 UDP 的出口，查询失败，不跳过该规则或偷偷改为 DIRECT。可以让 SmartDNS 使用普通 TCP DNS 来适配仅支持 TCP 的节点。
 
-`mode: rule` 按上述规则处理；`mode: global` 使用 `GLOBAL` 的当前选择；`mode: direct` 使用 `DIRECT`。
+`REJECT` 返回 DNS REFUSED，`REJECT-DROP` 不返回回答。DNS / REMATCH 等需要再次回流的特殊出口目前不用于自动 DNS 交换，命中时明确失败，以避免递归。其他规则控制动作继续遵守原规则入口顺序。
 
-## 4. 节点域名解析需要独立的启动路径
+## SmartDNS：保留 6053 / 6553，复用 mixed 7890
 
-如果代理节点的 `server` 是域名，建立节点连接之前需要先解析这个域名。这一步不能再次进入“必须先连接这个节点”的 SmartDNS 代理路径。
+SmartDNS 继续作为本地 DNS 服务监听 `6053` / `6553`。它发送上游查询时，通过现有 `mixed-port: 7890` 连接真实解析器的 53 端口：
 
-可以在现有 Mihomo DNS 块保留一个专供节点域名使用、能够直接访问的解析器：
+```conf
+bind 127.0.0.1:6053
+bind-tcp 127.0.0.1:6053
+bind 127.0.0.1:6553
+bind-tcp 127.0.0.1:6553
+
+proxy-server socks5://127.0.0.1:7890 -name mihomo-dns
+server-tcp 192.0.2.53:53 -proxy mihomo-dns
+server-tcp 198.51.100.53:53 -proxy mihomo-dns
+```
+
+这里的 `192.0.2.53` 和 `198.51.100.53` 是文档保留地址，实际使用必须替换为可达的 DNS 解析器。示例只说明配置结构，不包含可直接使用的公网 DNS 或私人节点。
+
+本地 `6053` / `6553` 服务连接本身不被本开关当作远端 53 查询。SmartDNS 后续送往上游的 53 查询才由公共分类器接管。原 mixed 入口的 SOCKS5 TCP / UDP、HTTP CONNECT TCP、SOCKS4/4a 等协议继续由上游入口实现；认证、LAN 范围、绑定地址仍使用各入口原有配置。
+
+所有可能选中的出口均支持 UDP 时，可以把 `server-tcp` 改为 `server`。HTTP 代理方式可将模板中的代理地址改为 `http://127.0.0.1:7890`，配合 `server-tcp` 发送普通 DNS over TCP。HTTP CONNECT 在这里是传输 TCP DNS 的通道，不是 DoH。
+
+如果希望查询逐域名进入此逻辑，SmartDNS 上游使用普通 UDP / TCP 53。DoH、DoT、DoQ 中的查询内容不会由普通入站解密分类。SmartDNS 自身缓存继续生效；命中其缓存时，没有新查询进入 Mihomo。
+
+## 内置 DNS 与 TUN DNS 劫持
+
+`dns.listen` 和 TUN 的 `dns-hijack` 继续提供本地 DNS 服务。TUN 虚拟 DNS 地址不作为公网解析器代理出去；本地服务生成的、符合范围的普通 53 上游查询共用 QNAME 选路核心。
+
+真实 DNS 入口携带来源、入站、用户、固定出站和子规则上下文。规则中的目标端口是上游 DNS 的 `53`；若 `dns.listen` 监听 `1053`，真实本地监听端口仍记录在 `IN-PORT`。TCP / UDP DNS 客户端的入站网络信息保留。普通业务触发的内部解析没有客户端 DNS 传输，则使用该逻辑查询选定的普通 DNS 上游网络信息，不能把原网站的 TCP:443 当成 DNS 目标条件。
+
+例如，需要内置 DNS 时可使用下面的结构，并替换文档保留地址：
 
 ```yaml
+mixed-port: 7890
+mode: rule
+dns-rule-routing: true
 dns:
   enable: true
+  listen: 127.0.0.1:1053
   enhanced-mode: redir-host
-  respect-rules: false
+  default-nameserver:
+    - 192.0.2.53
   nameserver:
-    - 127.0.0.1:6053
-  proxy-server-nameserver:
-    - '223.5.5.5#DIRECT'
-    - '119.29.29.29#DIRECT'
+    - tcp://198.51.100.53:53
+rules:
+  - DOMAIN-SUFFIX,example.com,DIRECT
+  - MATCH,DIRECT
 ```
 
-这是固定的启动解析路径，无须随着业务域名规则增删。如果已有独立的本地直连 DNS，也可以继续使用它。节点直接使用 IP 时，不需要为它做域名解析。
+开启时，以下业务域名策略停用，也不为这些停用字段加载其专属 provider / geosite 条件：
 
-专用入口本身仅接受字面量 IPv4 / IPv6 解析器地址，拒绝解析器主机名，以免为解析器地址再触发一层循环解析。SOCKS4 使用 IPv4；SOCKS4a 的地址字段也须填写字面量 IP。这里限制的是解析器的目标地址，DNS 报文中的待查询域名照常用于匹配规则。
+- `nameserver-policy`
+- `direct-nameserver-follow-policy`
+- `fallback-filter.domain`
+- `fallback-filter.geosite`
 
-## 5. DNS 报文覆盖及拒绝边界
+这些字段在 Global / Direct 模式下也不会重新启用；关闭 `dns-rule-routing` 并重新应用完整配置后恢复原语义。业务域名的分流应统一写入原有 `rules` / `rule-providers`。
 
-报文解析复用 Mihomo 已有的 `github.com/miekg/dns`，入口和核心共用一份校验逻辑。目标端口为 `53` 只是第一道条件；完整 DNS 结构和查询边界也必须通过检查。
+Global / Direct 模式下，内置 DNS 的传输本身保持原行为：`respect-rules: false` 不会因为切到 Global 被强制改走 GLOBAL；`respect-rules: true` 仍由原 DNSDialer 处理。自动 QNAME 路由只在 Rule 模式的适用范围内接管。
 
-| 报文或功能 | 处理方式 |
+仍保留 `nameserver`、`fallback`、`fallback-lazy-query`、`fallback-filter.geoip/ipcidr`、`direct-nameserver`、`proxy-server-nameserver`、`proxy-server-nameserver-policy`、`default-nameserver`、hosts、系统 hosts、缓存和回答类型控制。自动分流范围内的普通 53 交换按 QNAME 选路，不再由 `respect-rules` 或 `#RULES` 按解析器地址进行第二次选择。显式的 DNS `#Group` / `#DIRECT` / `#interface` 仍保留其原有运输约束。
+
+同一逻辑查询的自动 main / fallback 和截断重试共用一次选路结果；显式固定 DNS 出口仍是例外。路由作用域参与缓存与并发合并，避免不同来源、子规则或出口的查询混用结果。规则变动后不会仅因旧的成功缓存而跳过当前拒绝动作；SmartDNS 的独立缓存仍需由 SmartDNS 管理。
+
+缓存隔离包含真实来源端口，以免 `SRC-PORT` 等规则被跨 socket 的缓存复用绕过；因此不同 socket 的内置缓存命中率可能低于只按域名缓存。SmartDNS 的缓存不受这个标识影响。
+
+## 独立基础解析与已有出站
+
+原请求可以用 IP 或域名指定 DNS 解析器。解析器自身是域名时，只通过独立 bootstrap 解析原解析器 Host，再把原始查询发到其真实 IP:53；不会用待查业务 QNAME 引导解析器。
+
+节点域名、DNS 解析器域名使用独立的基础解析器。没有配置 `proxy-server-nameserver` 时，开启此功能使用独立 `default-nameserver` 路径，不能无条件退回自动业务 main resolver。即使 `dns.enable: false`，外部 DNS 分类所需的独立基础解析仍保留，但不会因此启用内置 DNS 监听服务。
+
+普通规则为判断 IP 条件发起解析时，允许进行一次 QNAME 选路，不会重新进入需要解析同一名字的 IP 判断循环。DIRECT 等实际出站已经选定后，其后续本地目标解析继承该出站、接口和 mark，不再次按业务规则选路。
+
+## 报文范围、回退和资源限制
+
+自动接管的是目标端口 53 上的普通明文 UDP 消息或 TCP 长度帧，采用单问题 QUERY。校验包含完整报文消费、真实记录计数、OPT 唯一性及所属区段、响应来源和 ID / Question 关联。
+
+| 内容 | 处理范围 |
 | --- | --- |
-| 普通 TCP / UDP DNS 查询 | 按每条查询的 QNAME 选路，TCP 处理两字节长度前缀及完整帧 |
-| A、AAAA、CNAME、MX、TXT、NS、SOA、SRV、PTR、CAA、HTTPS / SVCB 等 | 支持；不把查询类型限制为 A / AAAA。HTTPS 记录查询属于普通 DNS，并不是 DoH |
-| DNSSEC 的 DS、DNSKEY、RRSIG、NSEC / NSEC3、DO / AD / CD 标志 | 保留报文；本入口不执行 DNSSEC 签名验证 |
-| EDNS、ECS、Cookie、Padding，以及未知查询类型、类别、标志和 EDNS 扩展 | 结构合法时原样传递，由 SmartDNS 和上游解析器解释 |
-| 域名压缩、根域名查询、IPv4 / IPv6 解析器 | 使用原解析器处理；根域名按 `.` 匹配 |
-| 带 `TC=1` 的完整截断响应 | 原样返回，后续 TCP 重试由 SmartDNS 决定；物理截断到不完整记录的报文仍拒绝 |
-| 普通错误响应，以及只有 12 字节头部的 FORMERR / SERVFAIL / REFUSED 等错误 | 验证来源、事务 ID 和 opcode 后返回；无问题的成功响应不接受 |
+| A、AAAA、HTTPS / SVCB、TXT、MX 等普通查询 | 支持 |
+| DNSSEC 记录、DO 位、合法 EDNS 扩展、未知合法记录类型 | 不用窄类型白名单排除；不提供 DNSSEC 签名验证 |
+| TCP 最大 65535 字节消息、拆分长度前缀、连续多帧 | 支持；每帧分别交换和选路 |
+| TCP 客户端预先发送多条查询 | 接受缓冲中的连续帧，当前逐条处理并返回 |
+| UDP 截断回答 | 外部过境查询返回原回答，由客户端决定重试；内置 resolver 的 TCP 重试保留选路结果 |
+| 多问题、动态更新、AXFR / IXFR 等特殊用途 | 外部转发入口不作为普通 DNS 接管，首份报文走原流程；内置自动 resolver 拒绝不支持的查询 |
+| DoH / DoT / DoQ、非 53 明文 DNS | 不自动分类；继续按原有连接规则处理 |
+| 未封装为代理请求、直接发给 mixed 端口的裸 DNS | mixed 仍是代理协议入口；裸 DNS 应使用 `dns.listen` 或 SmartDNS 本地监听 |
 
-校验会核对 DNS 头部四个记录计数与实际内容，拒绝不完整问题、尾随数据、错误的记录长度，以及重复、位置错误或非根域名所有者的 OPT 记录。OPT 不强制存在；存在时必须符合其结构约束。未知记录类型和扩展不因为“暂时不认识”而被禁用，避免阻碍 DNS 扩展。
+TCP 首帧探测不消费回退所需字节；失败时保留已读内容并清除探测 deadline。确认 DNS 后，格式错误、回答不匹配或交换失败会结束 TCP DNS 连接；UDP 对应查询不返回回答，不另找未经规则选择的出口。
 
-正常响应还必须对应原查询的名称、类型和类别。UDP 从错误来源、带错误事务 ID 或不匹配问题的报文到达时，在原有查询超时内继续等待正确响应，不把无关报文返回给 SmartDNS。CNAME 等回答内容不触发当前请求重新选路；后续新的域名查询独立匹配。
+公共外部分类器在识别到候选 DNS 头后，限制最多 128 个完整探测或处理中的 TCP DNS 会话、256 个并发 DNS 交换；达到容量时不绕过当前选择直接回退直连。首帧探测和单次交换使用 5 秒上限，已接管 TCP 的空闲读取上限为 60 秒。DNS 分类的这些限制不作用于其他目标端口的普通业务连接。
 
-- SOCKS4/4a、SOCKS5 CONNECT 和 HTTP CONNECT 的目标不是 `53`：返回协议错误并关闭，不拨号。
-- SOCKS5 UDP 数据报的目标不是 `53`：静默丢弃，不拨号。
-- 普通 HTTP 请求、DoH、DoT、DoQ、DNSCrypt、SOCKS BIND、分片 SOCKS5 UDP、非单播解析器地址：拒绝。SOCKS 分片限制不等同于禁用操作系统处理的 IP 分片。
-- 请求必须是普通单问题查询；响应包冒充查询、多问题、尾随垃圾数据，以及 AXFR / IXFR、UPDATE、NOTIFY、DSO 等不转发。
-- 没有问题域名的请求不在本入口的按域名分流范围内。`QDCOUNT=0` 并不普遍等于非法 DNS；这里因缺少 QNAME 而不支持它。
-- `REJECT` 返回 DNS `REFUSED`；`REJECT-DROP` 丢弃查询。TCP 查询被丢弃或交换失败时关闭该连接。
-- 选中的出口不支持 UDP：该次 UDP 交换失败，**不会自动改为直连**。SmartDNS 可以改用 `server-tcp`。
-- `DNS`、`rematch` 等需要重新进入路由的特殊出口不用于该链路；普通节点、直连和常用选择组正常使用。
+## 配置重载与面板
 
-策略组没有可用条目时，仍遵循该组的 `empty-fallback` 配置；上游默认的 `COMPATIBLE` 是直连。需要空组也拒绝请求时，把相应组的 `empty-fallback` 显式设为 `REJECT`。
+配置文件中省略开关等同于 `false`。更改开关需重新加载完整配置，例如通过控制器 `PUT /configs` 的完整配置重载机制；`PATCH /configs` 不接受 `dns-rule-routing`，带此字段的 PATCH 会在修改任何设置前被拒绝。`GET /configs` 返回当前生效的布尔值。模式仍可使用原有模式切换方式更改。
 
-DNS 查询内容（包括原始事务 ID、大小写和 EDNS 信息）原样发给解析器，不改写 DNS 回答，也不移除 SmartDNS 自己的缓存、测速或过滤逻辑。本入口判断的是 DNS 报文结构和支持的请求类型，不判断域名或 TXT 内容的用途，也不宣称能够识别或阻止所有 DNS 隧道。
+从旧版本迁移时，移除旧 `dns-proxy-port`，把 SmartDNS 代理地址改成现有 mixed / SOCKS / HTTP 入口，再增加 `dns-rule-routing: true`。旧的非零专用端口配置会报告迁移错误。当前不存在专用 DNS listener 类型或每入口启用开关。
 
-每个监听实例最多 128 个客户端会话、256 个并发查询；单次查询及握手超时 5 秒，空闲会话超时 60 秒。TCP 连接上的查询按帧顺序处理，每次查询独立建立上游交换，避免把不同域名固定到同一出口。策略组的定时健康检查仍然生效；此专用路径直接使用一次选定的节点，不调用策略组包裹拨号层的成功 / 失败回调。
+每次实际 DNS 上游交换使用原生连接 tracker，显示 QNAME、真实解析器 IP:53、来源、入站、命中规则、策略组链及流量。面板关闭操作可以取消正在进行的交换；结束的短查询会移出活动列表。过境 DNS 不再额外统计一层相同流量。
 
-SOCKS5 UDP 同时提供与 mixed 一样的同端口 UDP 入口，以及标准 UDP ASSOCIATE 协商的临时转发端口。两条路径都逐报文校验目标和 DNS 内容，再逐查询选择出口。
+这项功能只改变所支持 DNS 查询的选路。普通 SSH 等连接的 IP 到域名显示仍受原有映射和嗅探机制影响，不能据此保证消除所有普通连接的域名显示关联。
 
-设置全局认证后，没有认证信息的同端口 UDP 数据报只允许 `skip-auth-prefixes` 指定的来源；其他来源应先完成 SOCKS5 认证，并使用 ASSOCIATE 返回的转发地址。UDP 来源访问控制同样生效。客户端未指定源端口时，只有通过共同 DNS 查询校验的首包才能固定源端口；畸形 DNS 不能抢先固定它。临时转发端口绑定到控制连接，连接关闭时清理会话；跨容器或其他主机访问时，需要能访问协商得到的地址。
+## 源码与本地验证
 
-## 6. 验证与排查
+公共入站分类位于 `tunnel/dns_inbound.go`，QNAME 选路与原解析器交换位于 `tunnel/dns_routing.go` 和 `tunnel/dns_proxy.go`，严格报文校验位于 `component/dnsmessage`。内置 resolver 桥接位于 `dns/routing.go`，TUN 本地服务上下文位于 `listener/sing_tun/dns.go`。
 
-### 面板连接列表
+使用项目要求的 Go 工具链执行：
 
-DNS 上游交换接入原版连接统计，可通过现有面板的连接页或 `/connections` API 查看。每条正在交换的 DNS 查询显示查询域名（QNAME）、解析器 `IP:53`、SmartDNS 来源、入站名称 `DEFAULT-DNS-PROXY`、TCP / UDP 协议、命中规则、策略组和节点链，以及上传 / 下载流量。可以按入站名称识别这些 DNS 连接。
-
-面板的关闭操作会中断选中的 DNS 上游交换。TCP 查询中断后，相应入站 TCP 连接也会结束；UDP 关闭只影响选中的查询。完成、失败或取消的交换会从活动连接列表移除，流量累计保留。TCP 统计包括 DNS 的两字节长度前缀，UDP 统计 DNS 载荷，与实际交换一致。
-
-这里显示的是每次上游 DNS 交换。空闲的 SmartDNS TCP 控制连接或 UDP ASSOCIATE 不单独占一条活动记录。同一入站连接中的不同域名各自对应自己的规则和出口；没有把整个 SmartDNS 长连接固定显示为某个域名。
-
-DNS 查询通常很短，原版面板按间隔读取活动连接快照，可能来不及显示已经完成的查询；历史记录能保留哪些条目取决于面板自身。内核不把已结束的查询伪装成活动连接。需要逐条排查时，可查看下面的 debug 日志；SmartDNS 缓存命中不会产生新的上游交换。
-
-### 配置检查和测试
-
-先使用新二进制检查自己的配置：
-
-```sh
-./mihomo -t -f /path/to/config.yaml
+```bash
+bash scripts/ci-check.sh test
 ```
 
-把 `log-level` 临时设为 `debug`，可以看到带 `[DNS proxy]` 前缀的域名、解析器和出口选择日志。SmartDNS 缓存命中时不会向上游发新查询，因此不会出现对应的新入口日志。
-
-本仓库包含真实二进制的本地端到端测试：
-
-```sh
-go build -tags with_gvisor -o /tmp/dns-route-kernel .
-python3 scripts/test-dns-proxy.py /tmp/dns-route-kernel
-```
-
-测试通过两个本地模拟 SOCKS5 出口，验证 HTTP CONNECT、SOCKS4/4a、SOCKS5 TCP、两种 UDP 入口的多域名分流、IPv4 / IPv6 解析器、选择组实时切换，以及非 `53`、非法 DNS 和分片数据包拒绝；同时检查顶层端口的读取、关闭、重开和热重载。面板验证直接读取 `/connections`，检查 TCP / UDP 的查询域名、解析器、来源、嵌套组链、流量累计和关闭操作，并确认完成后移除活动记录。使用保留的测试 IP，不需要公网 DNS，也不占用特权端口。
-
-协议边界回归还包括：报文声明存在但实际缺失的记录、重复 OPT、空 SOCKS4a 主机名、畸形 UDP 首包不固定源端口、只有头部的 DNS 错误、TC 标志保留，以及错误 ID / 问题的 UDP 响应之后仍能收到正确回答。测试直接统计模拟出口接受的连接数，确认被拒绝的请求没有拨号。真实轮询组和子规则用例检查 `PASS` / `PASS-RULE` 控制流；Go 测试另外覆盖多种记录类型、DNSSEC 和 EDNS 扩展。
-
-另外已用官方 SmartDNS `Release48.4`（`1.2026.08.05-0921`）进行实际客户端联调：带认证的 SOCKS5 UDP、SOCKS5 TCP、HTTP CONNECT TCP 三种方式均通过连续两域名分流验证。入口兼容 SmartDNS 在未指定客户端 IP 的 UDP ASSOCIATE 请求中仍填写解析器端口的行为，随后按真实首包固定 UDP 源端口。
-
-## 实现位置与参考
-
-- [DNS 入口](../listener/dnsproxy/listener.go)
-- [共享 DNS 报文校验](../component/dnsmessage/message.go)
-- [每条查询的匹配及交换](../tunnel/dns_proxy.go)
-- [顶层配置](../config/config.go)
-- [端口管理](../listener/listener.go)
-- [SmartDNS 官方代理配置](https://pymumu.github.io/smartdns/config/proxy/)
-- [SmartDNS 官方配置选项](https://pymumu.github.io/smartdns/configuration/)
-- [Mihomo DNS 文档](https://wiki.metacubex.one/config/dns/)
-- [RFC 6891：EDNS 的 OPT 结构与扩展](https://www.rfc-editor.org/rfc/rfc6891.html)
-- [RFC 8906：DNS 标志、未知类型与中间设备兼容性](https://www.rfc-editor.org/rfc/rfc8906.html)
-- [RFC 9619：普通 DNS 消息的问题数量](https://www.rfc-editor.org/rfc/rfc9619.html)
+完整二进制端到端检查使用 `scripts/test-dns-proxy.py`。文件名保留以兼容既有工作流，其测试对象已是公共入站和全局开关；测试使用本地模拟服务，不需要实际节点账号。具体交付的测试和云编译结果以对应提交的 Actions 记录为准。

@@ -1,31 +1,28 @@
-# 可直接用于 -t 配置校验的最小示例；没有节点账号或远程规则集。
-# 接入现有配置时，只增加顶层 dns-proxy-port，并保留自己的 rules。
+# 可用于 -t 配置校验的最小示例；没有私人节点、账号或远程规则集。
+# 接入现有配置时，增加顶层 dns-rule-routing: true，并保留自己的 rules。
 mode: rule
 log-level: info
-
-# 与 mixed-port 同级；0 或省略关闭，非零端口默认支持全部混合代理协议。
 mixed-port: 7890
-dns-proxy-port: 7853
 allow-lan: false
 
-# 可选：与 mixed-port 共用的原版全局字段，不需要单独的 users 配置。
+# 默认 false；Rule 模式且入站未固定 proxy 时，逐查询分流明文 TCP/UDP 53 DNS。
+# 非 53 和首份负载非普通 DNS 的流量仍走原流程，不会被本开关丢弃。
+dns-rule-routing: true
+
+# 认证、LAN 范围等仍由原有入站配置控制，不新增专用端口或认证设置。
 # authentication:
 #   - "smartdns:replace-with-your-own-password"
-# skip-auth-prefixes:
-#   - 127.0.0.1/32
-# bind-address: '*'
-# lan-allowed-ips:
-#   - 0.0.0.0/0
-#   - ::/0
-# lan-disallowed-ips: []
-# inbound-tfo: false
-# inbound-mptcp: false
 
-# 内置 DNS 不是这个入口的前提；本最小示例交给 SmartDNS 解析。
-# 原配置使用 redir-host 时可以继续保留，不需要 FakeIP。
+# 外部 DNS 分类不依赖内置 DNS。本例由 SmartDNS 提供 6053 / 6553 本地服务。
+# 独立 bootstrap 用于节点或解析器自身域名，不对待查业务域名再次选路。
+# 192.0.2.53 是文档保留地址，实际使用必须替换为可达的基础 DNS 服务器。
 dns:
   enable: false
+  default-nameserver:
+    - 192.0.2.53
 
+# 接入现有节点时，用自己的策略组替换 DIRECT；无需再写 nameserver-policy。
+# 示例域名是文档保留域名，不包含实际用户业务规则。
 rules:
   - DOMAIN-SUFFIX,example.com,DIRECT
   - MATCH,DIRECT

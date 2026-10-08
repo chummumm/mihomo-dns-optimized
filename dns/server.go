@@ -2,11 +2,13 @@ package dns
 
 import (
 	"context"
+	"errors"
 	"net"
 
 	"github.com/metacubex/mihomo/common/sockopt"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
+	icontext "github.com/metacubex/mihomo/context"
 	"github.com/metacubex/mihomo/log"
 
 	D "github.com/miekg/dns"
@@ -32,8 +34,23 @@ type serverHandler struct {
 
 // ServeDNS implement D.Handler ServeDNS
 func (s serverHandler) ServeDNS(w D.ResponseWriter, r *D.Msg) {
-	msg, err := s.service.ServeMsg(context.Background(), r)
+	metadata := &C.Metadata{Type: C.INNER, NetWork: C.TCP, InName: "DNS"}
+	if s.isUDP {
+		metadata.NetWork = C.UDP
+	}
+	if err := metadata.SetRemoteAddr(w.LocalAddr()); err == nil {
+		metadata.InIP, metadata.InPort = metadata.DstIP, metadata.DstPort
+	}
+	source := &C.Metadata{}
+	if err := source.SetRemoteAddr(w.RemoteAddr()); err == nil {
+		metadata.SrcIP, metadata.SrcPort = source.DstIP, source.DstPort
+	}
+	ctx := icontext.WithDNSRoutingInbound(icontext.WithDNSRoutingMetadata(context.Background(), metadata))
+	msg, err := s.service.ServeMsg(ctx, r)
 	if err != nil {
+		if errors.Is(err, resolver.ErrDNSDrop) {
+			return
+		}
 		m := new(D.Msg)
 		m.SetRcode(r, D.RcodeServerFailure)
 		// does not matter if this write fails
