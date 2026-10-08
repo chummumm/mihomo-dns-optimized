@@ -1,0 +1,161 @@
+name: Bootstrap cloud build
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact commit to build after a tested upstream merge
+        type: string
+        default: ""
+      publish_release:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # The caller's name is included in github.workflow for reusable workflows.
+  group: dns-build-${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+  SKIP_INTEROP_TEST: "1"
+  SKIP_CONCURRENT_TEST: "1"
+
+jobs:
+  check:
+    name: DNS routing tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    outputs:
+      commit: ${{ steps.version.outputs.commit }}
+      version: ${{ steps.version.outputs.version }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+      build_time: ${{ steps.version.outputs.build_time }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Set up upstream-compatible Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: "1.26"
+          go-download-base-url: https://github.com/MetaCubeX/go/releases/download/build
+          cache: true
+      - name: Test fork changes and sync safeguards
+        run: bash scripts/ci-check.sh test
+      - name: Identify the exact build
+        id: version
+        env:
+          EVENT_REF: ${{ github.ref }}
+          EVENT_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          commit=$(git rev-parse HEAD)
+          upstream=$(cat UPSTREAM_VERSION)
+          [[ "$upstream" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version="${upstream}-dns-${commit:0:12}"
+          release_tag="dns-${upstream}-${commit:0:12}"
+          if [[ "$EVENT_REF" == refs/tags/dns-v* ]]; then
+            [[ "$EVENT_REF_NAME" =~ ^dns-v[0-9A-Za-z._-]+$ ]]
+            version="$EVENT_REF_NAME"
+            release_tag="$EVENT_REF_NAME"
+          fi
+          {
+            printf 'commit=%s\n' "$commit"
+            printf 'version=%s\n' "$version"
+            printf 'release_tag=%s\n' "$release_tag"
+            printf 'build_time=%s\n' "$(git show -s --format=%cI HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Linux ${{ matrix.arch }}
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.check.outputs.commit }}
+          persist-credentials: false
+      - name: Set up upstream-compatible Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: "1.26"
+          go-download-base-url: https://github.com/MetaCubeX/go/releases/download/build
+          cache: true
+      - name: Build the complete core with gVisor
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+          BUILD_VERSION: ${{ needs.check.outputs.version }}
+          BUILD_TIME: ${{ needs.check.outputs.build_time }}
+        run: bash scripts/ci-check.sh build "$TARGET_ARCH" "$RUNNER_TEMP/dist" "$BUILD_VERSION" "$BUILD_TIME"
+      - name: Upload binaries and checksums
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mihomo-dns-linux-${{ matrix.arch }}-${{ needs.check.outputs.commit }}
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  release:
+    name: Publish GitHub release
+    needs: [check, build]
+    if: >-
+      github.repository == 'chummumm/mihomo-dns-optimized' &&
+      github.event_name != 'pull_request' &&
+      (startsWith(github.ref, 'refs/tags/dns-v') ||
+       (inputs.publish_release && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download both architectures
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: mihomo-dns-linux-*-${{ needs.check.outputs.commit }}
+          path: dist
+          merge-multiple: true
+      - name: Publish immutable commit build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_SHA: ${{ needs.check.outputs.commit }}
+          BUILD_VERSION: ${{ needs.check.outputs.version }}
+          RELEASE_TAG: ${{ needs.check.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum --check ./*.sha256
+          cat ./*.sha256 > SHA256SUMS
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            printf 'Release %s already exists; published assets are not overwritten.\n' "$RELEASE_TAG"
+            exit 0
+          fi
+          {
+            printf 'Mihomo DNS optimized `%s`\n\n' "$BUILD_VERSION"
+            printf 'Source commit: `%s`\n\n' "$BUILD_SHA"
+            printf 'Linux amd64 (GOAMD64=v1) and arm64; gVisor enabled; CGO disabled.\n\n'
+            printf 'Uncompress the matching `.gz`, mark it executable, and follow `docs/dns-proxy.md`.\n'
+            printf 'DNS-specific ingress is opt-in. Existing listeners keep their upstream behavior.\n'
+          } > "$RUNNER_TEMP/release-notes.txt"
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$BUILD_SHA" \
+            --title "$BUILD_VERSION" \
+            --notes-file "$RUNNER_TEMP/release-notes.txt" \
+            --latest \
+            ./*.gz SHA256SUMS
