@@ -633,9 +633,20 @@ rules:
                             raise AssertionError("binary exited during startup")
                         try:
                             general = api_request(api_port)
-                            with connect(mixed_port):
-                                break
-                        except (OSError, urllib.error.URLError):
+                            # Upstream opens listeners before providers/profile
+                            # initialization and OnRunning. A TCP accept or HTTP
+                            # 200 can therefore still be followed by an intentional
+                            # startup close. Prove ordinary forwarding is ready;
+                            # this probe is not DNS and cannot exercise/mask the
+                            # first pipelined DNS assertion below.
+                            probe, reply, _ = socks_request(mixed_port, (resolver[0], 443))
+                            with probe:
+                                assert reply == 0, "readiness SOCKS handshake failed"
+                                payload = b"mihomo-forwarding-ready"
+                                probe.sendall(payload)
+                                assert read_exact(probe, len(payload)) == payload
+                            break
+                        except (EOFError, OSError, urllib.error.URLError):
                             if time.monotonic() >= deadline:
                                 raise AssertionError("listener failed to start")
                             time.sleep(0.05)

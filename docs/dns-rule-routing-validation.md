@@ -20,6 +20,7 @@
 | 非 IP 查询误把闲置 fallback 算作实际候选，弱化拒绝动作 | 按原 isIPRequest 分支选择候选；TXT / MX / HTTPS 不受未使用的 fallback 影响 |
 | TCP 下游短写可能截断 DNS 长度帧 | 复用已有完整写入 helper；最大帧与流水线测试使用每次最多写 3 字节的连接 |
 | 旧 dedicated listener 留下无用握手扩展 | 删除专用 listener 及专属测试，将 SOCKS4/5 握手源文件恢复到上游基线；普通 mixed 实现继续复用上游 |
+| 云端第一条 HTTP CONNECT 测试早于内核完成启动 | 用阻塞本地 provider 初始化的实验复现 200 后 EOF：原版先打开监听，再加载 provider / profile 并进入 Running；测试改为先完成普通 SOCKS TCP:443 回声证明转发就绪，随后第一条 DNS 仍要求一次成功，不用重试掩盖 DNS 问题 |
 
 交叉复查同时核对了业务 DNS 策略停用、bootstrap 例外、缓存 / singleflight 范围、固定出站传递、未知目标 IP 的逻辑传播，以及失败是否意外改走 DIRECT。正式配置路径没有保留被停用的业务 nameserver-policy；未为不可达的策略组合增加额外算法。
 
