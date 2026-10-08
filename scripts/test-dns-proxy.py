@@ -95,12 +95,30 @@ class MockSOCKS(socketserver.ThreadingTCPServer):
     def __init__(self, answer, records, lock):
         self.answer, self.records, self.record_lock = answer, records, lock
         self.connections = 0
+        self.held_queries = {}
         super().__init__(("127.0.0.1", 0), MockHandler)
+
+    @contextlib.contextmanager
+    def hold(self, name, network):
+        gate = threading.Event()
+        key = (name.lower(), network)
+        with self.record_lock:
+            self.held_queries[key] = gate
+        try:
+            yield gate
+        finally:
+            gate.set()
+            with self.record_lock:
+                self.held_queries.pop(key, None)
 
     def respond(self, wire, target, network):
         assert target[1] == 53, "non-DNS destination reached outbound"
+        name = question_name(wire)
         with self.record_lock:
-            self.records.append((self.answer, question_name(wire), target, network))
+            self.records.append((self.answer, name, target, network))
+            gate = self.held_queries.get((name.lower(), network))
+        if gate is not None and not gate.wait(8):
+            raise TimeoutError("test did not release the held DNS response")
         return make_answer(wire, self.answer)
 
 
@@ -203,6 +221,89 @@ def expect_port_closed(port):
         pass
 
 
+def wait_dns_connections(api_port, host=None):
+    deadline = time.monotonic() + 2
+    while True:
+        snapshot = api_request(api_port, "/connections")
+        entries = [entry for entry in snapshot.get("connections") or []
+                   if entry["metadata"].get("inboundName") == "DEFAULT-DNS-PROXY"]
+        if host is None and not entries:
+            return snapshot, None
+        if host is not None:
+            matching = [entry for entry in entries
+                        if entry["metadata"].get("host") == host and entry["upload"] > 0]
+            if len(matching) == 1:
+                return snapshot, matching[0]
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"unexpected dashboard connections for {host!r}: {entries}")
+        time.sleep(0.01)
+
+
+def check_dashboard_connections(dns_port, api_port, resolver, upstream):
+    # Hold only the mock resolver's replies so the standard activity snapshot
+    # can deterministically observe these otherwise very short DNS exchanges.
+    for network in ("tcp", "udp"):
+        for close_from_dashboard in (False, True):
+            host = "cancel.example" if close_from_dashboard else "visible.example"
+            query = question(host.upper(), 201 if network == "tcp" else 202)
+            before, _ = wait_dns_connections(api_port)
+            with upstream.hold(host, network) as release, contextlib.ExitStack() as stack:
+                if network == "tcp":
+                    client, reply, _ = socks_request(dns_port, resolver)
+                    stack.enter_context(client)
+                    assert reply == 0
+                    client.sendall(frame(query))
+                else:
+                    client = stack.enter_context(socket.socket(socket.AF_INET, socket.SOCK_DGRAM))
+                    client.bind(("127.0.0.1", 0))
+                    client.settimeout(3)
+                    client.sendto(b"\x00\x00\x00" + encode_address(*resolver) + query,
+                                  ("127.0.0.1", dns_port))
+
+                during, entry = wait_dns_connections(api_port, host)
+                metadata = entry["metadata"]
+                assert metadata["network"] == network and metadata["type"] == "Socks5"
+                assert metadata["sourceIP"] == "127.0.0.1"
+                assert int(metadata["sourcePort"]) == client.getsockname()[1]
+                assert metadata["destinationIP"] == resolver[0]
+                assert int(metadata["destinationPort"]) == 53
+                assert int(metadata["inboundPort"]) == dns_port
+                assert entry["rule"] == "Domain" and entry["rulePayload"] == host
+                assert entry["chains"] == ["B", "Chosen", "DNSOuter"], entry["chains"]
+                assert len(entry["providerChains"]) == len(entry["chains"])
+                uploaded = len(query) + (2 if network == "tcp" else 0)
+                assert entry["upload"] == uploaded and entry["download"] == 0
+                assert during["uploadTotal"] - before["uploadTotal"] == uploaded
+
+                if close_from_dashboard:
+                    api_request(api_port, f"/connections/{entry['id']}", method="DELETE")
+                    if network == "tcp":
+                        client.settimeout(1)
+                        assert client.recv(1) == b"", "dashboard close did not interrupt TCP DNS"
+                    else:
+                        client.settimeout(0.2)
+                        try:
+                            client.recvfrom(65535)
+                            raise AssertionError("closed UDP DNS query still returned a response")
+                        except socket.timeout:
+                            pass
+                    after, _ = wait_dns_connections(api_port)
+                    assert after["downloadTotal"] == before["downloadTotal"]
+                    release.set()
+                else:
+                    release.set()
+                    if network == "tcp":
+                        response = read_frame(client)
+                    else:
+                        _, response = decode_packet(client.recvfrom(65535)[0])
+                    check_answer(response, query, upstream.answer)
+                    after, _ = wait_dns_connections(api_port)
+                    downloaded = len(response) + (2 if network == "tcp" else 0)
+                    assert after["downloadTotal"] - before["downloadTotal"] == downloaded
+                assert after["uploadTotal"] - before["uploadTotal"] == uploaded
+    print("PASS dashboard connections: TCP/UDP QNAME, resolver, source, rule and nested group chains; exact traffic totals; completion cleanup and API close")
+
+
 def run(binary):
     records, record_lock = [], threading.Lock()
     upstream_a = MockSOCKS("198.51.100.11", records, record_lock)
@@ -237,10 +338,15 @@ proxy-groups:
   - name: Chosen
     type: select
     proxies: [A, B]
+  - name: DNSOuter
+    type: select
+    proxies: [Chosen]
 rules:
   - DOMAIN,first.example,A
   - DOMAIN,second.example,B
   - DOMAIN,selector.example,Chosen
+  - DOMAIN,visible.example,DNSOuter
+  - DOMAIN,cancel.example,DNSOuter
   - DOMAIN,blocked.example,REJECT
   - DOMAIN,drop.example,REJECT-DROP
   - MATCH,A
@@ -409,6 +515,8 @@ rules:
                         assert upstream_a.connections + upstream_b.connections == connections_before, "forbidden TCP request dialed an outbound"
                         assert all(target in (resolver, resolver_v6) for _, _, target, _ in records)
                     print("PASS all TCP protocols: non-53 destinations and non-DNS payloads rejected before any outbound dial")
+
+                    check_dashboard_connections(dns_port, api_port, resolver, upstream_b)
 
                     # The new field follows the same live configuration paths as
                     # mixed-port, and closing it also closes existing sessions.

@@ -11,6 +11,8 @@ dns-proxy-port: 7853
 
 配置非零端口即启用，设为 `0` 或省略即关闭，与 `mixed-port` 一致。HTTP CONNECT、SOCKS4/4a、SOCKS5 TCP 和 UDP 均默认支持，无额外协议开关；认证、LAN 访问、绑定地址等沿用原版全局配置。该端口只接受发往解析器字面量 IP 的 `53` 端口的有效 DNS。
 
+正在交换的 DNS 查询接入原版面板连接列表与流量统计，展示查询域名、解析器、规则和出口链，并支持关闭。查询完成后移出活动列表；短查询可能在面板两次刷新之间结束。
+
 - [配置与工作原理](docs/dns-proxy.md)
 - [Mihomo 最小配置](docs/dns-proxy.example.yaml) · [SmartDNS 接入示例](docs/smartdns-dns-proxy.conf)
 - [云编译](https://github.com/chummumm/mihomo-dns-optimized/actions/workflows/build.yml) · [下载发布](https://github.com/chummumm/mihomo-dns-optimized/releases)

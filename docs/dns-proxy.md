@@ -148,6 +148,18 @@ SOCKS5 UDP 同时提供与 mixed 一样的同端口 UDP 入口，以及标准 UD
 
 ## 6. 验证与排查
 
+### 面板连接列表
+
+DNS 上游交换接入原版连接统计，可通过现有面板的连接页或 `/connections` API 查看。每条正在交换的 DNS 查询显示查询域名（QNAME）、解析器 `IP:53`、SmartDNS 来源、入站名称 `DEFAULT-DNS-PROXY`、TCP / UDP 协议、命中规则、策略组和节点链，以及上传 / 下载流量。可以按入站名称识别这些 DNS 连接。
+
+面板的关闭操作会中断选中的 DNS 上游交换。TCP 查询中断后，相应入站 TCP 连接也会结束；UDP 关闭只影响选中的查询。完成、失败或取消的交换会从活动连接列表移除，流量累计保留。TCP 统计包括 DNS 的两字节长度前缀，UDP 统计 DNS 载荷，与实际交换一致。
+
+这里显示的是每次上游 DNS 交换。空闲的 SmartDNS TCP 控制连接或 UDP ASSOCIATE 不单独占一条活动记录。同一入站连接中的不同域名各自对应自己的规则和出口；没有把整个 SmartDNS 长连接固定显示为某个域名。
+
+DNS 查询通常很短，原版面板按间隔读取活动连接快照，可能来不及显示已经完成的查询；历史记录能保留哪些条目取决于面板自身。内核不把已结束的查询伪装成活动连接。需要逐条排查时，可查看下面的 debug 日志；SmartDNS 缓存命中不会产生新的上游交换。
+
+### 配置检查和测试
+
 先使用新二进制检查自己的配置：
 
 ```sh
@@ -163,7 +175,7 @@ go build -tags with_gvisor -o /tmp/dns-route-kernel .
 python3 scripts/test-dns-proxy.py /tmp/dns-route-kernel
 ```
 
-测试通过两个本地模拟 SOCKS5 出口，验证 HTTP CONNECT、SOCKS4/4a、SOCKS5 TCP、两种 UDP 入口的多域名分流、IPv4 / IPv6 解析器、选择组实时切换，以及非 `53`、非法 DNS 和分片数据包拒绝；同时检查顶层端口的读取、关闭、重开和热重载。使用保留的测试 IP，不需要公网 DNS，也不占用特权端口。
+测试通过两个本地模拟 SOCKS5 出口，验证 HTTP CONNECT、SOCKS4/4a、SOCKS5 TCP、两种 UDP 入口的多域名分流、IPv4 / IPv6 解析器、选择组实时切换，以及非 `53`、非法 DNS 和分片数据包拒绝；同时检查顶层端口的读取、关闭、重开和热重载。面板验证直接读取 `/connections`，检查 TCP / UDP 的查询域名、解析器、来源、嵌套组链、流量累计和关闭操作，并确认完成后移除活动记录。使用保留的测试 IP，不需要公网 DNS，也不占用特权端口。
 
 另外已用官方 SmartDNS `Release48.4`（`1.2026.08.05-0921`）进行实际客户端联调：带认证的 SOCKS5 UDP、SOCKS5 TCP、HTTP CONNECT TCP 三种方式均通过连续两域名分流验证。入口兼容 SmartDNS 在未指定客户端 IP 的 UDP ASSOCIATE 请求中仍填写解析器端口的行为，随后按真实首包固定 UDP 源端口。
 

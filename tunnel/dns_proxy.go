@@ -14,6 +14,7 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
 	"github.com/metacubex/mihomo/log"
+	"github.com/metacubex/mihomo/tunnel/statistic"
 
 	"github.com/miekg/dns"
 )
@@ -29,6 +30,7 @@ var errDNSProxyDrop = errors.New("DNS proxy query rejected without a response")
 type dnsProxyRoute struct {
 	proxy C.Proxy
 	rule  C.Rule
+	qname string
 	// Groups are chosen using QNAME and frozen for this one exchange. Dialing
 	// the group with resolver metadata would hash the DNS server's IP instead.
 	groups []C.Proxy
@@ -88,6 +90,7 @@ func exchangeDNSProxy(ctx context.Context, wire []byte, resolver *C.Metadata, se
 	if err != nil {
 		return nil, err
 	}
+	route.qname = host
 	if route.proxy == nil {
 		return nil, errors.New("DNS proxy selected an unavailable outbound")
 	}
@@ -187,6 +190,8 @@ func exchangeDNSProxyWire(ctx context.Context, query []byte, resolver *C.Metadat
 		if err != nil {
 			return nil, err
 		}
+		appendDNSProxyGroups(conn, route.groups)
+		conn = statistic.NewTCPTracker(conn, statistic.DefaultManager, dnsProxyDisplayMetadata(resolver, route.qname), route.rule, 0, 0, true)
 		defer conn.Close()
 		if err := conn.SetDeadline(deadline); err != nil {
 			return nil, err
@@ -217,6 +222,8 @@ func exchangeDNSProxyWire(ctx context.Context, query []byte, resolver *C.Metadat
 	if err != nil {
 		return nil, err
 	}
+	appendDNSProxyGroups(conn, route.groups)
+	conn = statistic.NewUDPTracker(conn, statistic.DefaultManager, dnsProxyDisplayMetadata(resolver, route.qname), route.rule, 0, 0, true)
 	defer conn.Close()
 	if err := conn.SetDeadline(deadline); err != nil {
 		return nil, err
@@ -240,6 +247,23 @@ func exchangeDNSProxyWire(ctx context.Context, query []byte, resolver *C.Metadat
 		}
 		return response[:n], nil
 	}
+}
+
+// Group DialContext/ListenPacketContext normally append themselves while
+// returning from the inner dial. DNS routing freezes the leaf using QNAME, so
+// restore that same inner-to-outer chain without selecting the groups again.
+func appendDNSProxyGroups(conn C.Connection, groups []C.Proxy) {
+	for index := len(groups) - 1; index >= 0; index-- {
+		conn.AppendToChains(groups[index])
+	}
+}
+
+func dnsProxyDisplayMetadata(resolver *C.Metadata, qname string) *C.Metadata {
+	metadata := resolver.Clone()
+	// QNAME is only a display/routing label. Never put it on the metadata used
+	// by the outbound adapter: the actual destination remains resolver IP:53.
+	metadata.Host = qname
+	return metadata
 }
 
 func writeDNSProxyFrame(w io.Writer, frame []byte) error {
