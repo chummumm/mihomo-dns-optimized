@@ -218,6 +218,91 @@ func TestDNSProxySubRulePassControlFlow(t *testing.T) {
 	}
 }
 
+func TestDNSProxyPassGroupsBeforeUDPCheck(t *testing.T) {
+	for _, test := range []struct {
+		name, control, want string
+		subRule             bool
+	}{
+		{"top-level PASS", "PASS", "Philippines", false},
+		{"sub-rule PASS", "PASS", "Philippines", true},
+		{"sub-rule PASS-RULE", "PASS-RULE", "AWS", true},
+		{"real outbound remains blocked", "AWS", "", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dnsProxyTestState(t)
+			proxies["PASS"] = newDNSProxyTestProxy(newDNSProxyTestBase("PASS", C.Pass, true))
+			proxies["PASS-RULE"] = newDNSProxyTestProxy(newDNSProxyTestBase("PASS-RULE", C.PassRule, true))
+			group := &dnsProxyTestAdapter{
+				dnsProxyTestBase: newDNSProxyTestBase("control", C.Selector, false),
+				choose:           func(*C.Metadata, bool) C.Proxy { return proxies[test.control] },
+			}
+			proxies["control"] = newDNSProxyTestProxy(group)
+			rules = []C.Rule{dnsProxyTestRule(t, "DOMAIN,a.example,control"), dnsProxyTestRule(t, "MATCH,Philippines")}
+			if test.subRule {
+				subRules["services"] = []C.Rule{dnsProxyTestRule(t, "DOMAIN,a.example,control"), dnsProxyTestRule(t, "MATCH,AWS")}
+				rules[0] = dnsProxyTestRule(t, "SUB-RULE,(DOMAIN-SUFFIX,example),services")
+			}
+			metadata := &C.Metadata{Host: "a.example", NetWork: C.UDP, Type: C.INNER}
+			route, err := selectDNSProxy(metadata)
+			if test.want == "" {
+				if err == nil {
+					t.Fatalf("UDP-disabled forwarding group must fail closed, got %+v", route)
+				}
+				return
+			}
+			if err != nil || route.proxy.Name() != test.want {
+				t.Fatalf("control action was blocked by UDP capability: %+v, %v; want %s", route, err, test.want)
+			}
+			ordinary, _, err := resolveMetadata(metadata.Clone())
+			if err != nil || ordinary.Name() != route.proxy.Name() {
+				t.Fatalf("DNS control action differs from ordinary routing: %+v, %v", ordinary, err)
+			}
+		})
+	}
+}
+
+func TestDNSProxyRoundRobinPassDoesNotAdvance(t *testing.T) {
+	for _, first := range []string{"PASS", "AWS"} {
+		t.Run(first, func(t *testing.T) {
+			dnsProxyTestState(t)
+			proxies["PASS"] = newDNSProxyTestProxy(newDNSProxyTestBase("PASS", C.Pass, true))
+			members := []C.Proxy{proxies[first], proxies["DMIT"]}
+			next := 0
+			group := &dnsProxyTestAdapter{
+				dnsProxyTestBase: newDNSProxyTestBase("round-robin", C.LoadBalance, true),
+				choose: func(_ *C.Metadata, touch bool) C.Proxy {
+					selected := members[next]
+					// Match the round-robin group's contract: only a final
+					// selection, not a control-action preview, advances it.
+					if touch {
+						next = (next + 1) % len(members)
+					}
+					return selected
+				},
+			}
+			proxies["round-robin"] = newDNSProxyTestProxy(group)
+			rules = []C.Rule{dnsProxyTestRule(t, "DOMAIN,a.example,round-robin"), dnsProxyTestRule(t, "MATCH,Philippines")}
+			metadata := &C.Metadata{Host: "a.example", NetWork: C.TCP, Type: C.INNER}
+			want := []string{"AWS", "DMIT", "AWS"}
+			if first == "PASS" {
+				want = []string{"Philippines", "Philippines", "Philippines"}
+			}
+			for i, name := range want {
+				route, err := selectDNSProxy(metadata)
+				if err != nil || route.proxy.Name() != name {
+					t.Fatalf("query %d selected %+v, %v; want %s", i, route, err, name)
+				}
+				if first == "PASS" {
+					ordinary, _, err := resolveMetadata(metadata.Clone())
+					if err != nil || ordinary.Name() != name || group.Unwrap(metadata, false).Type() != C.Pass {
+						t.Fatalf("PASS advanced round-robin state: ordinary=%v, err=%v, next=%v", ordinary, err, group.Unwrap(metadata, false))
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestDNSProxyGeosite(t *testing.T) {
 	dnsProxyTestState(t)
 	oldHome := C.Path.HomeDir()
@@ -354,7 +439,9 @@ func TestDNSProxyEachQuerySelectsLiveGroupButDialsOriginalResolver(t *testing.T)
 		if metadata.DstIP.IsValid() || metadata.DstPort != 0 || metadata.SrcIP.IsValid() || metadata.InUser != "" {
 			t.Errorf("resolver metadata leaked into group selection: %+v", metadata)
 		}
-		seen = append(seen, metadata.Host)
+		if touch {
+			seen = append(seen, metadata.Host)
+		}
 		return proxies[selected]
 	}
 	proxies["live"] = newDNSProxyTestProxy(group)

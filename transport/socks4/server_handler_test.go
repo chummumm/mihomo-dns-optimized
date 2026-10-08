@@ -51,3 +51,46 @@ func TestServerHandshakeRequestHandlerRejectsBeforeSuccess(t *testing.T) {
 		})
 	}
 }
+
+func TestServerHandshakeEmptySOCKS4aHostIsRejectedOnlyWithHandler(t *testing.T) {
+	for _, restricted := range []bool{false, true} {
+		name := "original-compatible"
+		if restricted {
+			name = "restricted"
+		}
+		t.Run(name, func(t *testing.T) {
+			server, client := net.Pipe()
+			defer server.Close()
+			defer client.Close()
+			_ = client.SetDeadline(time.Now().Add(time.Second))
+			result := make(chan error, 1)
+			go func() {
+				var handler func(string, Command, string) error
+				if restricted {
+					handler = func(string, Command, string) error {
+						t.Error("empty SOCKS4a host reached destination handler")
+						return nil
+					}
+				}
+				_, _, _, err := ServerHandshakeWithHandler(server, nil, handler)
+				result <- err
+			}()
+			// 0.0.0.1 is the SOCKS4a marker, followed by empty USERID and HOST.
+			if _, err := client.Write([]byte{4, 1, 0, 53, 0, 0, 0, 1, 0, 0}); err != nil {
+				t.Fatal(err)
+			}
+			var reply [8]byte
+			if _, err := io.ReadFull(client, reply[:]); err != nil {
+				t.Fatal(err)
+			}
+			err := <-result
+			if restricted {
+				if reply[1] != RequestRejected || err != ErrRequestRejected {
+					t.Fatalf("empty SOCKS4a host accepted: %v %v", reply, err)
+				}
+			} else if reply[1] != RequestGranted || err != nil {
+				t.Fatalf("original handshake behavior changed: %v %v", reply, err)
+			}
+		})
+	}
+}

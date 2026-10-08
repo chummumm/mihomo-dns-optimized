@@ -11,7 +11,7 @@ case "${1:-test}" in
   test)
     python3 scripts/test-upstream-sync.py
     CGO_ENABLED=0 go test -tags with_gvisor -count=1 -timeout=5m \
-      ./listener/dnsproxy/... ./transport/socks4/... ./transport/socks5/... \
+      ./component/dnsmessage/... ./listener/dnsproxy/... ./transport/socks4/... ./transport/socks5/... \
       ./tunnel/... ./rules/logic/... ./rules/provider/... ./config/... \
       ./hub/route/... ./hub/executor/...
     # Top-level port tests cover defaults, lifecycle, binding, and global options.

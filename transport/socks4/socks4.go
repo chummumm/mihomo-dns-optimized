@@ -104,7 +104,13 @@ func ServerHandshakeWithHandler(rw io.ReadWriter, authenticator auth.Authenticat
 	if authenticator == nil || authenticator.Verify(user, "") {
 		code = RequestGranted
 		if handler != nil {
-			if err = handler(addr, command, user); err != nil {
+			// A SOCKS4a marker requires a nonempty host. Restricted inbounds
+			// must not mistake the marker address for the actual destination.
+			// Keep the original handshake's behavior when no handler is used.
+			if isReservedIP(dstIP) && host == "" {
+				err = ErrRequestRejected
+				code = RequestRejected
+			} else if err = handler(addr, command, user); err != nil {
 				code = RequestRejected
 			}
 		}

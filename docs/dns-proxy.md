@@ -92,11 +92,15 @@ rules:
 | --- | --- |
 | `DOMAIN`、`DOMAIN-SUFFIX`、`DOMAIN-KEYWORD`、`DOMAIN-REGEX`、`DOMAIN-WILDCARD` | 按 QNAME 匹配 |
 | `GEOSITE` | 复用已加载的域名数据库 |
-| `RULE-SET`，`behavior: domain` | 复用已加载的域名规则集 |
+| `RULE-SET`，`behavior: domain` | 复用已加载的域名规则集，支持原版 YAML、text 和 MRS 格式 |
 | `RULE-SET`，`behavior: classical` | 计算其中能用域名判断的部分 |
 | `AND`、`OR`、`NOT`、`SUB-RULE` | 只有能根据域名确定结果时才参与 |
 | `MATCH` | 正常作为最后的兜底规则 |
 | IP、GEOIP、进程、来源、端口、网络、入站等条件 | 无法代表原始业务连接，跳过 |
+
+域名匹配没有另写一套后缀、正则或规则集算法：上述域名规则直接调用原规则对象的 `Match`，域名规则集继续使用原 provider 的 `Match` 和 `DomainSet`。MRS 只是规则集的存储格式，加载后也使用同一个匹配实现。匹配前仅把 QNAME 转为小写并去掉末尾根点；发往解析器的报文保留原始大小写。
+
+新增的是 DNS 查询阶段的规则适配：从原版已经解析好的逻辑规则、classical 规则集和子规则中，计算仅凭 QNAME 能确定的结果。因此它复用原版的域名匹配算法，但不声称与携带完整 IP、进程等信息的业务路由完全等价。`PASS` 和 `PASS-RULE` 继续沿用原版的规则遍历含义；检查这些控制动作时不推进轮询组，也不要求控制动作具备 UDP 传输能力。
 
 这里需要区分两个地址：查询的域名决定**出口**；SmartDNS 指定的解析器 IP 决定**向谁请求 DNS**。例如 SmartDNS 查询 `1.1.1.1:53`，QNAME 命中 `菲律宾`，就通过该组当前节点向 `1.1.1.1:53` 查询。不会把请求错误地发到 `claude.ai:53`，也不会把 `1.1.1.1` 当作网站 IP 去匹配 GEOIP。
 
@@ -126,25 +130,42 @@ dns:
 
 专用入口本身仅接受字面量 IPv4 / IPv6 解析器地址，拒绝解析器主机名，以免为解析器地址再触发一层循环解析。SOCKS4 使用 IPv4；SOCKS4a 的地址字段也须填写字面量 IP。这里限制的是解析器的目标地址，DNS 报文中的待查询域名照常用于匹配规则。
 
-## 5. 拒绝行为及边界
+## 5. DNS 报文覆盖及拒绝边界
+
+报文解析复用 Mihomo 已有的 `github.com/miekg/dns`，入口和核心共用一份校验逻辑。目标端口为 `53` 只是第一道条件；完整 DNS 结构和查询边界也必须通过检查。
+
+| 报文或功能 | 处理方式 |
+| --- | --- |
+| 普通 TCP / UDP DNS 查询 | 按每条查询的 QNAME 选路，TCP 处理两字节长度前缀及完整帧 |
+| A、AAAA、CNAME、MX、TXT、NS、SOA、SRV、PTR、CAA、HTTPS / SVCB 等 | 支持；不把查询类型限制为 A / AAAA。HTTPS 记录查询属于普通 DNS，并不是 DoH |
+| DNSSEC 的 DS、DNSKEY、RRSIG、NSEC / NSEC3、DO / AD / CD 标志 | 保留报文；本入口不执行 DNSSEC 签名验证 |
+| EDNS、ECS、Cookie、Padding，以及未知查询类型、类别、标志和 EDNS 扩展 | 结构合法时原样传递，由 SmartDNS 和上游解析器解释 |
+| 域名压缩、根域名查询、IPv4 / IPv6 解析器 | 使用原解析器处理；根域名按 `.` 匹配 |
+| 带 `TC=1` 的完整截断响应 | 原样返回，后续 TCP 重试由 SmartDNS 决定；物理截断到不完整记录的报文仍拒绝 |
+| 普通错误响应，以及只有 12 字节头部的 FORMERR / SERVFAIL / REFUSED 等错误 | 验证来源、事务 ID 和 opcode 后返回；无问题的成功响应不接受 |
+
+校验会核对 DNS 头部四个记录计数与实际内容，拒绝不完整问题、尾随数据、错误的记录长度，以及重复、位置错误或非根域名所有者的 OPT 记录。OPT 不强制存在；存在时必须符合其结构约束。未知记录类型和扩展不因为“暂时不认识”而被禁用，避免阻碍 DNS 扩展。
+
+正常响应还必须对应原查询的名称、类型和类别。UDP 从错误来源、带错误事务 ID 或不匹配问题的报文到达时，在原有查询超时内继续等待正确响应，不把无关报文返回给 SmartDNS。CNAME 等回答内容不触发当前请求重新选路；后续新的域名查询独立匹配。
 
 - SOCKS4/4a、SOCKS5 CONNECT 和 HTTP CONNECT 的目标不是 `53`：返回协议错误并关闭，不拨号。
 - SOCKS5 UDP 数据报的目标不是 `53`：静默丢弃，不拨号。
-- 普通 HTTP 请求、DoH、DoT、DoQ、SOCKS BIND、分片 SOCKS5 UDP、非单播解析器地址：拒绝。
-- DNS 必须是有效的普通单问题查询；响应包冒充查询、多问题、尾随垃圾数据、AXFR / IXFR 等不转发。
+- 普通 HTTP 请求、DoH、DoT、DoQ、DNSCrypt、SOCKS BIND、分片 SOCKS5 UDP、非单播解析器地址：拒绝。SOCKS 分片限制不等同于禁用操作系统处理的 IP 分片。
+- 请求必须是普通单问题查询；响应包冒充查询、多问题、尾随垃圾数据，以及 AXFR / IXFR、UPDATE、NOTIFY、DSO 等不转发。
+- 没有问题域名的请求不在本入口的按域名分流范围内。`QDCOUNT=0` 并不普遍等于非法 DNS；这里因缺少 QNAME 而不支持它。
 - `REJECT` 返回 DNS `REFUSED`；`REJECT-DROP` 丢弃查询。TCP 查询被丢弃或交换失败时关闭该连接。
 - 选中的出口不支持 UDP：该次 UDP 交换失败，**不会自动改为直连**。SmartDNS 可以改用 `server-tcp`。
 - `DNS`、`rematch` 等需要重新进入路由的特殊出口不用于该链路；普通节点、直连和常用选择组正常使用。
 
 策略组没有可用条目时，仍遵循该组的 `empty-fallback` 配置；上游默认的 `COMPATIBLE` 是直连。需要空组也拒绝请求时，把相应组的 `empty-fallback` 显式设为 `REJECT`。
 
-DNS 查询内容（包括原始事务 ID、大小写和 EDNS 信息）原样发给解析器，返回包检查事务 ID、问题和来源。这里只决定这条 DNS 请求的出口，不改写 DNS 回答，也不移除 SmartDNS 自己的缓存、测速或过滤逻辑。
+DNS 查询内容（包括原始事务 ID、大小写和 EDNS 信息）原样发给解析器，不改写 DNS 回答，也不移除 SmartDNS 自己的缓存、测速或过滤逻辑。本入口判断的是 DNS 报文结构和支持的请求类型，不判断域名或 TXT 内容的用途，也不宣称能够识别或阻止所有 DNS 隧道。
 
 每个监听实例最多 128 个客户端会话、256 个并发查询；单次查询及握手超时 5 秒，空闲会话超时 60 秒。TCP 连接上的查询按帧顺序处理，每次查询独立建立上游交换，避免把不同域名固定到同一出口。策略组的定时健康检查仍然生效；此专用路径直接使用一次选定的节点，不调用策略组包裹拨号层的成功 / 失败回调。
 
 SOCKS5 UDP 同时提供与 mixed 一样的同端口 UDP 入口，以及标准 UDP ASSOCIATE 协商的临时转发端口。两条路径都逐报文校验目标和 DNS 内容，再逐查询选择出口。
 
-设置全局认证后，没有认证信息的同端口 UDP 数据报只允许 `skip-auth-prefixes` 指定的来源；其他来源应先完成 SOCKS5 认证，并使用 ASSOCIATE 返回的转发地址。UDP 来源访问控制同样生效。临时转发端口绑定到控制连接，连接关闭时清理会话；跨容器或其他主机访问时，需要能访问协商得到的地址。
+设置全局认证后，没有认证信息的同端口 UDP 数据报只允许 `skip-auth-prefixes` 指定的来源；其他来源应先完成 SOCKS5 认证，并使用 ASSOCIATE 返回的转发地址。UDP 来源访问控制同样生效。客户端未指定源端口时，只有通过共同 DNS 查询校验的首包才能固定源端口；畸形 DNS 不能抢先固定它。临时转发端口绑定到控制连接，连接关闭时清理会话；跨容器或其他主机访问时，需要能访问协商得到的地址。
 
 ## 6. 验证与排查
 
@@ -177,14 +198,20 @@ python3 scripts/test-dns-proxy.py /tmp/dns-route-kernel
 
 测试通过两个本地模拟 SOCKS5 出口，验证 HTTP CONNECT、SOCKS4/4a、SOCKS5 TCP、两种 UDP 入口的多域名分流、IPv4 / IPv6 解析器、选择组实时切换，以及非 `53`、非法 DNS 和分片数据包拒绝；同时检查顶层端口的读取、关闭、重开和热重载。面板验证直接读取 `/connections`，检查 TCP / UDP 的查询域名、解析器、来源、嵌套组链、流量累计和关闭操作，并确认完成后移除活动记录。使用保留的测试 IP，不需要公网 DNS，也不占用特权端口。
 
+协议边界回归还包括：报文声明存在但实际缺失的记录、重复 OPT、空 SOCKS4a 主机名、畸形 UDP 首包不固定源端口、只有头部的 DNS 错误、TC 标志保留，以及错误 ID / 问题的 UDP 响应之后仍能收到正确回答。测试直接统计模拟出口接受的连接数，确认被拒绝的请求没有拨号。真实轮询组和子规则用例检查 `PASS` / `PASS-RULE` 控制流；Go 测试另外覆盖多种记录类型、DNSSEC 和 EDNS 扩展。
+
 另外已用官方 SmartDNS `Release48.4`（`1.2026.08.05-0921`）进行实际客户端联调：带认证的 SOCKS5 UDP、SOCKS5 TCP、HTTP CONNECT TCP 三种方式均通过连续两域名分流验证。入口兼容 SmartDNS 在未指定客户端 IP 的 UDP ASSOCIATE 请求中仍填写解析器端口的行为，随后按真实首包固定 UDP 源端口。
 
 ## 实现位置与参考
 
 - [DNS 入口](../listener/dnsproxy/listener.go)
+- [共享 DNS 报文校验](../component/dnsmessage/message.go)
 - [每条查询的匹配及交换](../tunnel/dns_proxy.go)
 - [顶层配置](../config/config.go)
 - [端口管理](../listener/listener.go)
 - [SmartDNS 官方代理配置](https://pymumu.github.io/smartdns/config/proxy/)
 - [SmartDNS 官方配置选项](https://pymumu.github.io/smartdns/configuration/)
 - [Mihomo DNS 文档](https://wiki.metacubex.one/config/dns/)
+- [RFC 6891：EDNS 的 OPT 结构与扩展](https://www.rfc-editor.org/rfc/rfc6891.html)
+- [RFC 8906：DNS 标志、未知类型与中间设备兼容性](https://www.rfc-editor.org/rfc/rfc8906.html)
+- [RFC 9619：普通 DNS 消息的问题数量](https://www.rfc-editor.org/rfc/rfc9619.html)

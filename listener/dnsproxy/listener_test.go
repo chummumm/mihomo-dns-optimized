@@ -419,6 +419,47 @@ func TestSmartDNSUDPAssociateUnspecifiedAddressWithResolverPort(t *testing.T) {
 	}
 }
 
+func TestUDPAssociationMalformedFirstPacketDoesNotPinSource(t *testing.T) {
+	valid := dnsQuery(t, "trailing.example.", 35)
+	response := append([]byte(nil), valid...)
+	response[2] |= 0x80
+	for name, malformed := range map[string][]byte{
+		"no-question": make([]byte, 12),
+		"response":    response,
+		"trailing":    append(append([]byte(nil), valid...), 0),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := new(recordingExchanger)
+			l := testListener(t, r)
+			control := testConn(t, l.Address())
+			code, address := socksRequest(t, control, "0.0.0.0:53", socks5.CmdUDPAssociate, nil)
+			if code != 0 {
+				t.Fatalf("UDP association rejected: %d", code)
+			}
+			relay := address.UDPAddr()
+			first, legitimate := udpClient(t), udpClient(t)
+			packet, err := socks5.EncodeUDPPacket(socks5.ParseAddr("8.8.8.8:53"), malformed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := first.WriteToUDP(packet, relay); err != nil {
+				t.Fatal(err)
+			}
+			// Socket A's valid envelope contains malformed DNS. Socket B's
+			// first valid query must still claim the unknown source port.
+			sendUDP(t, legitimate, relay, "8.8.8.8:53", "first-valid.example.", 36, 0)
+			receiveUDP(t, legitimate, "first-valid.example.", 36)
+			sendUDP(t, first, relay, "8.8.8.8:53", "wrong-source.example.", 37, 0)
+			sendUDP(t, legitimate, relay, "8.8.8.8:53", "still-pinned.example.", 38, 0)
+			receiveUDP(t, legitimate, "still-pinned.example.", 38)
+			queries := r.snapshot()
+			if len(queries) != 2 || queries[0].name != "first-valid.example." || queries[1].name != "still-pinned.example." {
+				t.Fatalf("malformed packet captured source port or reached exchange: %+v", queries)
+			}
+		})
+	}
+}
+
 func TestMalformedTCPFrameIsDropped(t *testing.T) {
 	r := new(recordingExchanger)
 	l := testListener(t, r)

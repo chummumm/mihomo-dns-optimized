@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/metacubex/mihomo/component/dnsmessage"
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
 	"github.com/metacubex/mihomo/log"
@@ -22,7 +23,7 @@ import (
 const (
 	dnsProxyTimeout    = 5 * time.Second
 	dnsProxyMaxDepth   = 64
-	dnsProxyMaxMessage = 65535
+	dnsProxyMaxMessage = dnsmessage.MaxSize
 )
 
 var errDNSProxyDrop = errors.New("DNS proxy query rejected without a response")
@@ -59,20 +60,11 @@ func exchangeDNSProxy(ctx context.Context, wire []byte, resolver *C.Metadata, se
 	if resolver.NetWork != C.TCP && resolver.NetWork != C.UDP {
 		return nil, errors.New("DNS proxy requires TCP or UDP")
 	}
-	request, err := unpackDNSProxyMessage(wire)
+	request, err := dnsmessage.UnpackQuery(wire)
 	if err != nil {
 		return nil, err
 	}
-	if request.Response || request.Opcode != dns.OpcodeQuery || request.Rcode != dns.RcodeSuccess || request.Truncated || len(request.Question) != 1 || len(request.Answer) != 0 || len(request.Ns) != 0 {
-		return nil, errors.New("DNS proxy accepts only ordinary single-question DNS queries")
-	}
 	question := request.Question[0]
-	if question.Qtype == dns.TypeAXFR || question.Qtype == dns.TypeIXFR {
-		return nil, errors.New("DNS proxy does not support zone transfers")
-	}
-	if _, ok := dns.IsDomainName(question.Name); !ok {
-		return nil, errors.New("DNS proxy query has an invalid question name")
-	}
 	host := strings.ToLower(strings.TrimSuffix(question.Name, "."))
 	// The root name is a valid DNS question and should reach MATCH.
 	if host == "" {
@@ -134,43 +126,21 @@ func exchangeDNSProxy(ctx context.Context, wire []byte, resolver *C.Metadata, se
 	return response, nil
 }
 
-// Unpack additionally rejects trailing bytes; dns.Msg.Unpack deliberately
-// accepts them, which is unsuitable for a DNS-only proxy boundary.
-func unpackDNSProxyMessage(wire []byte) (*dns.Msg, error) {
-	if len(wire) < 12 || len(wire) > dnsProxyMaxMessage {
-		return nil, errors.New("DNS proxy message length is out of bounds")
-	}
-	message := new(dns.Msg)
-	if err := message.Unpack(wire); err != nil {
-		return nil, fmt.Errorf("malformed DNS proxy message: %w", err)
-	}
-	off := 12
-	for range message.Question {
-		_, next, err := dns.UnpackDomainName(wire, off)
-		if err != nil || next+4 > len(wire) {
-			return nil, errors.New("malformed DNS proxy question")
-		}
-		off = next + 4
-	}
-	for count := len(message.Answer) + len(message.Ns) + len(message.Extra); count > 0; count-- {
-		_, next, err := dns.UnpackRR(wire, off)
-		if err != nil || next <= off {
-			return nil, errors.New("malformed DNS proxy resource record")
-		}
-		off = next
-	}
-	if off != len(wire) {
-		return nil, errors.New("DNS proxy message contains trailing data")
-	}
-	return message, nil
-}
-
 func validateDNSProxyResponse(request *dns.Msg, wire []byte) error {
-	response, err := unpackDNSProxyMessage(wire)
+	response, err := dnsmessage.Unpack(wire)
 	if err != nil {
 		return err
 	}
-	if !response.Response || response.Opcode != request.Opcode || response.Id != request.Id || len(response.Question) != 1 {
+	if !response.Response || response.Opcode != request.Opcode || response.Id != request.Id {
+		return errors.New("DNS proxy received a mismatched response")
+	}
+	// Some resolvers return only the header for errors such as REFUSED or
+	// FORMERR. Strict Unpack already verified that every section count is zero.
+	// Preserve that error; a successful answer must still echo the question.
+	if len(wire) == 12 && response.Rcode != dns.RcodeSuccess {
+		return nil
+	}
+	if len(response.Question) != 1 {
 		return errors.New("DNS proxy received a mismatched response")
 	}
 	question, answerQuestion := request.Question[0], response.Question[0]
@@ -184,6 +154,10 @@ func exchangeDNSProxyWire(ctx context.Context, query []byte, resolver *C.Metadat
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		return nil, errors.New("DNS proxy exchange requires a deadline")
+	}
+	request, err := dnsmessage.UnpackQuery(query)
+	if err != nil {
+		return nil, err
 	}
 	if resolver.NetWork == C.TCP {
 		conn, err := route.proxy.DialContext(ctx, resolver)
@@ -243,6 +217,11 @@ func exchangeDNSProxyWire(ctx context.Context, query []byte, resolver *C.Metadat
 		}
 		if !sameDNSProxyEndpoint(from, resolver.AddrPort()) {
 			// Ignore unrelated packets until the bounded exchange deadline.
+			continue
+		}
+		if err := validateDNSProxyResponse(request, response[:n]); err != nil {
+			// A delayed or unrelated datagram from this resolver must not end
+			// the current exchange before its matching reply can arrive.
 			continue
 		}
 		return response[:n], nil
@@ -324,6 +303,15 @@ func selectDNSProxy(metadata *C.Metadata) (dnsProxyRoute, error) {
 		if !ok {
 			continue // Same behavior as normal routing for a missing adapter.
 		}
+		// PASS controls rule traversal, so inspect it before checking transport
+		// support or touching a group (which can advance a round-robin choice).
+		preview, err := unwrapDNSProxyWithTouch(proxy, rule, metadata, false)
+		if err != nil {
+			return preview, err
+		}
+		if preview.proxy.Type() == C.Pass {
+			continue
+		}
 		route, err := unwrapDNSProxy(proxy, rule, metadata)
 		if err != nil {
 			return route, err
@@ -346,7 +334,10 @@ func unwrapDNSProxyWithTouch(proxy C.Proxy, rule C.Rule, metadata *C.Metadata, t
 		if route.proxy == nil {
 			return route, errors.New("DNS proxy outbound is unavailable")
 		}
-		if metadata.NetWork == C.UDP && !route.proxy.SupportUDP() {
+		// A preview only checks control actions; PASS and PASS-RULE do not
+		// carry traffic. The final selection still fails closed for any
+		// UDP-disabled group or leaf that would actually forward this query.
+		if touch && metadata.NetWork == C.UDP && !route.proxy.SupportUDP() {
 			return route, fmt.Errorf("DNS proxy outbound %q does not support UDP", route.proxy.Name())
 		}
 		next := route.proxy.Unwrap(metadata, touch)

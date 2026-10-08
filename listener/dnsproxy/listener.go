@@ -21,6 +21,7 @@ import (
 
 	"github.com/metacubex/mihomo/adapter/inbound"
 	"github.com/metacubex/mihomo/component/auth"
+	"github.com/metacubex/mihomo/component/dnsmessage"
 	C "github.com/metacubex/mihomo/constant"
 	authStore "github.com/metacubex/mihomo/listener/auth"
 	"github.com/metacubex/mihomo/log"
@@ -524,9 +525,13 @@ func (l *Listener) readUDP(ctx context.Context, cancel context.CancelFunc, conn 
 		if err != nil {
 			continue
 		}
-		// Pin only after a valid DNS destination and SOCKS envelope. An
-		// unsolicited packet must not capture an association's source port.
+		// A malformed first DNS message must not capture the association's
+		// source port or refresh its idle timer. Share the core's query parser
+		// here; subsequent packets are still validated by the exchanger.
 		if clientPort == 0 {
+			if _, err := dnsmessage.UnpackQuery(query); err != nil {
+				continue
+			}
 			clientPort = sender.Port()
 		}
 		_ = udp.SetReadDeadline(time.Now().Add(idleTimeout))

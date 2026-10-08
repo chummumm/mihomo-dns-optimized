@@ -120,6 +120,7 @@ func TestSOCKS4RejectsForbiddenTargetBeforeSuccess(t *testing.T) {
 	}{
 		{"other-port", "8.8.8.8", 443, false},
 		{"4a-hostname", "dns.google", 53, true},
+		{"4a-empty-hostname", "", 53, true},
 		{"4a-other-port", "8.8.8.8", 853, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {

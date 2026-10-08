@@ -58,6 +58,20 @@ def question(name, transaction=1234):
     return struct.pack("!6H", transaction, 0x0100, 1, 0, 0, 0) + wire_name + struct.pack("!2H", 1, 1)
 
 
+def malformed_queries(query):
+    """Packets a permissive DNS unpacker can accept despite invalid structure."""
+    cases = [b"GET /dns-query HTTP/1.1\r\n\r\n", query + b"\x00"]
+    for offset in (6, 8, 10):
+        packet = bytearray(query)
+        struct.pack_into("!H", packet, offset, 1)
+        cases.append(bytes(packet))  # One advertised RR, no record on the wire.
+    opt = b"\x00" + struct.pack("!HHIH", 41, 1232, 0, 0)
+    packet = bytearray(query)
+    struct.pack_into("!H", packet, 10, 2)
+    cases.append(bytes(packet) + opt + opt)
+    return cases
+
+
 def question_name(wire):
     labels, offset = [], 12
     while wire[offset]:
@@ -119,6 +133,11 @@ class MockSOCKS(socketserver.ThreadingTCPServer):
             gate = self.held_queries.get((name.lower(), network))
         if gate is not None and not gate.wait(8):
             raise TimeoutError("test did not release the held DNS response")
+        error_code = {"formerr.example": 1, "servfail.example": 2, "refused.example": 5}.get(name)
+        if error_code is not None:
+            return struct.pack("!6H", struct.unpack("!H", wire[:2])[0], 0x8180 | error_code, 0, 0, 0, 0)
+        if name == "truncated.example":
+            return struct.pack("!6H", struct.unpack("!H", wire[:2])[0], 0x8380, 1, 0, 0, 0) + wire[12:]
         return make_answer(wire, self.answer)
 
 
@@ -148,6 +167,11 @@ class MockHandler(socketserver.BaseRequestHandler):
                     packet, peer = udp.recvfrom(65535)
                     target, wire = decode_packet(packet)
                     response = self.server.respond(wire, target, "udp")
+                    if question_name(wire) == "retry.example":
+                        wrong_id = struct.pack("!H", (struct.unpack("!H", wire[:2])[0] + 1) % 65536) + response[2:]
+                        wrong_question = make_answer(question("mismatch.example", struct.unpack("!H", wire[:2])[0]), self.server.answer)
+                        for unrelated in (wrong_id, wrong_question):
+                            udp.sendto(b"\x00\x00\x00" + encode_address(*target) + unrelated, peer)
                     udp.sendto(b"\x00\x00\x00" + encode_address(*target) + response, peer)
                     with contextlib.suppress(EOFError, OSError):
                         while conn.recv(1024):
@@ -221,7 +245,7 @@ def expect_port_closed(port):
         pass
 
 
-def wait_dns_connections(api_port, host=None):
+def wait_dns_connections(api_port, host=None, minimum_upload_total=None):
     deadline = time.monotonic() + 2
     while True:
         snapshot = api_request(api_port, "/connections")
@@ -232,7 +256,7 @@ def wait_dns_connections(api_port, host=None):
         if host is not None:
             matching = [entry for entry in entries
                         if entry["metadata"].get("host") == host and entry["upload"] > 0]
-            if len(matching) == 1:
+            if len(matching) == 1 and (minimum_upload_total is None or snapshot["uploadTotal"] >= minimum_upload_total):
                 return snapshot, matching[0]
         if time.monotonic() >= deadline:
             raise AssertionError(f"unexpected dashboard connections for {host!r}: {entries}")
@@ -260,7 +284,11 @@ def check_dashboard_connections(dns_port, api_port, resolver, upstream):
                     client.sendto(b"\x00\x00\x00" + encode_address(*resolver) + query,
                                   ("127.0.0.1", dns_port))
 
-                during, entry = wait_dns_connections(api_port, host)
+                # The upstream API snapshots global totals before encoding the
+                # live tracker counters. Wait for both views of the write;
+                # keep the exact equality assertions below to catch overcount.
+                uploaded = len(query) + (2 if network == "tcp" else 0)
+                during, entry = wait_dns_connections(api_port, host, before["uploadTotal"] + uploaded)
                 metadata = entry["metadata"]
                 assert metadata["network"] == network and metadata["type"] == "Socks5"
                 assert metadata["sourceIP"] == "127.0.0.1"
@@ -271,9 +299,8 @@ def check_dashboard_connections(dns_port, api_port, resolver, upstream):
                 assert entry["rule"] == "Domain" and entry["rulePayload"] == host
                 assert entry["chains"] == ["B", "Chosen", "DNSOuter"], entry["chains"]
                 assert len(entry["providerChains"]) == len(entry["chains"])
-                uploaded = len(query) + (2 if network == "tcp" else 0)
                 assert entry["upload"] == uploaded and entry["download"] == 0
-                assert during["uploadTotal"] - before["uploadTotal"] == uploaded
+                assert during["uploadTotal"] - before["uploadTotal"] == uploaded, (network, host, before["uploadTotal"], during["uploadTotal"], uploaded)
 
                 if close_from_dashboard:
                     api_request(api_port, f"/connections/{entry['id']}", method="DELETE")
@@ -302,6 +329,69 @@ def check_dashboard_connections(dns_port, api_port, resolver, upstream):
                     assert after["downloadTotal"] - before["downloadTotal"] == downloaded
                 assert after["uploadTotal"] - before["uploadTotal"] == uploaded
     print("PASS dashboard connections: TCP/UDP QNAME, resolver, source, rule and nested group chains; exact traffic totals; completion cleanup and API close")
+
+
+def check_reply_compatibility(dns_port, resolver, expected_answer):
+    cases = [("formerr.example", 1), ("servfail.example", 2), ("refused.example", 5), ("truncated.example", 0)]
+
+    def check(response, query, name, rcode):
+        assert response[:2] == query[:2], "error response transaction ID changed"
+        assert response[2] & 0x80 and response[3] & 15 == rcode
+        if rcode:
+            assert len(response) == 12 and response[4:] == b"\x00" * 8, "header-only error was rewritten"
+        else:
+            assert response[2] & 2 and question_name(response) == name, "TC response was not preserved"
+
+    conn, reply, _ = socks_request(dns_port, resolver)
+    with conn:
+        assert reply == 0
+        for index, (name, rcode) in enumerate(cases):
+            query = question(name, 200 + index)
+            conn.sendall(frame(query))
+            check(read_frame(conn), query, name, rcode)
+
+    conn, reply, relay = socks_request(dns_port, ("0.0.0.0", 53), command=3)
+    with conn, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+        assert reply == 0
+        udp.bind(("127.0.0.1", 0))
+        udp.settimeout(3)
+        for index, (name, rcode) in enumerate(cases):
+            query = question(name, 210 + index)
+            udp.sendto(b"\x00\x00\x00" + encode_address(*resolver) + query, relay)
+            target, response = decode_packet(udp.recvfrom(65535)[0])
+            assert target == resolver
+            check(response, query, name, rcode)
+        query = question("retry.example", 220)
+        udp.sendto(b"\x00\x00\x00" + encode_address(*resolver) + query, relay)
+        target, response = decode_packet(udp.recvfrom(65535)[0])
+        assert target == resolver
+        check_answer(response, query, expected_answer)
+    print("PASS response compatibility: TCP/UDP header-only DNS errors, unchanged TC, UDP ignores wrong ID/question before the matching reply")
+
+
+def check_rule_control_actions(dns_port, resolver, expected_answer):
+    # These are real parsed groups, including the upstream round-robin strategy.
+    # PASS must not advance its cursor; neither control action needs UDP support.
+    queries = [question(name, 230 + index) for index, name in enumerate(
+        ("pass-control.example", "pass-control.example", "sub-control.example", "sub-control.example")
+    )]
+    conn, reply, _ = socks_request(dns_port, resolver)
+    with conn:
+        assert reply == 0
+        for query in queries:
+            conn.sendall(frame(query))
+            check_answer(read_frame(conn), query, expected_answer)
+    conn, reply, relay = socks_request(dns_port, ("0.0.0.0", 53), command=3)
+    with conn, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+        assert reply == 0
+        udp.bind(("127.0.0.1", 0))
+        udp.settimeout(3)
+        for query in queries:
+            udp.sendto(b"\x00\x00\x00" + encode_address(*resolver) + query, relay)
+            target, response = decode_packet(udp.recvfrom(65535)[0])
+            assert target == resolver
+            check_answer(response, query, expected_answer)
+    print("PASS rule controls: real round-robin PASS cursor unchanged; TCP/UDP PASS and SUB-RULE PASS-RULE continue past UDP-disabled control groups")
 
 
 def run(binary):
@@ -341,7 +431,26 @@ proxy-groups:
   - name: DNSOuter
     type: select
     proxies: [Chosen]
+  - name: PassRoundRobin
+    type: load-balance
+    strategy: round-robin
+    # Whitespace is skipped by the upstream health checker, keeping this
+    # fixture offline and both round-robin candidates in their initial state.
+    url: " "
+    disable-udp: true
+    proxies: [PASS, A]
+  - name: PassRuleGroup
+    type: select
+    disable-udp: true
+    proxies: [PASS-RULE]
+sub-rules:
+  DNSControl:
+    - MATCH,PassRuleGroup
+    - MATCH,B
 rules:
+  - DOMAIN,pass-control.example,PassRoundRobin
+  - DOMAIN,pass-control.example,B
+  - SUB-RULE,(DOMAIN,sub-control.example),DNSControl
   - DOMAIN,first.example,A
   - DOMAIN,second.example,B
   - DOMAIN,selector.example,Chosen
@@ -417,6 +526,17 @@ rules:
                         assert reply == 0
                         udp.bind(("127.0.0.1", 0))
                         udp.settimeout(3)
+                        # A malformed first DNS packet from another source port
+                        # must neither dial upstream nor pin this association.
+                        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as noise:
+                            noise.bind(("127.0.0.1", 0))
+                            noise.settimeout(0.2)
+                            noise.sendto(b"\x00\x00\x00" + encode_address(*resolver) + b"\x00" * 12, relay)
+                            try:
+                                noise.recvfrom(65535)
+                                raise AssertionError("malformed first DNS packet received a reply")
+                            except socket.timeout:
+                                pass
                         for query, expected, target in ((q1, upstream_a.answer, resolver), (q2, upstream_b.answer, resolver), (q2, upstream_b.answer, resolver_v6)):
                             udp.sendto(b"\x00\x00\x00" + encode_address(*target) + query, relay)
                             packet, _ = udp.recvfrom(65535)
@@ -430,8 +550,11 @@ rules:
                         for packet in (
                             b"\x00\x00\x00" + encode_address(resolver[0], 443) + q1,
                             b"\x00\x00\x01" + encode_address(*resolver) + q1,
+                            b"\x00\x01\x00" + encode_address(*resolver) + q1,
+                            b"\x00\x00\x00\x04\x20",  # Truncated IPv6 target.
                             b"\x00\x00\x00" + encode_address(*resolver) + b"\x00" * 12,
                             b"\x00\x00\x00" + encode_address(*resolver) + question("drop.example"),
+                            *(b"\x00\x00\x00" + encode_address(*resolver) + invalid for invalid in malformed_queries(q1)),
                         ):
                             udp.sendto(packet, relay)
                             try:
@@ -447,7 +570,7 @@ rules:
                         udp.sendto(b"\x00\x00\x00" + encode_address(*resolver) + blocked, relay)
                         _, response = decode_packet(udp.recvfrom(65535)[0])
                         assert response[3] & 15 == 5, "REJECT did not return DNS REFUSED"
-                    print("PASS SOCKS5 UDP: SmartDNS ASSOCIATE, per-datagram routes, IPv4/IPv6 targets, drop/REFUSED, malformed and fragmented packets")
+                    print("PASS SOCKS5 UDP: SmartDNS ASSOCIATE, valid-first-packet source pinning, per-datagram routes, IPv4/IPv6, drop/REFUSED, strict DNS and envelope validation")
 
                     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
                         udp.bind(("127.0.0.1", 0))
@@ -498,24 +621,30 @@ rules:
                     # A successful CONNECT to port 53 is not an opaque tunnel.
                     # Non-DNS bytes must close it before an upstream connection.
                     for protocol in ("http", "socks5", "socks4", "socks4a"):
-                        if protocol == "http":
-                            conn, reply = http_request(dns_port, resolver)
-                            assert reply == 200
-                        elif protocol == "socks5":
-                            conn, reply, _ = socks_request(dns_port, resolver)
-                            assert reply == 0
-                        else:
-                            conn, reply = socks4_request(dns_port, resolver, protocol == "socks4a")
-                            assert reply == 90
-                        with conn:
-                            conn.sendall(frame(b"GET /dns-query HTTP/1.1\r\n\r\n"))
-                            assert conn.recv(1) == b"", f"{protocol} forwarded non-DNS traffic on port 53"
+                        for invalid in malformed_queries(q1):
+                            if protocol == "http":
+                                conn, reply = http_request(dns_port, resolver)
+                                assert reply == 200
+                            elif protocol == "socks5":
+                                conn, reply, _ = socks_request(dns_port, resolver)
+                                assert reply == 0
+                            else:
+                                conn, reply = socks4_request(dns_port, resolver, protocol == "socks4a")
+                                assert reply == 90
+                            with conn:
+                                conn.sendall(frame(invalid))
+                                assert conn.recv(1) == b"", f"{protocol} forwarded malformed DNS traffic on port 53"
+                    with connect(dns_port) as conn:
+                        conn.sendall(b"\x04\x01\x00\x35\x00\x00\x00\x01\x00\x00")
+                        assert read_exact(conn, 8)[1] == 91, "empty SOCKS4a hostname was accepted"
                     with record_lock:
                         assert len(records) == before, "forbidden request reached an outbound"
                         assert upstream_a.connections + upstream_b.connections == connections_before, "forbidden TCP request dialed an outbound"
                         assert all(target in (resolver, resolver_v6) for _, _, target, _ in records)
                     print("PASS all TCP protocols: non-53 destinations and non-DNS payloads rejected before any outbound dial")
 
+                    check_reply_compatibility(dns_port, resolver, upstream_a.answer)
+                    check_rule_control_actions(dns_port, resolver, upstream_b.answer)
                     check_dashboard_connections(dns_port, api_port, resolver, upstream_b)
 
                     # The new field follows the same live configuration paths as
