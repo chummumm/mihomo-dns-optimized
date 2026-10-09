@@ -8,6 +8,9 @@ import (
 )
 
 func parseDNSDualStack(raw RawDNS) (dns.DualStackConfig, error) {
+	// Keep the requested options so existing configurations remain valid.
+	// The resolver gates selection using the effective global-and-DNS IPv6
+	// setting; a disabled family must not suppress a deliverable answer.
 	result := dns.DualStackConfig{
 		Enabled:        raw.DualStackIPSelection,
 		Threshold:      10 * time.Millisecond,

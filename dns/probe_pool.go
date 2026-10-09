@@ -11,7 +11,7 @@ import (
 	"github.com/metacubex/mihomo/common/contextutils"
 )
 
-var errDNSProbeBusy = errors.New("DIRECT probe queue full")
+var errDNSProbeBusy = errors.New("DIRECT probe capacity reached")
 var errDNSProbeClosed = errors.New("DIRECT probe pool closed")
 
 type dnsProbeWork func(context.Context) (time.Duration, error)
@@ -55,10 +55,12 @@ type dnsProbePool struct {
 	wg              sync.WaitGroup
 }
 
-func newDNSProbePool(workers, queue int, timeout time.Duration) *dnsProbePool {
+func newDNSProbePool(workers int, timeout time.Duration) *dnsProbePool {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &dnsProbePool{ctx: ctx, cancel: cancel, workers: workers, timeout: timeout,
-		jobs: make(chan *dnsProbeTask, queue), tasks: make(map[string]*dnsProbeTask), samples: make(map[string]dnsProbeSample)}
+		// This buffer only dispatches already reserved active slots. Admission
+		// never permits a backlog behind the workers' running probes.
+		jobs: make(chan *dnsProbeTask, workers), tasks: make(map[string]*dnsProbeTask), samples: make(map[string]dnsProbeSample)}
 }
 
 // Only a frozen real DIRECT plan gives a safe cross-query probe identity.
@@ -105,9 +107,10 @@ func (p *dnsProbePool) submit(ctx context.Context, key string, work dnsProbeWork
 		key = fmt.Sprintf("expired-retry:%d", id)
 		share = false
 	}
-	// Both queue and running task identities are bounded. A failed admission
-	// only skips a speed probe; the original valid DNS answer remains usable.
-	if len(p.tasks) >= cap(p.jobs)+p.workers {
+	// Samples and existing tasks above need no new active slot. A new target
+	// must reserve one immediately: a busy checker skips the optional probe
+	// instead of making a valid DNS reply wait behind unrelated work.
+	if len(p.tasks) >= p.workers {
 		p.mu.Unlock()
 		return nil, errDNSProbeBusy
 	}

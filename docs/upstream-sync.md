@@ -10,7 +10,7 @@
 
 产物覆盖 Linux、Windows、macOS、FreeBSD、Android 共 **37 个平台 / CPU 目标**。
 其中 12 个 Linux 目标另提供 `.deb` / `.rpm`，5 个目标提供 `.pkg.tar.zst`；
-全部共 66 个归档和安装包，另附 `BUILDINFO.json` 和 `SHA256SUMS`。
+全部共 66 个归档和安装包，另附 `BUILDINFO.json`、`version.txt` 和 `SHA256SUMS`。
 完整 CPU、安装路径与兼容范围见[预编译文件与安装包](releases.md)，矩阵唯一来源为
 [`packaging/targets.json`](../packaging/targets.json)。
 
@@ -27,7 +27,7 @@ Actions artifact 保留 30 天。归档解压后需按平台给二进制增加�
 文件集合、版本和摘要校验均通过，才自动把构建结果发布到
 GitHub Releases，提供持久下载。Pull Request 只测试和上传 Actions artifact。
 手动运行 `Build DNS optimized` 并勾选 `publish_release`、推送形如
-`dns-v1.19.32.1` 的版本标签，以及自动上游更新成功后，也会发布 release。
+`v1.19.32-dns-optimized-1` 的版本标签，以及自动上游更新成功后，也会发布 release。
 发布只在本仓库进行，已有同名 release 的附件不会被覆盖；重跑也必须核对既有
 Release 的完整附件集合及 GitHub 返回的 SHA-256 摘要。
 

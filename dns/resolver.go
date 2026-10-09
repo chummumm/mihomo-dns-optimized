@@ -17,7 +17,6 @@ import (
 	"github.com/metacubex/mihomo/log"
 
 	D "github.com/miekg/dns"
-	"github.com/samber/lo"
 	"golang.org/x/exp/maps"
 )
 
@@ -248,6 +247,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 		}
 		ctx, cancel := context.WithTimeout(workContext, resolver.DefaultDNSTimeout)
 		defer cancel()
+		ctx = withDNSAnswerLifetimes(ctx)
 		cache := false
 
 		defer func() {
@@ -258,12 +258,14 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 				return
 			}
 
+			original := result
 			result = r.answerPolicy.apply(m, result)
+			result = ageDNSAnswerAfterPolicy(ctx, original, result)
 			if cache {
 				if r.cacheControl != nil {
 					r.cacheControl.Store(ctx, key, q, result)
 				} else {
-					putMsgToCache(r.cache, key, q, result)
+					putMsgToCacheWithExpiry(r.cache, key, q, result, dnsAnswerExpires(ctx, result))
 				}
 			}
 		}()
@@ -381,7 +383,12 @@ func (r *Resolver) ipExchange(ctx context.Context, m *D.Msg) (msg *D.Msg, err er
 		return res.Msg, res.Error
 	}
 
-	msgCh := r.asyncExchange(ctx, main, m)
+	mainContext := ctx
+	filterBeforeSelection := len(fallback) != 0 && r.speedCheckEligible(ctx, main, m)
+	if filterBeforeSelection {
+		mainContext = withSpeedCheckResponseFilter(ctx, r.acceptMainResponse)
+	}
+	msgCh := r.asyncExchange(mainContext, main, m)
 
 	if len(fallback) == 0 { // a direct query never races the proxy fallback pool
 		res := <-msgCh
@@ -394,16 +401,11 @@ func (r *Resolver) ipExchange(ctx context.Context, m *D.Msg) (msg *D.Msg, err er
 		fallbackMsg = r.asyncExchange(ctx, fallback, m)
 	}
 	res := <-msgCh
-	if res.Error == nil {
-		if ips := msgToIP(res.Msg); len(ips) != 0 {
-			shouldNotFallback := lo.EveryBy(ips, func(ip netip.Addr) bool {
-				return !r.shouldIPFallback(ip)
-			})
-			if shouldNotFallback {
-				msg, err = res.Msg, res.Error // no need to wait for fallback result
-				return
-			}
-		}
+	if res.Error == nil && (filterBeforeSelection || r.acceptMainResponse(res.Msg)) {
+		// Optimized main answers already passed the complete-response filter.
+		// In particular, measured transient NODATA is a valid result here and
+		// must not start fallback just because optimization removed the IPs.
+		return res.Msg, nil
 	}
 
 	if fallbackMsg == nil {
@@ -412,6 +414,24 @@ func (r *Resolver) ipExchange(ctx context.Context, m *D.Msg) (msg *D.Msg, err er
 	res = <-fallbackMsg
 	msg, err = res.Msg, res.Error
 	return
+}
+
+// Preserve Mihomo's original fallback rule: an address answer is acceptable
+// only when every IP in the complete upstream answer passes its filters.
+func (r *Resolver) acceptMainResponse(message *D.Msg) bool {
+	if message == nil {
+		return false
+	}
+	ips := msgToIP(message)
+	if len(ips) == 0 {
+		return false
+	}
+	for _, ip := range ips {
+		if r.shouldIPFallback(ip) {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *Resolver) lookupIP(ctx context.Context, host string, dnsType uint16) (ips []netip.Addr, err error) {

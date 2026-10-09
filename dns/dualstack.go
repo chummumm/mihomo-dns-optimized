@@ -83,8 +83,8 @@ func (m *dualStackMeasurements) fastest(query, response *D.Msg) (time.Duration, 
 }
 
 // ExchangeDualStackWithProbe shares the original query's upstream pool, route
-// and total deadline with one auxiliary question. It never calls the resolver
-// recursively, selects a second outbound, or writes an auxiliary cache entry.
+// and optimization deadline with one auxiliary question. It never calls the
+// resolver recursively, selects a second outbound, or writes an auxiliary cache entry.
 // Existing checker slots bound all probes across both families and callers.
 func (s *directSpeedChecker) ExchangeDualStackWithProbe(ctx context.Context, clients []dnsClient, query *D.Msg, probe speedCheckProbe, config DualStackConfig) (*D.Msg, bool, error) {
 	if query != nil && speedCheckQuestion(query) {
@@ -101,7 +101,8 @@ func (s *directSpeedChecker) ExchangeDualStackWithProbe(ctx context.Context, cli
 		return s.ExchangeWithProbe(ctx, clients, query, probe)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	ctx = withSpeedCheckDeadline(ctx, s.timeout)
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	other := query.Copy()
 	if query.Question[0].Qtype == D.TypeAAAA {
@@ -130,10 +131,25 @@ func (s *directSpeedChecker) ExchangeDualStackWithProbe(ctx context.Context, cli
 		return message, cache, nil // Unknown speed and signed answers are never filtered.
 	}
 	var auxiliary result
+	wait := time.NewTimer(time.Until(speedCheckDeadline(ctx, s.timeout)))
+	defer wait.Stop()
 	select {
 	case auxiliary = <-otherResult:
+	case <-wait.C:
+		// Prefer a completed auxiliary result when completion and the
+		// optimization deadline become ready together. Otherwise retain the
+		// primary answer; its normal DNS budget was never shortened.
+		select {
+		case auxiliary = <-otherResult:
+		default:
+			return message, cache, nil
+		}
 	case <-ctx.Done():
-		return message, cache, nil
+		select {
+		case auxiliary = <-otherResult:
+		default:
+			return message, cache, nil
+		}
 	}
 	if auxiliary.err != nil {
 		return message, cache, nil

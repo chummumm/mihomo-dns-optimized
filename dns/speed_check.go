@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/component/dialer"
+	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 
 	D "github.com/miekg/dns"
@@ -30,9 +31,9 @@ const (
 )
 
 // SpeedCheckConfig controls optional DIRECT destination-IP selection. A zero
-// value disables it. Timeout is one budget for upstream collection and probes,
-// not a separate timeout for every address. Concurrency limits active probes
-// across queries sharing a checker.
+// value disables it. Timeout bounds optional selection work; an upstream which
+// has not answered yet retains the normal DNS deadline after that budget ends.
+// Concurrency limits active IP probes across queries sharing a checker.
 type SpeedCheckConfig struct {
 	Mode        []string
 	Timeout     time.Duration
@@ -108,7 +109,7 @@ func newDirectSpeedChecker(config SpeedCheckConfig) (*directSpeedChecker, error)
 	return &directSpeedChecker{
 		modes: modes, timeout: config.Timeout, concurrency: config.Concurrency,
 		slots: make(chan struct{}, config.Concurrency), probe: probeDirectIP,
-		pool:       newDNSProbePool(config.Concurrency, maxSpeedCheckCandidates, config.Timeout),
+		pool:       newDNSProbePool(config.Concurrency, config.Timeout),
 		candidates: newDNSCandidateCache(),
 	}, nil
 }
@@ -123,6 +124,24 @@ type speedCheckResult struct {
 	candidate speedCheckCandidate
 	rtt       time.Duration
 	err       error
+}
+
+type dnsSpeedCheckDeadlineKey struct{}
+
+// The two address families share one optimization budget without shortening
+// either family's normal DNS context. A plain exchange starts its own budget.
+func withSpeedCheckDeadline(ctx context.Context, timeout time.Duration) context.Context {
+	if _, ok := ctx.Value(dnsSpeedCheckDeadlineKey{}).(time.Time); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, dnsSpeedCheckDeadlineKey{}, time.Now().Add(timeout))
+}
+
+func speedCheckDeadline(ctx context.Context, timeout time.Duration) time.Time {
+	if deadline, ok := ctx.Value(dnsSpeedCheckDeadlineKey{}).(time.Time); ok {
+		return deadline
+	}
+	return time.Now().Add(timeout)
 }
 
 // Exchange must only be called with an upstream pool selected for DIRECT. An
@@ -163,46 +182,58 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 		return nil, true, errors.New("all DNS requests failed: no upstreams")
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	// Upstream DNS and optional optimization have separate lifetimes. In
+	// particular, reaching the optimization deadline without a reply must not
+	// cancel the only outstanding DNS attempt or restart the upstream batch.
+	ctx, cancel := context.WithTimeout(ctx, resolver.DefaultDNSTimeout)
 	defer cancel()
+	probeCtx, cancelProbes := context.WithDeadline(ctx, speedCheckDeadline(ctx, s.timeout))
+	defer cancelProbes()
+	probeDone := probeCtx.Done()
+	optimizing := true
 	type upstreamResult struct {
-		message *D.Msg
-		err     error
+		message    *D.Msg
+		err        error
+		receivedAt time.Time
 	}
-	upstreams := make(chan upstreamResult, s.concurrency)
-	workerCount := minSpeedCheck(s.concurrency, len(clients))
-	for worker := 0; worker < workerCount; worker++ {
-		go func(worker int) {
-			for i := worker; i < len(clients); i += workerCount {
-				if ctx.Err() != nil {
-					return
-				}
-				message, err := clients[i].ExchangeContext(ctx, query.Copy())
-				select {
-				case upstreams <- upstreamResult{message, err}:
-				case <-ctx.Done():
-					return
-				}
+	upstreams := make(chan upstreamResult, len(clients))
+	for _, client := range clients {
+		client := client
+		go func() {
+			if ctx.Err() != nil {
+				return
 			}
-		}(worker)
+			message, err := client.ExchangeContext(ctx, query.Copy())
+			result := upstreamResult{message: message, err: err, receivedAt: time.Now()}
+			select {
+			case upstreams <- result:
+			case <-ctx.Done():
+			}
+		}()
 	}
 	probes := make(chan speedCheckResult, maxSpeedCheckCandidates)
 	var tickets []*dnsProbeTicket
-	defer func() {
+	releaseTickets := func() {
 		for _, ticket := range tickets {
 			ticket.Release()
 		}
-	}()
+		tickets = nil
+	}
+	defer releaseTickets()
 
 	var firstResponse *D.Msg
 	var firstAddressResponse *D.Msg
 	var firstError error
+	policyRejected := false
 	var best *speedCheckResult
+	probeSkipped := false
 	seen := make(map[netip.Addr]bool)
 	remaining, pending := len(clients), 0
 	finish := func() (*D.Msg, bool, error) {
 		if best != nil {
-			return speedCheckAnswer(best.candidate, query.Question[0].Qtype), true, nil
+			answer := speedCheckAnswer(best.candidate, query.Question[0].Qtype)
+			inheritDNSAnswerLifetime(ctx, answer, best.candidate.response)
+			return answer, true, nil
 		}
 		if firstAddressResponse != nil {
 			return firstAddressResponse, true, nil
@@ -218,10 +249,36 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 		}
 		return nil, true, errors.New("all DNS requests failed")
 	}
+	recordProbe := func(result speedCheckResult) {
+		pending--
+		// A cached/shared result still belongs to this waiter's measurements.
+		// Skipped or failed probes never become zero-RTT/reachability evidence.
+		if measurements, ok := ctx.Value(dnsProbeMeasurementsKey{}).(*dualStackMeasurements); ok {
+			measurements.observe(result.candidate.ip, result.rtt, result.err)
+		}
+		if result.err == nil && result.rtt >= 0 && (best == nil || result.rtt < best.rtt) {
+			best = &result
+		}
+	}
 	for remaining > 0 || pending > 0 {
 		select {
 		case <-ctx.Done():
 			return finish()
+		case <-probeDone:
+			optimizing, probeDone = false, nil
+			releaseTickets()
+			// Prefer any measurements already delivered when the timer fired.
+			for pending > 0 {
+				select {
+				case result := <-probes:
+					recordProbe(result)
+				default:
+					pending = 0
+				}
+			}
+			if firstResponse != nil || policyRejected {
+				return finish()
+			}
 		case result := <-upstreams:
 			remaining--
 			if result.err == nil && !speedCheckResponseMatches(query, result.message) {
@@ -236,8 +293,25 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 				}
 				continue
 			}
+			recordDNSAnswerReceived(ctx, result.message, result.receivedAt)
+			if !speedCheckAcceptResponse(ctx, result.message) {
+				policyRejected = true
+				if firstError == nil {
+					firstError = errors.New("DNS upstream response requires fallback")
+				}
+				// A valid filtered response is enough to start normal fallback
+				// once selection ends; only an unanswered DNS request needs the
+				// remaining normal DNS budget.
+				if !optimizing || probeCtx.Err() != nil {
+					return finish()
+				}
+				continue
+			}
 			if firstResponse == nil {
 				firstResponse = result.message
+			}
+			if !optimizing || probeCtx.Err() != nil {
+				return finish()
 			}
 			if speedCheckProtected(result.message) {
 				return result.message, true, nil
@@ -251,29 +325,26 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 					continue
 				}
 				seen[candidate.ip] = true
-				pending++
 				candidate := candidate
-				ticket, err := s.pool.submit(ctx, dnsProbeScope(ctx, candidate.ip),
+				ticket, err := s.pool.submit(probeCtx, dnsProbeScope(ctx, candidate.ip),
 					func(workCtx context.Context) (time.Duration, error) { return s.checkIP(workCtx, candidate.ip, probe) },
 					func(rtt time.Duration, err error) { probes <- speedCheckResult{candidate, rtt, err} })
 				if err != nil {
-					probes <- speedCheckResult{candidate, 0, err}
+					probeSkipped = true
+					continue
 				}
+				pending++
 				if ticket != nil {
 					tickets = append(tickets, ticket)
 				}
 			}
 		case result := <-probes:
-			pending--
-			// Every waiter, including a reused result, owns its family
-			// measurements. Recording only inside the actual socket probe
-			// would lose measurements for coalesced or cached callers.
-			if measurements, ok := ctx.Value(dnsProbeMeasurementsKey{}).(*dualStackMeasurements); ok {
-				measurements.observe(result.candidate.ip, result.rtt, result.err)
+			if optimizing {
+				recordProbe(result)
 			}
-			if result.err == nil && result.rtt >= 0 && (best == nil || result.rtt < best.rtt) {
-				best = &result
-			}
+		}
+		if probeSkipped && pending == 0 && firstResponse != nil {
+			return finish()
 		}
 	}
 	return finish()
@@ -292,7 +363,16 @@ func speedCheckQuestion(message *D.Msg) bool {
 }
 
 func speedCheckResponseMatches(query, response *D.Msg) bool {
-	if response == nil || !response.Response || response.Opcode != query.Opcode || len(response.Question) != 1 {
+	if query == nil || len(query.Question) != 1 || response == nil || !response.Response ||
+		response.Id != query.Id || response.Opcode != query.Opcode {
+		return false
+	}
+	// Header-only errors are valid DNS responses, just as in the native wire
+	// transport. Empty successes and errors carrying unrelated records are not.
+	if len(response.Question) == 0 {
+		return response.Rcode != D.RcodeSuccess && len(response.Answer)+len(response.Ns)+len(response.Extra) == 0
+	}
+	if len(response.Question) != 1 {
 		return false
 	}
 	q, r := query.Question[0], response.Question[0]
@@ -383,11 +463,16 @@ func speedCheckProtected(message *D.Msg) bool {
 }
 
 func (s *directSpeedChecker) checkIP(ctx context.Context, ip netip.Addr, probe speedCheckProbe) (time.Duration, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	select {
 	case s.slots <- struct{}{}:
 		defer func() { <-s.slots }()
 	case <-ctx.Done():
 		return 0, ctx.Err()
+	default:
+		return 0, errDNSProbeBusy
 	}
 	var lastError error
 	for i, mode := range s.modes {
@@ -488,11 +573,4 @@ func pingDirectIP(ctx context.Context, ip netip.Addr, options ...dialer.Option) 
 			return time.Since(start), nil
 		}
 	}
-}
-
-func minSpeedCheck(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

@@ -71,7 +71,7 @@ func TestDNSPerfCandidateCacheGenerationAndOwnership(t *testing.T) {
 }
 
 func TestDNSPerfProbePoolBoundedOverload(t *testing.T) {
-	p := newDNSProbePool(1, 1, time.Second)
+	p := newDNSProbePool(1, time.Second)
 	defer p.Close()
 	started := make(chan struct{})
 	gate := make(chan struct{})
@@ -89,9 +89,12 @@ func TestDNSPerfProbePoolBoundedOverload(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-started
-	_, err = p.submit(context.Background(), "queued", func(context.Context) (time.Duration, error) { return 0, nil }, deliver)
-	if err != nil {
-		t.Fatal(err)
+	_, err = p.submit(context.Background(), "must-not-queue", func(context.Context) (time.Duration, error) {
+		t.Error("a probe was queued behind a full active slot")
+		return 0, nil
+	}, deliver)
+	if err != errDNSProbeBusy {
+		t.Fatalf("full active slot did not immediately skip the next probe: %v", err)
 	}
 	_, err = p.submit(context.Background(), "overflow", func(context.Context) (time.Duration, error) { return 0, nil }, deliver)
 	if err != errDNSProbeBusy {

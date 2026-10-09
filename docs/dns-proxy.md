@@ -134,8 +134,8 @@ dns:
 | 设置 | 默认值与单位 |
 | --- | --- |
 | `speed-check-mode` | 空列表或 `[none]` 表示关闭；`none` 不能与其他模式混用；支持 `tcp:端口`、`ping` |
-| `speed-check-timeout` | 毫秒；0 采用 1000，显式范围 1–5000；包含本轮上游收集和探测的共同预算 |
-| `speed-check-concurrency` | 0 采用 16，最大 256；同一 checker 的并发探测受此上限约束 |
+| `speed-check-timeout` | 毫秒；0 采用 1000，显式范围 1–5000；限制可选优选等待，不缩短正常 DNS 解析期限 |
+| `speed-check-concurrency` | 0 采用 16，最大 256；只限制活动 IP 探测，满额立即跳过新探测，不排队，不限制 DNS 上游并发 |
 | 候选地址上限 | 每轮最多 256 个去重候选，非可配置项 |
 
 ## 可选双栈优选
@@ -148,7 +148,7 @@ dns:
 | `dualstack-ip-selection-threshold` | 毫秒；默认 10，范围 0–1000，可显式设 0 |
 | `dualstack-ip-allow-force-aaaa` | `false`；默认保留 IPv4，仅显式开启后才允许优先 IPv6 而过滤 A |
 
-默认在 AAAA 查询中辅助查询同域名的 A。两族复用已经冻结的出口、同一上游池、一个总超时和共享探测并发上限；不重新选组，也不通过主 resolver 递归查询。只有两族均有有效地址和成功测速结果，且 IPv4 比 IPv6 快至少指定阈值，才对原 AAAA 返回 NOERROR / NODATA。开启 `dualstack-ip-allow-force-aaaa` 才允许对 A 做对称处理。
+默认在 AAAA 查询中辅助查询同域名的 A。两族复用已经冻结的出口、同一上游池、一个优选等待期限和共享探测并发上限；正常 DNS 查询保留自己的解析期限，不重新选组，也不通过主 resolver 递归查询。只有两族均有有效地址和成功测速结果，且 IPv4 比 IPv6 快至少指定阈值，才对原 AAAA 返回 NOERROR / NODATA。开启 `dualstack-ip-allow-force-aaaa` 才允许对 A 做对称处理。全局 IPv6 或 `dns.ipv6` 关闭时，跨族优选不生效，不会用无法交付给客户端的 AAAA 抑制 A；已有配置仍可正常加载。
 
 代理路径不发这种辅助查询。DNSSEC 保护、某族解析错误、没有地址或某族探测全部失败时，不把失败当成较慢而过滤原有效回答。辅助结果不单独写入另一族缓存。
 

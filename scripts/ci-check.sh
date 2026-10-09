@@ -12,14 +12,14 @@ case "${1:-test}" in
     python3 scripts/test-upstream-sync.py
     python3 scripts/test-release-build.py
     CGO_ENABLED=0 go test -tags with_gvisor -count=1 -timeout=5m \
-      ./adapter ./common/arc/... ./component/dnsmessage/... ./component/resolver/... ./context/... ./dns/... ./listener/sing_tun/... ./transport/socks4/... ./transport/socks5/... \
+      ./adapter ./common/arc/... ./component/dnsmessage/... ./component/resolver/... ./component/updater/... ./context/... ./dns/... ./listener/sing_tun/... ./transport/socks4/... ./transport/socks5/... \
       ./tunnel/... ./rules/logic/... ./rules/provider/... ./config/... \
       ./hub/route/... ./hub/executor/...
     CGO_ENABLED=1 go test -race -tags with_gvisor -count=1 -timeout=5m \
-      ./adapter ./common/arc/... ./component/dnsmessage/... ./component/resolver/... ./context/... ./dns/... \
+      ./adapter ./common/arc/... ./component/dnsmessage/... ./component/resolver/... ./component/updater/... ./context/... ./dns/... \
       ./listener/sing_tun/... ./tunnel/... ./rules/logic/... ./rules/provider/... \
       ./config/... ./hub/route/... ./hub/executor/... \
-      -run 'DNSRouting|DNSRuleRouting|DNSProxy|DNSDrop|DNSDirectProbe|DNSOptimization|SpeedCheck|DualStack|CacheControl|ARCDelete|DNSPerf'
+      -run 'DNSRouting|DNSRuleRouting|DNSProxy|DNSDrop|DNSDirectProbe|DNSOptimization|SpeedCheck|DualStack|CacheControl|ARCDelete|DNSPerf|DNSCandidate|DNSCachedTTL|DNSAnswerLifetime|DNSResolverDoesNotRestartTTL|DNSFallback|DNSIndependentDirectPool|CoreUpdater'
     # A single green rerun cannot validate detached HTTP/2 dial shutdown.
     # Repeat the lifecycle barriers with different Go scheduler parallelism.
     for procs in 1 4; do
