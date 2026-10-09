@@ -184,12 +184,17 @@ func exchangeDNSProxyWire(ctx context.Context, query []byte, resolver *C.Metadat
 			return nil, err
 		}
 		appendDNSProxyGroups(conn, route.groups)
+		closeState := newDNSQueryCloseState(ctx)
+		if closeState != nil {
+			conn = &dnsQueryNotifyConn{Conn: conn, state: closeState}
+		}
 		conn = statistic.NewTCPTracker(conn, statistic.DefaultManager, dnsProxyDisplayMetadata(resolver, route.qname), route.rule, 0, 0, true)
-		defer conn.Close()
+		normalClose := dnsQueryNormalCloser{close: conn.Close, state: closeState}
+		defer normalClose.Close()
 		if err := conn.SetDeadline(deadline); err != nil {
 			return nil, err
 		}
-		stop := closeDNSProxyOnCancel(ctx, conn)
+		stop := closeDNSProxyOnCancel(ctx, normalClose)
 		defer stop()
 		frame := make([]byte, len(query)+2)
 		binary.BigEndian.PutUint16(frame, uint16(len(query)))
@@ -216,12 +221,17 @@ func exchangeDNSProxyWire(ctx context.Context, query []byte, resolver *C.Metadat
 		return nil, err
 	}
 	appendDNSProxyGroups(conn, route.groups)
+	closeState := newDNSQueryCloseState(ctx)
+	if closeState != nil {
+		conn = &dnsQueryNotifyPacketConn{PacketConn: conn, state: closeState}
+	}
 	conn = statistic.NewUDPTracker(conn, statistic.DefaultManager, dnsProxyDisplayMetadata(resolver, route.qname), route.rule, 0, 0, true)
-	defer conn.Close()
+	normalClose := dnsQueryNormalCloser{close: conn.Close, state: closeState}
+	defer normalClose.Close()
 	if err := conn.SetDeadline(deadline); err != nil {
 		return nil, err
 	}
-	stop := closeDNSProxyOnCancel(ctx, conn)
+	stop := closeDNSProxyOnCancel(ctx, normalClose)
 	defer stop()
 	if n, err := conn.WriteTo(query, resolver.UDPAddr()); err != nil {
 		return nil, err

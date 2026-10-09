@@ -2,7 +2,7 @@
 
 基于 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) 稳定版维护的独立派生内核，让 DNS 查询直接复用已有业务分流规则。**不需要 SmartDNS，也不需要再维护一份 DNS 域名策略。** 本项目不是 MetaCubeX 官方发行版。
 
-**IP 测速只用于实际 DIRECT / Compatible 路径；走代理节点的 DNS 回答不测速。** 测速与主动预取默认关闭，可以按需开启。
+**原生 DNS 上游支持 UDP、TCP、DoH、DoT、DoQ 和 DoH 的 HTTP/3。IP 测速与双栈优选只用于实际 DIRECT / Compatible 路径，走代理节点的 DNS 回答不测速。** 测速、双栈优选与主动预取默认关闭，可以按需开启。
 
 [下载 Releases](https://github.com/chummumm/mihomo-dns-optimized/releases) · [构建状态](https://github.com/chummumm/mihomo-dns-optimized/actions/workflows/build.yml) · [完整配置说明](docs/dns-proxy.md) · [验证记录](docs/dns-rule-routing-validation.md)
 
@@ -31,16 +31,33 @@
 
 ## 快速开始
 
-1. 从 [Releases](https://github.com/chummumm/mihomo-dns-optimized/releases) 下载对应架构的 `.gz`，核对发布页的 `SHA256SUMS`，解压并将二进制命名为 `dns-route-kernel`。
+1. 从 [Releases](https://github.com/chummumm/mihomo-dns-optimized/releases) 下载对应系统和 CPU 的文件，核对 `SHA256SUMS`；直接运行可选 `.gz` / Windows `.zip`，Linux 也提供安装包。
 2. 保存下面的示例为 `config.yaml`，或把其中 DNS 设置并入自己的配置，保留已有节点、策略组和业务规则。
 3. 校验并运行，将 DNS 客户端指向配置中的监听地址。
 
-| 下载文件 | 适用平台 |
+| 平台 | 下载格式与范围 |
 | --- | --- |
-| `mihomo-dns-linux-amd64-<version>.gz` | Linux x86-64，`GOAMD64=v1` |
-| `mihomo-dns-linux-arm64-<version>.gz` | Linux ARM64 |
+| Linux | 19 个 CPU 目标的 `.gz`；12 个目标另有 `.deb` / `.rpm`，5 个目标另有 `.pkg.tar.zst` |
+| Windows | x86、x86-64 v1/v2/v3、ARM64 的 `.zip` |
+| macOS | x86-64 v1/v2/v3、Apple Silicon 的 `.gz` |
+| FreeBSD | x86、x86-64 v1/v2/v3、ARM64 的 `.gz` |
+| Android | x86、x86-64、ARMv7、ARM64 的 `.gz`，NDK r29 / API 34 |
 
-两种产物均启用 `with_gvisor`、关闭 CGO。文件名沿用现有仓库发布格式。
+完整矩阵为 **37 个平台 / CPU 目标、66 个二进制归档和安装包**，另附 `BUILDINFO.json` 与 `SHA256SUMS`。`linux-amd64` 保持 GOAMD64=v1；v2/v3 单独提供。当前不重复上游旧 Go 工具链、LoongArch ABI1 等兼容变体。完整 CPU、最低兼容边界和安装说明见[预编译文件与安装包](docs/releases.md)。
+
+Debian / Ubuntu 例如使用 `mihomo-dns-linux-amd64-<version>.deb`：
+
+```bash
+sudo apt install ./mihomo-dns-linux-amd64-<version>.deb
+# 将自己的配置放入 /etc/mihomo/config.yaml 后再校验和启动。
+sudo mihomo -t -d /etc/mihomo
+sudo systemctl daemon-reload
+sudo systemctl enable --now mihomo
+```
+
+安装包使用 `/usr/bin/mihomo`、`/etc/mihomo/config.yaml` 和 `mihomo.service`，通过包管理器保护已有配置，不自动启动服务。包名为 `mihomo-dns-optimized`，声明替换官方 `mihomo` 包。通用起始配置只有本机 mixed 和 DIRECT；私人节点与规则需自行提供。
+
+直接使用压缩核心时，解压并命名为 `dns-route-kernel` 后运行：
 
 ```bash
 chmod +x ./dns-route-kernel
@@ -48,7 +65,7 @@ chmod +x ./dns-route-kernel
 ./dns-route-kernel -f config.yaml
 ```
 
-下面是可独立校验的配置。DNS 地址为数值地址示例，请按网络可达性调整。`代理出口` 暂只含 DIRECT 占位项，**加入自己的节点后才会真正走代理**；接入已有配置时直接使用原来的策略组即可。
+下面是可独立校验的配置，直连池使用普通 DNS，代理池使用 Cloudflare DoH；请按网络可达性调整。`代理出口` 暂只含 DIRECT 占位项，**加入自己的节点后才会真正走代理**；接入已有配置时直接使用原来的策略组即可。
 
 ```yaml
 mode: rule
@@ -67,12 +84,17 @@ dns:
   default-nameserver: [223.5.5.5, 119.29.29.29]
   proxy-server-nameserver: [223.5.5.5, 119.29.29.29]
   direct-nameserver: [223.5.5.5, 119.29.29.29]
-  nameserver: [tcp://8.8.8.8:53, tcp://8.8.4.4:53]
+  nameserver:
+    - https://cloudflare-dns.com/dns-query
+    - https://1.1.1.1/dns-query
 
-  # 可选：这里显式开启；不配置时测速和主动预取均关闭。
+  # 可选：这里显式开启；仅实际 DIRECT 优选 IP 与双栈。
   speed-check-mode: [tcp:443, tcp:80, ping]
   speed-check-timeout: 1000
   speed-check-concurrency: 16
+  dualstack-ip-selection: true
+  dualstack-ip-selection-threshold: 10
+  dualstack-ip-allow-force-aaaa: false
   prefetch-domain: true
   serve-expired: true
   serve-expired-ttl: 604800
@@ -95,12 +117,14 @@ rules:
 
 这里优选的是 **DNS 回答中的目标 IP**，不是代理节点速度，也不是 DNS 服务器所在地。
 
-- 仅内置 DNS 已选 DIRECT / Compatible、所选上游集合全部为自动普通 53 传输的 A / AAAA 查询参与；代理路径不参与。
-- 显式 DNS 出口、非 53 / 加密上游等传输例外不做本地测速；有效缓存命中直接返回，不为这次命中重复探测。
+- 仅内置 DNS 已选 DIRECT / Compatible、所选上游集合全部支持自动传输的 A / AAAA 查询参与；代理路径不参与。原生 DoH / DoT / DoQ 及自定义端口同样按实际出口判定。
+- 显式 DNS 出口等传输例外不做本地测速；有效缓存命中直接返回，不为这次命中重复探测。
 - TCP 测握手耗时，ping 测 ICMP 往返。探测继承所选直连出口的接口 / mark，不重新匹配规则；ping 是否可用取决于平台与权限。
 - 保留候选所属回答及 CNAME 链，不拼接不同服务器的回答；DNSSEC 等保护场景不改写。全部探测失败但已有有效回答时返回原回答。
 
 测速不代表下载带宽，也不保证所有域名都更快。后台更新属于新的查询，满足条件时可以重新优选。
+
+可选双栈优选复用这次已选直连出口和同一个超时预算。默认保留 IPv4；当 AAAA 查询同时取得两族可测速的回答，且 IPv4 比 IPv6 快至少所设阈值时，返回零 TTL 的 NOERROR / NODATA。代理查询不另查另一族、不探测；测速失败或受 DNSSEC 保护时保留原回答。该临时优选结论不缓存，避免被过期缓存长期延续。
 
 ## 可选 DNS 设置
 
@@ -111,6 +135,9 @@ rules:
 | `speed-check-mode` | 空 / `[none]` | 关闭；可设 `tcp:端口`、`ping`；`none` 不能与其他项混用 |
 | `speed-check-timeout` | 0 → 1000 | 毫秒；显式范围 1–5000，本轮上游收集和探测共用预算 |
 | `speed-check-concurrency` | 0 → 16 | 最大 256；共享测速器的并发探测上限；每轮最多 256 个候选 IP |
+| `dualstack-ip-selection` | `false` | 开启 DIRECT 双栈优选；仍需启用测速 |
+| `dualstack-ip-selection-threshold` | 10 | 毫秒；0–1000，另一族至少快多少才过滤当前族 |
+| `dualstack-ip-allow-force-aaaa` | `false` | 是否允许反向过滤 A、只保留更快的 IPv6；默认保留 IPv4 |
 
 | 缓存字段 | 默认值 | 含义与单位 |
 | --- | --- | --- |
@@ -125,18 +152,28 @@ rules:
 
 后台保留来源和已知 / 未知 PROCESS 快照，重新检查当前规则，不拿旧 socket 识别可能复用端口的新进程。清缓存、模式 / 开关变化、重载会使旧后台任务失效；缓存命中与并发合并也保留来源、子规则和实际出口边界。
 
+| 回答调整字段 | 默认值 | 行为 |
+| --- | --- | --- |
+| `force-no-cname` | `false` | 将完整、无歧义的未签名 A / AAAA CNAME 链压平到查询名；不会补造 IP 或重新分流 CNAME |
+| `rr-ttl-min` | 0 | 秒；0 不设下限，保留零 TTL 的不可缓存回答 |
+| `rr-ttl-max` | 0 | 秒；0 不设上限，限制正常回答及其缓存寿命 |
+
+回答调整在写缓存前完成；过期回答仍使用 `serve-expired-reply-ttl`，不会被 TTL 下限延长。CNAME 类型查询、不完整 / 歧义链、DNSSEC 等保护场景保留原回答。节点和解析器 bootstrap 不继承这些业务回答调整。
+
 ## 生效条件与兼容边界
 
 自动 QNAME 选路只在 **开关开启、Rule 模式、入站没有固定 `proxy:`** 时接管；固定出站和 Global / Direct 保留原优先级。入站 `rule:` 仍作为子规则入口，已经选定业务叶子的内部解析继承该叶子，bootstrap 独立执行。
 
 - **不使用 FakeIP。** 内置 DNS 使用 `redir-host`；本功能与内置 FakeIP 同时启用会在校验时报错。不增加 listener 类型或专用 DNS 代理端口。
 - **规则顺序不变。** IN / SRC / PROCESS、端口和网络属性仍可参与；QNAME 用于域名规则。网站目标 IP / GEOIP / ASN 尚未知，不拿解析器 IP 代替，也不为选路递归解析同一个名字。
-- **自动范围是普通明文 TCP / UDP 53。** 支持常见单问题查询、EDNS 与 DNSSEC 数据传递，不验证 DNSSEC 签名；DoH / DoT / DoQ、非 53 和特殊查询保留各自原路径或明确报错。
+- **原生上游与外部分类范围分别定义。** 内置 DNS 已知 QNAME，配置的 UDP / TCP 任意端口及 DoH / DoT / DoQ / H3 均可自动选池和选出口。外部入站只识别明文 TCP / UDP 53，不解密客户端 DoH，也不接管其他普通流量。
 - **显式 DNS 传输仍是例外。** `#Group` / `#DIRECT` / `#interface` 等保留旧行为；先选池，再判断该池的例外。混有显式上游时，显式分支可独立回答；未选池不会削弱自动分支的拒绝动作。
 - **不另写 DNS 域名策略。** 开启时停用 `nameserver-policy`、`direct-nameserver-follow-policy`、`fallback-filter.domain/geosite`；`fallback` 的适用 IP 过滤、hosts、基础解析等保留。关闭开关并完整重载可恢复原策略。
 - **respect-rules 的旧模式行为保留。** 非 Rule 模式不建立新计划；在自动范围内，QNAME 计划代替按解析器地址二次选路。
 
-真实上游交换接入原生连接面板、规则链和流量统计，关闭连接可以中断交换；完成的短查询移出活动列表。普通 SSH 的反向域名显示不由本功能改写。完整限制见[使用说明](docs/dns-proxy.md)。
+加密上游按冻结的出口身份复用连接，切换叶子后使用相应连接池；每个配置上游最多保留 64 个作用域，只淘汰空闲项，重载会取消并关闭旧池。QNAME 和来源端口不进入连接池键，保留 H2 / H3 / DoQ 的复用；它们仍进入更严格的回答缓存身份。
+
+面板按次展示 QNAME、来源、规则和策略链，底层长连接标记为 `DNS-TRANSPORT`、显示真实解析器，不沿用首个域名冒充后续请求。逻辑查询计数展示 DNS 负载，底层只统计一次真实线路流量；关闭一条逻辑查询不关闭共享连接上的其他查询。普通 SSH 的反向域名显示不由本功能改写。完整限制见[使用说明](docs/dns-proxy.md)。
 
 ## 从旧配置迁移
 
@@ -144,11 +181,13 @@ rules:
 2. 使用原生方案时开启 `dns.listen`，配置 direct / main 和独立 bootstrap，把业务分流集中到原 `rules`，不再要求 SmartDNS 前置处理。
 3. 先执行 `-t` 校验，再加载完整配置。开关不支持通过 `PATCH /configs` 单独修改；`GET /configs` 可查看生效值，完整配置可通过原 `PUT /configs` 重载。
 
-已有 SmartDNS 可以按[兼容接入模板](docs/smartdns-dns-proxy.conf)继续转发上游 53 查询，原 6053 / 6553 本地服务不自动改投；其独立缓存仍由 SmartDNS 管理。本项目不声称兼容全部 SmartDNS 功能。
+原 SmartDNS 的测速、`fastest-ip` 目标、DIRECT 双栈选择、预取、过期缓存、缓存容量和 TTL / CNAME 调整可按[迁移对照](docs/smartdns-migration.md)迁入。域名屏蔽清单可放入普通 Mihomo `rule-providers` 并由原 `rules` 引用，不增加第二套 DNS 域名策略。SmartDNS 的 UI 插件、日志库等不属于这些 DNS 功能。
+
+已有 SmartDNS 也可按[兼容接入模板](docs/smartdns-dns-proxy.conf)继续转发上游 53 查询，原 6053 / 6553 本地服务不自动改投；其独立缓存仍由 SmartDNS 管理。本项目不声称兼容全部 SmartDNS 功能。
 
 ## 云编译、更新与验证
 
-[构建工作流](https://github.com/chummumm/mihomo-dns-optimized/actions/workflows/build.yml)先执行规定 Go 测试、DNS race 和同步保护测试，再构建 Linux amd64 / arm64；amd64 产物运行本地模拟服务的实际二进制端到端测试。arm64 为交叉编译，不等同于实际执行。
+[构建工作流](https://github.com/chummumm/mihomo-dns-optimized/actions/workflows/build.yml)先执行规定 Go 测试、DNS race、同步保护与安装包检查，再构建完整 37 目标矩阵；Linux amd64 产物运行本地模拟服务的实际二进制端到端测试。其他目标为交叉编译，不等同于在各设备实际执行。所有必需归档和安装包齐全、摘要一致后才发布。
 
 `main` 推送通过验证后自动发布带源提交标识和 SHA-256 的下载包；PR 只生成 Actions artifact。当前 `main` 对应构建才能更新 Latest，旧构建重跑不会覆盖新版本入口。
 
@@ -172,6 +211,8 @@ python3 scripts/test-dns-proxy.py ./dns-route-kernel
 | [完整原生示例](docs/dns-proxy.example.yaml) | 无私人凭据、无远程 provider 的可校验模板 |
 | [设计与验收约定](docs/dns-rule-routing-design.md) | 优先级、未知 IP、一次计划、生命周期 |
 | [验证记录](docs/dns-rule-routing-validation.md) | 实测结果与明确限制 |
+| [SmartDNS 迁移对照](docs/smartdns-migration.md) | 字段对应、双栈与缓存差异、域名屏蔽迁移 |
+| [预编译文件与安装包](docs/releases.md) | 37 目标矩阵、deb / rpm / Arch 安装与配置保护 |
 | [云编译与上游同步](docs/upstream-sync.md) | 下载、校验、发布、同步失败与预演 |
 | [上游使用文档](https://wiki.metacubex.one/) | 原有节点、规则、TUN、API 等通用能力 |
 | [上游 README](https://github.com/MetaCubeX/mihomo/blob/Alpha/README.md) | 原项目完整介绍和上游说明 |

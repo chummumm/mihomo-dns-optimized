@@ -495,9 +495,12 @@ func TestDNSRuleRoutingTransportScope(t *testing.T) {
 		{"group", NameServer{Addr: "192.0.2.53:53", ProxyName: "group"}, false},
 		{"direct", NameServer{Addr: "192.0.2.53:53", ProxyName: "DIRECT"}, false},
 		{"interface", NameServer{Addr: "192.0.2.53:53", ProxyName: "eth0"}, false},
-		{"smartdns6053", NameServer{Addr: "127.0.0.1:6053"}, false},
-		{"smartdns6553", NameServer{Addr: "127.0.0.1:6553"}, false},
-		{"DoT53", NameServer{Net: "tls", Addr: "192.0.2.53:53"}, false},
+		{"native6053", NameServer{Addr: "127.0.0.1:6053"}, true},
+		{"native6553", NameServer{Addr: "127.0.0.1:6553"}, true},
+		{"DoT53", NameServer{Net: "tls", Addr: "192.0.2.53:53"}, true},
+		{"DoH", NameServer{Net: "https", Addr: "https://192.0.2.53/dns-query"}, true},
+		{"DoQ", NameServer{Net: "quic", Addr: "192.0.2.53:853"}, true},
+		{"explicit-DoH", NameServer{Net: "https", Addr: "https://192.0.2.53/dns-query", ProxyName: "DIRECT"}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got, _ := dnsRoutingCapability(transform([]NameServer{test.ns}, nil)[0])

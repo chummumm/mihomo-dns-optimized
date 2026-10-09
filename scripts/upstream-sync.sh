@@ -109,6 +109,9 @@ preserved=(
   scripts/upstream-sync.sh
   scripts/ci-check.sh
   scripts/test-upstream-sync.py
+  scripts/release-build.py
+  scripts/test-release-build.py
+  packaging
   UPSTREAM_VERSION
   UPSTREAM_COMMIT
 )
@@ -119,7 +122,8 @@ if [[ -n "$conflicts" ]]; then
   exit 1
 fi
 git diff --exit-code "$base_commit" -- .github/workflows \
-  scripts/upstream-sync.sh scripts/ci-check.sh scripts/test-upstream-sync.py
+  scripts/upstream-sync.sh scripts/ci-check.sh scripts/test-upstream-sync.py \
+  scripts/release-build.py scripts/test-release-build.py packaging
 
 printf '%s\n' "$tag" > UPSTREAM_VERSION
 printf '%s\n' "$upstream_commit" > UPSTREAM_COMMIT

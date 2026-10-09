@@ -51,8 +51,10 @@ func dnsRoutingMetadata(qname string, origin *C.Metadata) *C.Metadata {
 // DNSRoutingPlan freezes one query's rule/group choice across resolver cache
 // lookup, main/fallback races and a possible retry using another transport.
 type DNSRoutingPlan struct {
-	route  dnsProxyRoute
-	origin *C.Metadata
+	route   dnsProxyRoute
+	origin  *C.Metadata
+	epoch   uint64
+	inbound bool
 }
 
 func PrepareDNSRouting(ctx context.Context, qname string, origin *C.Metadata) (*DNSRoutingPlan, error) {
@@ -86,7 +88,7 @@ func PrepareDNSRouting(ctx context.Context, qname string, origin *C.Metadata) (*
 	route.qname = qname
 	copyOrigin := origin.Clone()
 	copyOrigin.Process, copyOrigin.ProcessPath, copyOrigin.Uid = metadata.Process, metadata.ProcessPath, metadata.Uid
-	return &DNSRoutingPlan{route: route, origin: copyOrigin}, nil
+	return &DNSRoutingPlan{route: route, origin: copyOrigin, epoch: DNSRoutingEpoch(), inbound: icontext.DNSRoutingInbound(ctx)}, nil
 }
 
 func (p *DNSRoutingPlan) Type() C.AdapterType { return p.route.proxy.Type() }

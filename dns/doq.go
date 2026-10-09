@@ -15,6 +15,7 @@ import (
 	"github.com/metacubex/mihomo/common/contextutils"
 	"github.com/metacubex/mihomo/common/pool"
 	"github.com/metacubex/mihomo/component/ca"
+	"github.com/metacubex/mihomo/component/dnsmessage"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
@@ -47,6 +48,7 @@ const (
 // dnsOverQUIC is a struct that implements the Upstream interface for the
 // DNS-over-QUIC protocol (spec: https://www.rfc-editor.org/rfc/rfc9250.html).
 type dnsOverQUIC struct {
+	native nativeClientState
 	// quicConfig is the QUIC configuration that is used for establishing
 	// connections to the upstream.  This configuration includes the TokenStore
 	// that needs to be stored for the lifetime of dnsOverQUIC since we can
@@ -92,6 +94,9 @@ func newDoQ(addr string, resolver resolver.Resolver, params map[string]string, p
 func (doq *dnsOverQUIC) Address() string { return doq.addr }
 
 func (doq *dnsOverQUIC) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, err error) {
+	if answer, err, handled := exchangeNativeTransport(ctx, m, doq); handled {
+		return answer, err
+	}
 	// When sending queries over a QUIC connection, the DNS Message ID MUST be
 	// set to zero.
 	m = m.Copy()
@@ -127,7 +132,7 @@ func (doq *dnsOverQUIC) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.M
 		msg, err = doq.exchangeQUIC(ctx, m)
 	}
 
-	if err != nil {
+	if err != nil && ctx.Err() == nil {
 		// If we're unable to exchange messages, make sure the connection is
 		// closed and signal about an internal error.
 		doq.closeConnWithError(err)
@@ -138,6 +143,7 @@ func (doq *dnsOverQUIC) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.M
 
 // Close implements the Upstream interface for *dnsOverQUIC.
 func (doq *dnsOverQUIC) Close() (err error) {
+	doq.native.reset(true)
 	doq.connMu.Lock()
 	defer doq.connMu.Unlock()
 
@@ -151,6 +157,7 @@ func (doq *dnsOverQUIC) Close() (err error) {
 }
 
 func (doq *dnsOverQUIC) ResetConnection() {
+	doq.native.reset(false)
 	doq.closeConnWithError(nil)
 }
 
@@ -183,9 +190,13 @@ func (doq *dnsOverQUIC) exchangeQUIC(ctx context.Context, msg *D.Msg) (resp *D.M
 	if err != nil {
 		return nil, err
 	}
+	// A DNS request owns one stream. Release its read side even if the peer
+	// sends extra data or leaves the response stream open after its one frame.
+	defer stream.CancelRead(0)
 
 	stop := contextutils.AfterFunc(ctx, func() {
-		_ = stream.SetDeadline(time.Now()) // cancel any read or write operation on this stream
+		stream.CancelRead(0)
+		stream.CancelWrite(0)
 	})
 	defer stop()
 
@@ -218,10 +229,17 @@ func (doq *dnsOverQUIC) exchangeQUIC(ctx context.Context, msg *D.Msg) (resp *D.M
 		return nil, fmt.Errorf("reading response from %s: %w", doq.Address(), err)
 	}
 
-	resp = new(D.Msg)
-	err = resp.Unpack(buf[:respLen])
+	if doq.native.bound {
+		resp, err = dnsmessage.Unpack(buf[:respLen])
+	} else {
+		resp = new(D.Msg)
+		err = resp.Unpack(buf[:respLen])
+	}
 	if err != nil {
 		return nil, fmt.Errorf("unpacking response from %s: %w", doq.Address(), err)
+	}
+	if doq.native.bound && resp.Id != 0 {
+		return nil, D.ErrId
 	}
 
 	return resp, nil
@@ -238,6 +256,9 @@ func (doq *dnsOverQUIC) shouldRetry(err error) (ok bool) {
 // connection.  If it is false, we will forcibly create a new connection and
 // close the existing one if needed.
 func (doq *dnsOverQUIC) getConnection(ctx context.Context, useCached bool) (*quic.Conn, error) {
+	if doq.native.isClosed() {
+		return nil, net.ErrClosed
+	}
 	var conn *quic.Conn
 	doq.connMu.RLock()
 	conn = doq.conn
@@ -254,6 +275,12 @@ func (doq *dnsOverQUIC) getConnection(ctx context.Context, useCached bool) (*qui
 
 	doq.connMu.Lock()
 	defer doq.connMu.Unlock()
+	if doq.native.isClosed() {
+		return nil, net.ErrClosed
+	}
+	if useCached && doq.conn != nil {
+		return doq.conn, nil
+	}
 
 	var err error
 	conn, err = doq.openConnection(ctx)
@@ -300,6 +327,9 @@ func (doq *dnsOverQUIC) openStream(ctx context.Context, conn *quic.Conn) (*quic.
 	stream, err := conn.OpenStreamSync(ctx)
 	if err == nil {
 		return stream, nil
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
 
 	// We can get here if the old QUIC connection is not valid anymore.  We

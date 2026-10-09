@@ -16,6 +16,7 @@ import (
 )
 
 type client struct {
+	native       nativeClientState
 	port         string
 	host         string
 	dialer       *dnsDialer
@@ -33,7 +34,10 @@ func (c *client) Address() string {
 }
 
 func (c *client) ExchangeContext(ctx context.Context, m *D.Msg) (*D.Msg, error) {
-	if route := queryRoute(ctx); route != nil && !icontext.DNSBootstrap(ctx) && c.canRouteDNS() {
+	if answer, err, handled := exchangeNativeTransport(ctx, m, c); handled {
+		return answer, err
+	}
+	if route := queryRoute(ctx); route != nil && !c.native.bound && !icontext.DNSBootstrap(ctx) && c.canRouteDNS() {
 		return c.exchangeRouted(ctx, m, route)
 	}
 	network := "udp"
@@ -93,7 +97,8 @@ func (c *client) ExchangeContext(ctx context.Context, m *D.Msg) (*D.Msg, error) 
 	}
 }
 
-func (c *client) ResetConnection() {}
+func (c *client) ResetConnection() { c.native.reset(false) }
+func (c *client) Close() error     { c.native.reset(true); return nil }
 
 func newClient(addr string, resolver resolver.Resolver, netType string, params map[string]string, proxyAdapter C.ProxyAdapter, proxyName string) *client {
 	host, port, _ := net.SplitHostPort(addr)

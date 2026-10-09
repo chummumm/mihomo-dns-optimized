@@ -234,6 +234,9 @@ func (c *cacheControl) Store(ctx context.Context, key string, question D.Questio
 	if entry := c.hot[key]; entry != nil {
 		if _, expires, ok := c.r.cache.GetWithExpire(key); ok {
 			c.scheduleLocked(entry, c.now(), expires)
+		} else {
+			c.removeHotLocked(entry)
+			c.stopIdleLocked()
 		}
 	}
 	return true
@@ -374,7 +377,7 @@ func (c *cacheControl) run(job cacheRefreshJob) {
 	if ctx.Err() != nil || job.lifetime.Err() != nil || !c.active(ctx) {
 		return
 	}
-	newKey := dnsCacheKey(ctx, job.query.Question[0])
+	newKey := c.r.cacheKey(ctx, job.query)
 	if newKey != job.key {
 		// Re-arm the new scope only upon real demand. Never let an old route's
 		// hotness indefinitely drive queries in a newly selected policy scope.

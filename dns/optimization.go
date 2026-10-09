@@ -42,5 +42,5 @@ func (r *Resolver) exchangeBatch(ctx context.Context, clients []dnsClient, query
 		_ = connection.Close()
 		return elapsed, nil
 	}
-	return r.speedChecker.ExchangeWithProbe(ctx, clients, query, probe)
+	return r.speedChecker.ExchangeDualStackWithProbe(ctx, clients, query, probe, r.dualStack)
 }

@@ -8,26 +8,28 @@
 向 `main` 推送代码、提交针对 `main` 的 Pull Request，或者在 Actions 中手动运行
 **Build DNS optimized**，都会测试并编译完整内核。
 
-产物包含两个架构：
+产物覆盖 Linux、Windows、macOS、FreeBSD、Android 共 **37 个平台 / CPU 目标**。
+其中 12 个 Linux 目标另提供 `.deb` / `.rpm`，5 个目标提供 `.pkg.tar.zst`；
+全部共 66 个归档和安装包，另附 `BUILDINFO.json` 和 `SHA256SUMS`。
+完整 CPU、安装路径与兼容范围见[预编译文件与安装包](releases.md)，矩阵唯一来源为
+[`packaging/targets.json`](../packaging/targets.json)。
 
-| 产物 | 适用机器 |
-| --- | --- |
-| `mihomo-dns-linux-amd64-<version>.gz` | Linux x86-64，使用兼容性较好的 `GOAMD64=v1` |
-| `mihomo-dns-linux-arm64-<version>.gz` | Linux ARM64 |
-
-二者均启用 `with_gvisor`，关闭 CGO。每份产物附 SHA-256 校验文件，
-Actions artifact 保留 30 天。解压后需要给二进制增加执行权限。
+各目标均使用 `with_gvisor` 编译标签；Android 使用固定 NDK r29 / API 34 和 CGO，
+其他目标关闭 CGO。标签不代表每个平台都具备同样的 TUN 运行能力。
+Actions artifact 保留 30 天。归档解压后需按平台给二进制增加执行权限。
 启用全局 `dns-rule-routing` 的方法见 [DNS 按查询域名分流说明](dns-proxy.md)。
 
-编译前运行 DNS 分类与逐查询路由测试、配置与规则相关测试、DNS 相关竞态检查，以及本地仓库的同步保护测试。
+编译前运行 DNS 分类与逐查询路由测试、配置与规则相关测试、DNS 相关竞态检查、安装包检查，以及本地仓库的同步保护测试。
 原生 amd64 二进制还会运行本机端到端测试；这些测试使用本地模拟 DNS/SOCKS
-服务，不访问用户节点。arm64 为交叉编译，不声称执行了 arm64 二进制测试。
+服务，不访问用户节点。其余平台为交叉编译，不声称已在相应真实设备执行。
 
-推送 `main` 后，测试和两个架构的编译全部成功，会自动把构建结果发布到
+推送 `main` 后，测试和完整 37 目标的编译全部成功，且 66 个必需归档 / 安装包的
+文件集合、版本和摘要校验均通过，才自动把构建结果发布到
 GitHub Releases，提供持久下载。Pull Request 只测试和上传 Actions artifact。
 手动运行 `Build DNS optimized` 并勾选 `publish_release`、推送形如
 `dns-v1.19.32.1` 的版本标签，以及自动上游更新成功后，也会发布 release。
-发布只在本仓库进行，已有同名 release 的附件不会被覆盖。
+发布只在本仓库进行，已有同名 release 的附件不会被覆盖；重跑也必须核对既有
+Release 的完整附件集合及 GitHub 返回的 SHA-256 摘要。
 
 发布任务按仓库串行执行。新 release 创建时先不标记 Latest，附件上传后重新读取
 当前 `main` 的提交；只有它仍等于这次的构建提交，才更新 Latest。较旧提交的构建
@@ -42,12 +44,13 @@ GitHub 的定时任务可能延迟；它查询 MetaCubeX/mihomo 的最新正式 
 更新顺序：
 
 1. 从当前 `main` 准备普通 Git merge，保留本分支修改和上游历史。
-2. 保留本分支的整个 `.github/workflows` 目录及同步/编译脚本，移除这次合并
+2. 保留本分支的整个 `.github/workflows` 目录、同步 / 编译脚本和 `packaging/`，移除这次合并
    新带入的上游工作流，避免导入上游发布或跨仓库触发任务。
-3. 运行测试，并完整编译 amd64、arm64。测试、编译或代码冲突失败即停止。
+3. 运行测试和安装包检查，并完整编译 Linux amd64、arm64。测试、编译或代码冲突失败即停止。
 4. 检查远端 `main` 是否仍是开始测试时的提交；有并发修改则停止，稍后重试。
 5. 正常提交并推送合并，不使用强制推送。随后直接调用编译工作流，生成下载产物
-   并发布 release。
+   并发布 release。推送前门禁是这两个 Linux 目标，发布门禁仍要求完整 37 目标全部通过；
+   若其他架构在完整矩阵中失败，不生成新的成功 Release，Latest 保留已有可下载版本。
 
 工作流使用 GitHub 自动提供的 `GITHUB_TOKEN`，不需要 PAT 或其他仓库 secrets。
 普通 CI 的测试和编译 job 只有读取源码权限；同步及发布 release 的 job 才声明
@@ -83,7 +86,7 @@ bash scripts/upstream-sync.sh --dry-run v1.19.33
 python3 scripts/test-upstream-sync.py
 ```
 
-完整功能测试需要 Go 工具链：
+完整功能测试需要 Go 工具链和打包检查依赖（`dpkg-deb`、RPM 工具、`cpio`、`zstd`、Python 3.12）：
 
 ```bash
 bash scripts/ci-check.sh test

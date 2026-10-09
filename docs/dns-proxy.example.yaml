@@ -28,20 +28,26 @@ dns:
     - 203.0.113.53
     - 203.0.113.54
 
-  # 实际代理叶子 -> 此池；建议替换为通过该节点可达的海外普通 DNS。
-  # 自动 UDP/TCP 53 沿同一次规则选中的节点发送，不再次选组。
+  # 实际代理叶子 -> 此池；建议替换为通过该节点可达的海外 DNS / DoH。
+  # 原生 UDP/TCP 任意配置端口、DoH/DoT/DoQ/H3 沿同一次选中节点发送。
   nameserver:
-    - 198.51.100.53
-    - tcp://198.51.100.54:53
+    - https://198.51.100.53/dns-query
+    - https://198.51.100.54/dns-query
 
   cache-algorithm: lru
   cache-max-size: 4096
 
-  # 以下为显式启用的可选优化；测速/预取缺省均关闭。
-  # 仅 DIRECT/Compatible 的普通53自动上游集合测速；代理与签名回答跳过。
+  # 以下为显式启用的可选优化；测速/双栈优选/预取缺省均关闭。
+  # 仅 DIRECT/Compatible 的自动上游集合测速；代理与签名回答跳过。
   speed-check-mode: [tcp:443, tcp:80, ping]
   speed-check-timeout: 1000       # 毫秒；0采用1000，最大5000
   speed-check-concurrency: 16    # 0采用16，最大256
+  dualstack-ip-selection: true
+  dualstack-ip-selection-threshold: 10  # 毫秒；允许0–1000
+  dualstack-ip-allow-force-aaaa: false   # 默认保留IPv4
+  force-no-cname: true          # 仅压平完整、未受保护的A/AAAA回答链
+  rr-ttl-min: 0                 # 不抬高原TTL
+  rr-ttl-max: 3600              # 正常回答与缓存的TTL上限，秒
   prefetch-domain: true
   serve-expired: true
   serve-expired-ttl: 604800      # 秒；示例最多使用过期7天的记录，0不限制

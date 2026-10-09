@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/component/ca"
+	"github.com/metacubex/mihomo/component/dnsmessage"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
@@ -36,9 +37,9 @@ const (
 	// connections in HTTP transport.
 	transportDefaultIdleConnTimeout = 5 * time.Minute
 
-	dialTimeout        = 10 * time.Second
+	dialTimeout = 10 * time.Second
 
-	maxElapsedTime  = time.Second * 30
+	maxElapsedTime = time.Second * 30
 )
 
 var DefaultHTTPVersions = []C.HTTPVersion{C.HTTPVersion11, C.HTTPVersion2}
@@ -46,6 +47,7 @@ var DefaultHTTPVersions = []C.HTTPVersion{C.HTTPVersion11, C.HTTPVersion2}
 // dnsOverHTTPS is a struct that implements the Upstream interface for the
 // DNS-over-HTTPS protocol.
 type dnsOverHTTPS struct {
+	native nativeClientState
 	// The Client's Transport typically has internal state (cached TCP
 	// connections), so Clients should be reused instead of created as
 	// needed. Clients are safe for concurrent use by multiple goroutines.
@@ -107,6 +109,9 @@ func (doh *dnsOverHTTPS) Address() string {
 }
 
 func (doh *dnsOverHTTPS) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, err error) {
+	if answer, err, handled := exchangeNativeTransport(ctx, m, doh); handled {
+		return answer, err
+	}
 	// Quote from https://www.rfc-editor.org/rfc/rfc8484.html:
 	// In order to maximize HTTP cache friendliness, DoH clients using media
 	// formats that include the ID field from the DNS message header, such
@@ -132,6 +137,9 @@ func (doh *dnsOverHTTPS) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.
 
 	// Make the first attempt to send the DNS query.
 	msg, err = doh.exchangeHTTPS(ctx, client, m)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 
 	// Make up to 2 attempts to re-create the HTTP client and send the request
 	// again.  There are several cases (mostly, with QUIC) where this workaround
@@ -159,6 +167,7 @@ func (doh *dnsOverHTTPS) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.
 
 // Close implements the Upstream interface for *dnsOverHTTPS.
 func (doh *dnsOverHTTPS) Close() (err error) {
+	doh.native.reset(true)
 	doh.clientMu.Lock()
 	defer doh.clientMu.Unlock()
 
@@ -172,6 +181,7 @@ func (doh *dnsOverHTTPS) Close() (err error) {
 }
 
 func (doh *dnsOverHTTPS) ResetConnection() {
+	doh.native.reset(false)
 	doh.clientMu.Lock()
 	defer doh.clientMu.Unlock()
 
@@ -229,7 +239,12 @@ func (doh *dnsOverHTTPS) exchangeHTTPS(ctx context.Context, client *http.Client,
 	}
 	defer httpResp.Body.Close()
 
-	body, err := io.ReadAll(httpResp.Body)
+	var body []byte
+	if doh.native.bound {
+		body, err = io.ReadAll(io.LimitReader(httpResp.Body, dnsmessage.MaxSize+1))
+	} else {
+		body, err = io.ReadAll(httpResp.Body)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", doh.url, err)
 	}
@@ -244,8 +259,12 @@ func (doh *dnsOverHTTPS) exchangeHTTPS(ctx context.Context, client *http.Client,
 			)
 	}
 
-	resp = &D.Msg{}
-	err = resp.Unpack(body)
+	if doh.native.bound {
+		resp, err = dnsmessage.Unpack(body)
+	} else {
+		resp = &D.Msg{}
+		err = resp.Unpack(body)
+	}
 	if err != nil {
 		return nil, fmt.Errorf(
 			"unpacking response from %s: body is %s: %w",
@@ -292,6 +311,12 @@ func (doh *dnsOverHTTPS) shouldRetry(err error) (ok bool) {
 func (doh *dnsOverHTTPS) resetClient(ctx context.Context, resetErr error) (client *http.Client, err error) {
 	doh.clientMu.Lock()
 	defer doh.clientMu.Unlock()
+	if doh.native.isClosed() {
+		return nil, net.ErrClosed
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 
 	if errors.Is(resetErr, quic.Err0RTTRejected) {
 		// Reset the TokenStore only if 0-RTT was rejected.
@@ -338,6 +363,12 @@ func (doh *dnsOverHTTPS) getClient(ctx context.Context) (c *http.Client, isCache
 
 	doh.clientMu.Lock()
 	defer doh.clientMu.Unlock()
+	if doh.native.isClosed() {
+		return nil, false, net.ErrClosed
+	}
+	if ctx.Err() != nil {
+		return nil, false, ctx.Err()
+	}
 	if doh.client != nil {
 		return doh.client, true, nil
 	}

@@ -20,6 +20,7 @@ import (
 const maxOldDotConns = 8
 
 type dnsOverTLS struct {
+	native         nativeClientState
 	port           string
 	host           string
 	dialer         *dnsDialer
@@ -39,6 +40,9 @@ func (t *dnsOverTLS) Address() string {
 }
 
 func (t *dnsOverTLS) ExchangeContext(ctx context.Context, m *D.Msg) (*D.Msg, error) {
+	if answer, err, handled := exchangeNativeTransport(ctx, m, t); handled {
+		return answer, err
+	}
 	// miekg/dns ExchangeContext doesn't respond to context cancel.
 	// this is a workaround
 	type result struct {
@@ -85,7 +89,17 @@ func (t *dnsOverTLS) ExchangeContext(ctx context.Context, m *D.Msg) (*D.Msg, err
 				UDPSize: dClient.UDPSize,
 			}
 
+			stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 			msg, _, err = dClient.ExchangeWithConn(m, dConn)
+			stopped := stop()
+			if !stopped || ctx.Err() != nil {
+				_ = conn.Close()
+				err = ctx.Err()
+				if err == nil {
+					err = context.Canceled
+				}
+				return
+			}
 			if err != nil {
 				_ = conn.Close()
 				conn = nil
@@ -97,6 +111,11 @@ func (t *dnsOverTLS) ExchangeContext(ctx context.Context, m *D.Msg) (*D.Msg, err
 
 			if !t.disableReuse {
 				t.access.Lock()
+				if t.native.isClosed() || ctx.Err() != nil {
+					t.access.Unlock()
+					_ = conn.Close()
+					return
+				}
 				if t.connections.Len() >= maxOldDotConns {
 					oldConn := t.connections.PopFront()
 					go oldConn.Close() // close in a new goroutine, not blocking the current task
@@ -146,6 +165,7 @@ func (t *dnsOverTLS) dialContext(ctx context.Context) (net.Conn, error) {
 }
 
 func (t *dnsOverTLS) ResetConnection() {
+	t.native.reset(false)
 	if !t.disableReuse {
 		t.access.Lock()
 		for t.connections.Len() > 0 {
@@ -157,6 +177,7 @@ func (t *dnsOverTLS) ResetConnection() {
 }
 
 func (t *dnsOverTLS) Close() error {
+	t.native.reset(true)
 	runtime.SetFinalizer(t, nil)
 	t.ResetConnection()
 	return nil

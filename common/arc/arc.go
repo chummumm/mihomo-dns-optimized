@@ -55,6 +55,19 @@ func (a *ARC[K, V]) Clear() {
 	a.cache = make(map[K]*entry[K, V])
 }
 
+// Delete invalidates one key, including any ghost history for that key.
+func (a *ARC[K, V]) Delete(key K) {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+	if ent, ok := a.cache[key]; ok {
+		ent.detach()
+		if !ent.ghost {
+			a.len--
+		}
+		delete(a.cache, key)
+	}
+}
+
 // Set inserts a new key-value pair into the cache.
 // This optimizes future access to this entry (side effect).
 func (a *ARC[K, V]) Set(key K, value V) {
@@ -211,7 +224,7 @@ func (a *ARC[K, V]) delLRU(list *list.List[*entry[K, V]]) {
 }
 
 func (a *ARC[K, V]) replace(ent *entry[K, V]) {
-	if a.t1.Len() > 0 && ((a.t1.Len() > a.p) || (ent.ll == a.b2 && a.t1.Len() == a.p)) {
+	if a.t1.Len() > 0 && (a.t2.Len() == 0 || (a.t1.Len() > a.p) || (ent.ll == a.b2 && a.t1.Len() == a.p)) {
 		lru := a.t1.Back().Value
 		lru.value = lo.Empty[V]()
 		lru.ghost = true

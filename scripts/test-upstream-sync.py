@@ -62,10 +62,11 @@ class StableSyncTests(unittest.TestCase):
         write(self.fork, ".github/workflows/build.yml", "fork automation\n")
         write(self.fork, "UPSTREAM_VERSION", "v1.0.0\n")
         write(self.fork, "UPSTREAM_COMMIT", self.initial + "\n")
-        for name in ["upstream-sync.sh", "ci-check.sh", "test-upstream-sync.py"]:
+        for name in ["upstream-sync.sh", "ci-check.sh", "test-upstream-sync.py", "release-build.py", "test-release-build.py"]:
             target = self.fork / "scripts" / name
             target.parent.mkdir(exist_ok=True)
             shutil.copyfile(SOURCE_ROOT / "scripts" / name, target)
+        shutil.copytree(SOURCE_ROOT / "packaging", self.fork / "packaging")
         self.base = commit(self.fork, "fork DNS feature and automation")
 
     def sync(self, tag, *, dry_run=False, check=True):
@@ -84,6 +85,8 @@ class StableSyncTests(unittest.TestCase):
         # Force a workflow conflict AND an added workflow, both to be discarded.
         write(self.upstream, ".github/workflows/build.yml", "changed upstream automation\n")
         write(self.upstream, ".github/workflows/unexpected.yml", "new upstream dispatch\n")
+        write(self.upstream, "scripts/release-build.py", "unexpected build replacement\n")
+        write(self.upstream, "packaging/unexpected", "unexpected package hook\n")
         self.latest = commit(self.upstream, "new upstream release")
         git(self.upstream, "tag", "v1.0.1")
         return self.latest
@@ -101,6 +104,8 @@ class StableSyncTests(unittest.TestCase):
         self.assertEqual((self.fork / "code.txt").read_text(), "upstream improved\n")
         self.assertEqual((self.fork / ".github/workflows/build.yml").read_text(), "fork automation\n")
         self.assertFalse((self.fork / ".github/workflows/unexpected.yml").exists())
+        self.assertFalse((self.fork / "packaging/unexpected").exists())
+        self.assertEqual((self.fork / "scripts/release-build.py").read_bytes(), (SOURCE_ROOT / "scripts/release-build.py").read_bytes())
         self.assertEqual((self.fork / "UPSTREAM_COMMIT").read_text().strip(), latest)
         merged = commit(self.fork, "tested sync")
         parents = git(self.fork, "show", "-s", "--format=%P", "HEAD").split()

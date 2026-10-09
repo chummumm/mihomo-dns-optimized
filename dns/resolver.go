@@ -29,6 +29,7 @@ type dnsClient interface {
 type dnsCache interface {
 	GetWithExpire(key string) (*D.Msg, time.Time, bool)
 	SetWithExpire(key string, value *D.Msg, expire time.Time)
+	Delete(key string)
 	Clear()
 }
 
@@ -50,6 +51,8 @@ type Resolver struct {
 	cache                 dnsCache
 	cacheControl          *cacheControl
 	speedChecker          *directSpeedChecker
+	answerPolicy          AnswerPolicy
+	dualStack             DualStackConfig
 	policy                []dnsPolicy
 	defaultResolver       *Resolver
 	ruleRouting           bool
@@ -176,13 +179,12 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 		return nil, context.Canceled
 	}
 	continueFetch := false
-	q := m.Question[0]
-	key := dnsCacheKey(ctx, q)
+	key := r.cacheKey(ctx, m)
 	if r.cacheControl != nil {
 		r.cacheControl.Observe(ctx, m, key)
 	}
 	defer func() {
-		if !cacheBackground(ctx) && (continueFetch || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
+		if !cacheBackground(ctx) && !dnsQueryClosed(ctx) && (continueFetch || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
 			if r.cacheControl != nil {
 				r.cacheControl.Refresh(ctx, m, key)
 				return
@@ -220,7 +222,7 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 // ExchangeWithoutCache a batch of dns request, and it do NOT GET from cache
 func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.Msg, err error) {
 	q := m.Question[0]
-	key := dnsCacheKey(ctx, q)
+	key := r.cacheKey(ctx, m)
 	flightKey := key
 	if r.cacheControl != nil {
 		flightKey = r.cacheControl.FlightKey(ctx, key)
@@ -229,7 +231,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 	retryNum := 0
 	retryMax := 3
 	canRetry := func() bool {
-		return !cacheBackground(ctx) && (r.cacheControl == nil || r.cacheControl.active(ctx))
+		return !cacheBackground(ctx) && !dnsQueryClosed(ctx) && (r.cacheControl == nil || r.cacheControl.active(ctx))
 	}
 	fn := func() (result *D.Msg, err error) {
 		workContext := ctx
@@ -248,6 +250,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 				return
 			}
 
+			result = r.answerPolicy.apply(m, result)
 			if cache {
 				if r.cacheControl != nil {
 					r.cacheControl.Store(ctx, key, q, result)
@@ -467,6 +470,13 @@ func (r *Resolver) Close() {
 	if r != nil && r.cacheControl != nil {
 		r.cacheControl.Close()
 	}
+	if r != nil {
+		for _, clients := range [][]dnsClient{r.main, r.direct, r.fallback} {
+			for _, client := range clients {
+				closeNativePool(client)
+			}
+		}
+	}
 }
 
 func (r *Resolver) ResetConnection() {
@@ -559,6 +569,8 @@ type Config struct {
 	CacheMaxSize         int
 	SpeedCheck           SpeedCheckConfig
 	CacheOptions         *CacheOptions
+	AnswerPolicy         AnswerPolicy
+	DualStack            DualStackConfig
 }
 
 func (config Config) newCache() dnsCache {
@@ -733,6 +745,8 @@ func NewResolver(config Config) (rs Resolvers) {
 	for _, item := range []*Resolver{r, rs.DirectResolver} {
 		if item != nil {
 			item.speedChecker = checker
+			item.answerPolicy = config.AnswerPolicy
+			item.dualStack = config.DualStack
 			item.cacheControl = newCacheControl(item, config.CacheOptions)
 		}
 	}

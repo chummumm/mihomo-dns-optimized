@@ -50,6 +50,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       release_tag: ${{ steps.version.outputs.release_tag }}
       build_time: ${{ steps.version.outputs.build_time }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -61,6 +62,11 @@ jobs:
           go-version: "1.26"
           go-download-base-url: https://github.com/MetaCubeX/go/releases/download/build
           cache: true
+      - name: Install package inspection tools
+        run: sudo apt-get update && sudo apt-get install -y rpm cpio zstd
+      - name: Read the checked release matrix
+        id: matrix
+        run: printf 'matrix=%s\n' "$(python3 scripts/release-build.py matrix)" >> "$GITHUB_OUTPUT"
       - name: Test fork changes and sync safeguards
         run: bash scripts/ci-check.sh test
       - name: Identify the exact build
@@ -88,14 +94,14 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   build:
-    name: Linux ${{ matrix.arch }}
+    name: ${{ matrix.target }}
     needs: check
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 45
     strategy:
       fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
+      max-parallel: 12
+      matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -107,16 +113,26 @@ jobs:
           go-version: "1.26"
           go-download-base-url: https://github.com/MetaCubeX/go/releases/download/build
           cache: true
-      - name: Build the complete core with gVisor
+      - name: Install package inspection tools
+        if: matrix.packages
+        run: sudo apt-get update && sudo apt-get install -y rpm cpio zstd
+      - name: Install pinned Android NDK
+        if: matrix.android
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?Android SDK is missing}}"
+          "$sdk/cmdline-tools/latest/bin/sdkmanager" --install 'ndk;29.0.14206865'
+          printf 'ANDROID_NDK_HOME=%s/ndk/29.0.14206865\n' "$sdk" >> "$GITHUB_ENV"
+      - name: Build, package and inspect the complete core with gVisor
         env:
-          TARGET_ARCH: ${{ matrix.arch }}
+          TARGET: ${{ matrix.target }}
           BUILD_VERSION: ${{ needs.check.outputs.version }}
           BUILD_TIME: ${{ needs.check.outputs.build_time }}
-        run: bash scripts/ci-check.sh build "$TARGET_ARCH" "$RUNNER_TEMP/dist" "$BUILD_VERSION" "$BUILD_TIME"
+        run: bash scripts/ci-check.sh build "$TARGET" "$RUNNER_TEMP/dist" "$BUILD_VERSION" "$BUILD_TIME"
       - name: Upload binaries and checksums
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: mihomo-dns-linux-${{ matrix.arch }}-${{ needs.check.outputs.commit }}
+          name: mihomo-dns-${{ matrix.target }}-${{ needs.check.outputs.commit }}
           path: ${{ runner.temp }}/dist/*
           if-no-files-found: error
           retention-days: 30
@@ -132,7 +148,7 @@ jobs:
        startsWith(github.ref, 'refs/tags/dns-v') ||
        (inputs.publish_release && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: write
     concurrency:
@@ -140,10 +156,14 @@ jobs:
       group: dns-release-publish-${{ github.repository }}
       cancel-in-progress: false
     steps:
-      - name: Download both architectures
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.check.outputs.commit }}
+          persist-credentials: false
+      - name: Download all release targets
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: mihomo-dns-linux-*-${{ needs.check.outputs.commit }}
+          pattern: mihomo-dns-*-${{ needs.check.outputs.commit }}
           path: dist
           merge-multiple: true
       - name: Publish immutable commit build
@@ -154,19 +174,24 @@ jobs:
           RELEASE_TAG: ${{ needs.check.outputs.release_tag }}
         run: |
           set -euo pipefail
+          python3 scripts/release-build.py collect dist "$BUILD_VERSION" "$BUILD_SHA"
           cd dist
-          sha256sum --check ./*.sha256
-          cat ./*.sha256 > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          shopt -s nullglob
+          assets=( ./*.gz ./*.zip ./*.deb ./*.rpm ./*.pkg.tar.zst BUILDINFO.json SHA256SUMS )
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            printf 'Release %s already exists; published assets are not overwritten.\n' "$RELEASE_TAG"
+            printf 'Release %s already exists; checking its immutable assets.\n' "$RELEASE_TAG"
           else
             {
               printf 'Mihomo DNS optimized `%s`\n\n' "$BUILD_VERSION"
               printf 'Source commit: `%s`\n\n' "$BUILD_SHA"
-              printf 'Linux amd64 (GOAMD64=v1) and arm64; gVisor enabled; CGO disabled.\n\n'
-              printf 'Uncompress the matching `.gz`, mark it executable, and follow `docs/dns-proxy.md`.\n'
-              printf 'Enable top-level `dns-rule-routing: true` for QNAME routing of plain TCP/UDP DNS on port 53 through existing inbounds and native DNS. Native DNS selects `direct-nameserver` for DIRECT and `nameserver` for proxy routes.\n'
-              printf 'Optional DIRECT IP speed checks, bounded cache prefetch and stale-answer controls are configured under `dns:`. Speed checks and proactive prefetch default to off; see the migration and scope notes.\n'
+              printf '37 platform/CPU targets: Linux, Windows, macOS, FreeBSD and Android. Linux deb/rpm and selected Arch packages are included.\n\n'
+              printf 'Built with the upstream MetaCubeX Go 1.26 toolchain and with_gvisor; Android uses pinned NDK r29/API34 with CGO, other builds use CGO=0.\n\n'
+              printf 'Linux amd64 is GOAMD64=v1; v2/v3 are separate downloads. This release does not include old-Go or LoongArch ABI1 variants.\n\n'
+              printf 'Choose a matching target and verify SHA256SUMS. Installation packages preserve /etc/mihomo/config.yaml and never start or enable services automatically.\n\n'
+              printf 'Matrix, installation and compatibility: https://github.com/%s/blob/%s/docs/releases.md\n\n' "$GITHUB_REPOSITORY" "$BUILD_SHA"
+              printf 'Enable top-level `dns-rule-routing: true` for forwarded TCP/UDP DNS on port 53. Native DNS supports configured UDP/TCP upstream ports, DoT, DoH including HTTP/3, and DoQ; DIRECT uses `direct-nameserver`, proxy routes use `nameserver`, with the selected outbound retained.\n'
+              printf 'Optional DIRECT IP speed checks and dual-stack selection, bounded cache prefetch/stale answers, TTL bounds and safe CNAME flattening are configured under `dns:`. These optional optimizations default to off; see the migration, DNSSEC protection and scope notes.\n'
             } > "$RUNNER_TEMP/release-notes.txt"
             # Creating an older build must never move the repository's Latest link.
             gh release create "$RELEASE_TAG" \
@@ -175,8 +200,10 @@ jobs:
               --title "$BUILD_VERSION" \
               --notes-file "$RUNNER_TEMP/release-notes.txt" \
               --latest=false \
-              ./*.gz SHA256SUMS
+              "${assets[@]}"
           fi
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/published-release.json"
+          python3 ../scripts/release-build.py verify-published . "$RUNNER_TEMP/published-release.json"
           # Re-read main after upload, immediately before promoting the release.
           # A slow or rerun older build keeps its download without replacing Latest.
           current_main=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')

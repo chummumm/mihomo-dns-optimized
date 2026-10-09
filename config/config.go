@@ -166,6 +166,8 @@ type DNS struct {
 	CacheMaxSize          int
 	SpeedCheck            dns.SpeedCheckConfig
 	CacheOptions          *dns.CacheOptions
+	AnswerPolicy          dns.AnswerPolicy
+	DualStack             dns.DualStackConfig
 	FakeIPRange           netip.Prefix
 	FakeIPPool            *fakeip.Pool
 	FakeIPRange6          netip.Prefix
@@ -223,40 +225,46 @@ type RawCors struct {
 }
 
 type RawDNS struct {
-	Enable                       bool                                `yaml:"enable" json:"enable"`
-	PreferH3                     bool                                `yaml:"prefer-h3" json:"prefer-h3"`
-	IPv6                         bool                                `yaml:"ipv6" json:"ipv6"`
-	IPv6Timeout                  uint                                `yaml:"ipv6-timeout" json:"ipv6-timeout"`
-	UseHosts                     bool                                `yaml:"use-hosts" json:"use-hosts"`
-	UseSystemHosts               bool                                `yaml:"use-system-hosts" json:"use-system-hosts"`
-	RespectRules                 bool                                `yaml:"respect-rules" json:"respect-rules"`
-	NameServer                   []string                            `yaml:"nameserver" json:"nameserver"`
-	Fallback                     []string                            `yaml:"fallback" json:"fallback"`
-	FallbackFilter               RawFallbackFilter                   `yaml:"fallback-filter" json:"fallback-filter"`
-	FallbackLazyQuery            bool                                `yaml:"fallback-lazy-query" json:"fallback-lazy-query"`
-	Listen                       string                              `yaml:"listen" json:"listen"`
-	ListenRoutingMark            int                                 `yaml:"listen-routing-mark" json:"listen-routing-mark"`
-	EnhancedMode                 C.DNSMode                           `yaml:"enhanced-mode" json:"enhanced-mode"`
-	FakeIPRange                  string                              `yaml:"fake-ip-range" json:"fake-ip-range"`
-	FakeIPRange6                 string                              `yaml:"fake-ip-range6" json:"fake-ip-range6"`
-	FakeIPFilter                 []string                            `yaml:"fake-ip-filter" json:"fake-ip-filter"`
-	FakeIPFilterMode             C.FilterMode                        `yaml:"fake-ip-filter-mode" json:"fake-ip-filter-mode"`
-	FakeIPTTL                    int                                 `yaml:"fake-ip-ttl" json:"fake-ip-ttl"`
-	DefaultNameserver            []string                            `yaml:"default-nameserver" json:"default-nameserver"`
-	CacheAlgorithm               string                              `yaml:"cache-algorithm" json:"cache-algorithm"`
-	CacheMaxSize                 int                                 `yaml:"cache-max-size" json:"cache-max-size"`
-	SpeedCheckMode               []string                            `yaml:"speed-check-mode" json:"speed-check-mode"`
-	SpeedCheckTimeout            int64                               `yaml:"speed-check-timeout" json:"speed-check-timeout"`
-	SpeedCheckConcurrency        int                                 `yaml:"speed-check-concurrency" json:"speed-check-concurrency"`
-	PrefetchDomain               bool                                `yaml:"prefetch-domain" json:"prefetch-domain"`
-	ServeExpired                 *bool                               `yaml:"serve-expired" json:"serve-expired"`
-	ServeExpiredTTL              int64                               `yaml:"serve-expired-ttl" json:"serve-expired-ttl"`
-	ServeExpiredReplyTTL         *int64                              `yaml:"serve-expired-reply-ttl" json:"serve-expired-reply-ttl"`
-	NameServerPolicy             *orderedmap.OrderedMap[string, any] `yaml:"nameserver-policy" json:"nameserver-policy"`
-	ProxyServerNameserver        []string                            `yaml:"proxy-server-nameserver" json:"proxy-server-nameserver"`
-	ProxyServerNameserverPolicy  *orderedmap.OrderedMap[string, any] `yaml:"proxy-server-nameserver-policy" json:"proxy-server-nameserver-policy"`
-	DirectNameServer             []string                            `yaml:"direct-nameserver" json:"direct-nameserver"`
-	DirectNameServerFollowPolicy bool                                `yaml:"direct-nameserver-follow-policy" json:"direct-nameserver-follow-policy"`
+	Enable                        bool                                `yaml:"enable" json:"enable"`
+	PreferH3                      bool                                `yaml:"prefer-h3" json:"prefer-h3"`
+	IPv6                          bool                                `yaml:"ipv6" json:"ipv6"`
+	IPv6Timeout                   uint                                `yaml:"ipv6-timeout" json:"ipv6-timeout"`
+	UseHosts                      bool                                `yaml:"use-hosts" json:"use-hosts"`
+	UseSystemHosts                bool                                `yaml:"use-system-hosts" json:"use-system-hosts"`
+	RespectRules                  bool                                `yaml:"respect-rules" json:"respect-rules"`
+	NameServer                    []string                            `yaml:"nameserver" json:"nameserver"`
+	Fallback                      []string                            `yaml:"fallback" json:"fallback"`
+	FallbackFilter                RawFallbackFilter                   `yaml:"fallback-filter" json:"fallback-filter"`
+	FallbackLazyQuery             bool                                `yaml:"fallback-lazy-query" json:"fallback-lazy-query"`
+	Listen                        string                              `yaml:"listen" json:"listen"`
+	ListenRoutingMark             int                                 `yaml:"listen-routing-mark" json:"listen-routing-mark"`
+	EnhancedMode                  C.DNSMode                           `yaml:"enhanced-mode" json:"enhanced-mode"`
+	FakeIPRange                   string                              `yaml:"fake-ip-range" json:"fake-ip-range"`
+	FakeIPRange6                  string                              `yaml:"fake-ip-range6" json:"fake-ip-range6"`
+	FakeIPFilter                  []string                            `yaml:"fake-ip-filter" json:"fake-ip-filter"`
+	FakeIPFilterMode              C.FilterMode                        `yaml:"fake-ip-filter-mode" json:"fake-ip-filter-mode"`
+	FakeIPTTL                     int                                 `yaml:"fake-ip-ttl" json:"fake-ip-ttl"`
+	DefaultNameserver             []string                            `yaml:"default-nameserver" json:"default-nameserver"`
+	CacheAlgorithm                string                              `yaml:"cache-algorithm" json:"cache-algorithm"`
+	CacheMaxSize                  int                                 `yaml:"cache-max-size" json:"cache-max-size"`
+	SpeedCheckMode                []string                            `yaml:"speed-check-mode" json:"speed-check-mode"`
+	SpeedCheckTimeout             int64                               `yaml:"speed-check-timeout" json:"speed-check-timeout"`
+	SpeedCheckConcurrency         int                                 `yaml:"speed-check-concurrency" json:"speed-check-concurrency"`
+	PrefetchDomain                bool                                `yaml:"prefetch-domain" json:"prefetch-domain"`
+	ServeExpired                  *bool                               `yaml:"serve-expired" json:"serve-expired"`
+	ServeExpiredTTL               int64                               `yaml:"serve-expired-ttl" json:"serve-expired-ttl"`
+	ServeExpiredReplyTTL          *int64                              `yaml:"serve-expired-reply-ttl" json:"serve-expired-reply-ttl"`
+	ForceNoCNAME                  bool                                `yaml:"force-no-cname" json:"force-no-cname"`
+	RRTTLMin                      int64                               `yaml:"rr-ttl-min" json:"rr-ttl-min"`
+	RRTTLMax                      int64                               `yaml:"rr-ttl-max" json:"rr-ttl-max"`
+	DualStackIPSelection          bool                                `yaml:"dualstack-ip-selection" json:"dualstack-ip-selection"`
+	DualStackIPSelectionThreshold *int64                              `yaml:"dualstack-ip-selection-threshold" json:"dualstack-ip-selection-threshold"`
+	DualStackIPAllowForceAAAA     bool                                `yaml:"dualstack-ip-allow-force-aaaa" json:"dualstack-ip-allow-force-aaaa"`
+	NameServerPolicy              *orderedmap.OrderedMap[string, any] `yaml:"nameserver-policy" json:"nameserver-policy"`
+	ProxyServerNameserver         []string                            `yaml:"proxy-server-nameserver" json:"proxy-server-nameserver"`
+	ProxyServerNameserverPolicy   *orderedmap.OrderedMap[string, any] `yaml:"proxy-server-nameserver-policy" json:"proxy-server-nameserver-policy"`
+	DirectNameServer              []string                            `yaml:"direct-nameserver" json:"direct-nameserver"`
+	DirectNameServerFollowPolicy  bool                                `yaml:"direct-nameserver-follow-policy" json:"direct-nameserver-follow-policy"`
 }
 
 type RawFallbackFilter struct {
@@ -1434,6 +1442,14 @@ func parseDNS(rawCfg *RawConfig, ruleProviders map[string]P.RuleProvider) (*DNS,
 	if err != nil {
 		return nil, err
 	}
+	answerPolicy, err := parseDNSAnswerPolicy(cfg)
+	if err != nil {
+		return nil, err
+	}
+	dualStack, err := parseDNSDualStack(cfg)
+	if err != nil {
+		return nil, err
+	}
 	if rawCfg.DNSRuleRouting {
 		// Work on a copy: disabling the feature on the next full reload must
 		// restore the user's original resolver policy, not a mutated config.
@@ -1468,6 +1484,8 @@ func parseDNS(rawCfg *RawConfig, ruleProviders map[string]P.RuleProvider) (*DNS,
 		CacheMaxSize:      cfg.CacheMaxSize,
 		SpeedCheck:        speedCheck,
 		CacheOptions:      cacheOptions,
+		AnswerPolicy:      answerPolicy,
+		DualStack:         dualStack,
 	}
 	if dnsCfg.NameServer, err = parseNameServer(cfg.NameServer, cfg.RespectRules, cfg.PreferH3); err != nil {
 		return nil, err

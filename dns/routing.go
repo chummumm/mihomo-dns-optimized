@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
+	"sync/atomic"
 
 	"github.com/metacubex/mihomo/component/dnsmessage"
 	"github.com/metacubex/mihomo/component/resolver"
@@ -29,6 +30,7 @@ type dnsQueryRoute struct {
 	pool     string
 	main     []dnsClient
 	fallback []dnsClient
+	closed   atomic.Bool // a dashboard-closed exchange must not be retried
 }
 
 func queryRoute(ctx context.Context) *dnsQueryRoute {
@@ -37,20 +39,19 @@ func queryRoute(ctx context.Context) *dnsQueryRoute {
 }
 
 func (c *client) canRouteDNS() bool {
-	return c.port == "53" && c.proxyAdapter == nil && (c.proxyName == "" || c.proxyName == RespectRules)
+	return c.proxyAdapter == nil && (c.proxyName == "" || c.proxyName == RespectRules)
 }
 
-// Unwrap only content wrappers; protocol transports and explicit exits keep
-// their own behavior. In particular, this does not reinterpret TLS on port 53.
+// Configured native transports already carry a parsed question. Their protocol
+// and destination port do not constrain QNAME routing; explicit exits do.
 func dnsRoutingCapability(dc dnsClient) (automatic, explicit bool) {
 	if wrapped, ok := dc.(interface{ Unwrap() dnsClient }); ok {
 		return dnsRoutingCapability(wrapped.Unwrap())
 	}
-	switch client := dc.(type) {
-	case *client:
-		if client.canRouteDNS() {
-			return true, false
-		}
+	if _, dialer, _, _ := nativeClientDetails(dc); dialer != nil {
+		return dialer.Automatic(), !dialer.Automatic()
+	}
+	switch dc.(type) {
 	case *systemClient:
 		// Discovered system servers are plain DNS IP:53 clients. The same
 		// query context reaches the generated clients without another lookup.
@@ -63,8 +64,8 @@ func dnsRoutingNetwork(dc dnsClient) C.NetWork {
 	if wrapped, ok := dc.(interface{ Unwrap() dnsClient }); ok {
 		return dnsRoutingNetwork(wrapped.Unwrap())
 	}
-	if client, ok := dc.(*client); ok && client.schema == "tcp" {
-		return C.TCP
+	if _, dialer, network, _ := nativeClientDetails(dc); dialer != nil {
+		return network
 	}
 	return C.UDP
 }
@@ -93,7 +94,7 @@ func (r *Resolver) prepareDNSRouting(ctx context.Context, message *D.Msg) (conte
 	nativePool := len(r.direct) > 0 && (origin == nil || origin.SpecialProxy == "")
 	if nativePool {
 		// A direct pool may be the only automatic DNS transport. It must not
-		// be ruled out by an explicit or encrypted, but unselected, main pool.
+		// be ruled out by an explicit, but unselected, main pool.
 		clientSets = append(clientSets, r.direct)
 	}
 	for _, clients := range clientSets {
@@ -195,6 +196,7 @@ func (c *client) exchangeRouted(ctx context.Context, message *D.Msg, route *dnsQ
 	if route.err != nil {
 		return nil, route.err
 	}
+	ctx = tunnel.WithDNSQueryCloseHandler(ctx, func() { route.closed.Store(true) })
 	address, err := netip.ParseAddr(c.host)
 	if err != nil {
 		// The resolver's hostname is infrastructure, never the business QNAME.

@@ -318,6 +318,8 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 		CacheMaxSize:         c.CacheMaxSize,
 		SpeedCheck:           c.SpeedCheck,
 		CacheOptions:         c.CacheOptions,
+		AnswerPolicy:         c.AnswerPolicy,
+		DualStack:            c.DualStack,
 	})
 	dnsResolverOwner = &r
 	m := dns.NewEnhancer(dns.EnhancerConfig{

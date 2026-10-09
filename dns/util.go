@@ -80,6 +80,12 @@ func putMsgToCache(c dnsCache, key string, q D.Question, msg *D.Msg) {
 		ttl = minimalTTL(lo.Concat(msg.Answer, msg.Ns, msg.Extra))
 	}
 	if ttl == 0 {
+		if msg.Rcode == D.RcodeSuccess || msg.Rcode == D.RcodeNameError {
+			// A successful fresh answer can deliberately be uncacheable (for
+			// example a transient dual-stack preference). It supersedes any
+			// older answer, which must not keep returning through serve-expired.
+			c.Delete(key)
+		}
 		return
 	}
 

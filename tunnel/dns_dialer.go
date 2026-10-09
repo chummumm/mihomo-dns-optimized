@@ -21,13 +21,46 @@ type DNSDialer struct {
 	r            resolver.Resolver
 	proxyAdapter C.ProxyAdapter
 	proxyName    string
+	plan         *DNSRoutingPlan
+	lifetime     context.Context
 }
 
 func NewDNSDialer(r resolver.Resolver, proxyAdapter C.ProxyAdapter, proxyName string) *DNSDialer {
 	return &DNSDialer{r: r, proxyAdapter: proxyAdapter, proxyName: proxyName}
 }
 
+// Automatic reports whether a configured native DNS transport may inherit a
+// business query's route. Explicit adapters/groups/interfaces keep their path.
+func (d *DNSDialer) Automatic() bool {
+	return d.proxyAdapter == nil && (d.proxyName == "" || d.proxyName == DnsRespectRules)
+}
+
+// WithPlan makes an immutable dialer for one transport-pool route. The TLS/HTTP
+// client still owns its protocol; this only freezes the underlying exit.
+func (d *DNSDialer) WithPlan(plan *DNSRoutingPlan, lifetime context.Context) *DNSDialer {
+	return &DNSDialer{r: d.r, plan: plan, lifetime: lifetime}
+}
+
+// HTTP transports may detach a dial from its initial request so concurrent
+// requests can share it. A private transport's lifecycle must still cancel it.
+func (d *DNSDialer) nativeContext(ctx context.Context) (context.Context, func()) {
+	if d.lifetime == nil {
+		return ctx, func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(d.lifetime, cancel)
+	if d.lifetime.Err() != nil {
+		cancel()
+	}
+	return ctx, func() { stop(); cancel() }
+}
+
 func (d *DNSDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	if d.plan != nil {
+		ctx, finish := d.nativeContext(ctx)
+		defer finish()
+		return d.plan.dialNativeDNS(ctx, network, addr, d.r)
+	}
 	r := d.r
 	proxyName := d.proxyName
 	proxyAdapter := d.proxyAdapter
@@ -129,6 +162,11 @@ func (d *DNSDialer) DialContext(ctx context.Context, network, addr string) (net.
 }
 
 func (d *DNSDialer) ListenPacket(ctx context.Context, network, addr string) (net.PacketConn, error) {
+	if d.plan != nil {
+		ctx, finish := d.nativeContext(ctx)
+		defer finish()
+		return d.plan.listenNativeDNS(ctx, network, addr, d.r)
+	}
 	r := d.r
 	proxyAdapter := d.proxyAdapter
 	proxyName := d.proxyName

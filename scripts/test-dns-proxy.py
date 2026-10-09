@@ -590,10 +590,9 @@ def local_plain_dns(answer):
 
 
 def check_native_dns_pools(config, api_port, upstream_a, upstream_b):
-    # A high-port direct server intentionally exercises the selected pool's
-    # legacy explicit-transport exception. Native pool selection is real; the
-    # automatic port-53 DIRECT transport and speed probes have Go integration
-    # tests, rather than requiring privileged listeners in this binary test.
+    # Native transports know their question even on a configured high port;
+    # the external classifier's port-53 restriction does not apply here. Real
+    # speed probes have separate Go tests, not this reserved-address fixture.
     direct_answer = "198.51.100.33"
     dns_port = unused_port()
     with local_plain_dns(direct_answer) as (direct_port, direct_records, direct_lock):
@@ -608,7 +607,7 @@ def check_native_dns_pools(config, api_port, upstream_a, upstream_b):
   respect-rules: false
   nameserver: [203.0.113.53]
   direct-nameserver: [{endpoint}]
-  speed-check-mode: [tcp:443, tcp:80, ping]
+  speed-check-mode: [none]
   speed-check-timeout: 1000
   speed-check-concurrency: 16
   prefetch-domain: true
@@ -618,10 +617,13 @@ def check_native_dns_pools(config, api_port, upstream_a, upstream_b):
 """)
             native_config = native_config.replace("  - name: Chosen\n    type: select\n    proxies: [A, B]\n",
                                                   "  - name: Chosen\n    type: select\n    proxies: [A, B, DIRECT]\n")
-            native_config = native_config.replace("  - DOMAIN,first.example,A\n", """  - DOMAIN-SUFFIX,native-direct.example,DIRECT
+            native_config = native_config.replace("  - DOMAIN,first.example,A\n", """  - DOMAIN-SUFFIX,native-blocked.example,REJECT
+  - AND,((SRC-IP-CIDR,127.0.0.2/32),(OR,(DOMAIN,source-upgrade.example),(DOMAIN-SUFFIX,source-git.example),(DOMAIN-SUFFIX,source-docker.example))),B
+  - OR,((SRC-IP-CIDR,127.0.0.2/32),(SRC-IP-CIDR,127.0.0.3/32)),DIRECT
+  - SRC-IP-CIDR,127.0.0.4/32,A
+  - DOMAIN-SUFFIX,native-direct.example,DIRECT
   - DOMAIN-SUFFIX,native-proxy.example,B
   - DOMAIN-SUFFIX,native-selector.example,Chosen
-  - DOMAIN-SUFFIX,native-blocked.example,REJECT
   - DOMAIN,first.example,A
 """)
             api_request(api_port, "/configs", {"payload": native_config}, "PUT")
@@ -677,9 +679,69 @@ def check_native_dns_pools(config, api_port, upstream_a, upstream_b):
                 response = exchange(query)
                 assert response[:2] == query[:2] and response[3] & 15 == 5
                 assert seen(name) == (0, 0), "REJECT contacted a native DNS pool"
+
+            # Preserve the user's rule shape: a source+domain exception first,
+            # followed by a source-only DIRECT rule. Loopback aliases require
+            # no extra interface, privilege, NAT or external DNS service.
+            with contextlib.ExitStack() as stack:
+                sources = {}
+                source_port = 0
+                for address in ("127.0.0.2", "127.0.0.3", "127.0.0.4"):
+                    client = stack.enter_context(socket.socket(socket.AF_INET, socket.SOCK_DGRAM))
+                    client.bind((address, source_port))
+                    source_port = client.getsockname()[1]
+                    client.settimeout(3)
+                    sources[address] = client
+
+                def source_exchange(address, name, transaction, answer):
+                    client = sources[address]
+                    query = question(name, transaction)
+                    client.sendto(query, ("127.0.0.1", dns_port))
+                    check_answer(client.recvfrom(65535)[0], query, answer)
+
+                name = f"{network}.source-git.example"
+                for index, (address, answer, counts) in enumerate((
+                        ("127.0.0.2", upstream_b.answer, (0, 1)),
+                        ("127.0.0.3", direct_answer, (1, 1)),
+                        ("127.0.0.4", upstream_a.answer, (1, 2)),
+                        ("127.0.0.2", upstream_b.answer, (1, 2)),
+                        ("127.0.0.3", direct_answer, (1, 2)),
+                        ("127.0.0.4", upstream_a.answer, (1, 2)))):
+                    source_exchange(address, name, 630 + index, answer)
+                    assert seen(name) == counts, ("source route/cache", address, seen(name), counts)
+
+                # Same QNAME, leaf, client network and source port: only the
+                # source IP differs, so neither source may reuse the other's
+                # query cache even when both selected DIRECT.
+                name = f"{network}.source-other.example"
+                for index, (address, counts) in enumerate((
+                        ("127.0.0.2", (1, 0)), ("127.0.0.3", (2, 0)),
+                        ("127.0.0.2", (2, 0)), ("127.0.0.3", (2, 0)))):
+                    source_exchange(address, name, 640 + index, direct_answer)
+                    assert seen(name) == counts, ("source IP cache scope", address, seen(name), counts)
+                name = f"source-{network}.native-blocked.example"
+                query = question(name, 645)
+                sources["127.0.0.2"].sendto(query, ("127.0.0.1", dns_port))
+                response = sources["127.0.0.2"].recvfrom(65535)[0]
+                assert response[:2] == query[:2] and response[3] & 15 == 5
+                assert seen(name) == (0, 0), "blocklist lost priority to source DIRECT"
+
+                for index, (address, answer) in enumerate((("127.0.0.2", upstream_b.answer),
+                                                         ("127.0.0.3", direct_answer))):
+                    tcp = stack.enter_context(socket.socket(socket.AF_INET, socket.SOCK_STREAM))
+                    tcp.bind((address, 0))
+                    tcp.settimeout(3)
+                    tcp.connect(("127.0.0.1", dns_port))
+                    name = f"tcp-{network}.source-git.example"
+                    for repeated in range(2):
+                        query = question(name, 650 + index * 2 + repeated)
+                        tcp.sendall(frame(query))
+                        check_answer(read_frame(tcp), query, answer)
+                    assert seen(name) == ((0, 1) if index == 0 else (1, 1))
         with direct_lock:
             direct_count = len(direct_records)
-    print("PASS native DNS first-query pools: DIRECT only uses local UDP/TCP upstream; proxy retains main IP:53; same-source DIRECT/proxy cache isolation and REJECT before both pools (high-port explicit transport, no privileged port or speed probe)")
+    print("PASS native DNS first-query pools: DIRECT only uses local UDP/TCP upstream; proxy retains main IP:53; same-source DIRECT/proxy cache isolation and REJECT before both pools (automatic high-port native transport, no privileged port or speed probe)")
+    print("PASS source rules: real TCP/UDP clients, source+domain exception before source DIRECT, same-port distinct-source cache isolation including the same leaf, and blocklist precedence")
     return direct_count
 
 
