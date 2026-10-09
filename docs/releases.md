@@ -1,6 +1,8 @@
 # 预编译文件与安装包
 
-每次 `main` 测试和完整编译成功后都会生成固定提交的 GitHub Release。下载页的 **Latest** 仅在该构建仍对应当前 `main` 时更新。PR 只产生 Actions artifacts；每天的稳定版上游同步先经过测试和 Linux amd64/arm64 构建，再触发同一套完整发行矩阵。
+`main` 包含源码、依赖或构建配置变更时，测试和完整编译成功后生成固定提交的 GitHub Release。下载页的 **Latest** 仅在该构建仍对应当前 `main` 时更新。PR 只产生 Actions artifacts；每天的稳定版上游同步先经过测试和 Linux amd64/arm64 构建，再触发同一套完整发行矩阵。
+
+仅修改 Markdown、MDX、reStructuredText、AsciiDoc、`docs/**`、展示图片 `Meta.png` 或 GitHub issue/PR 说明模板时，push 和 PR 不启动自动核心构建、性能验证或发布。`docs/**` 包含文档配图和说明用配置示例；实际打包配置 `packaging/**`、源码、依赖、脚本和工作流仍触发构建。文档与这些文件混合修改时照常执行。显式手动构建、发行标签和上游稳定版同步调用保留原有行为。
 
 所有文件名包含平台、CPU 和版本，例如：
 
@@ -79,7 +81,7 @@ RPM 系统用 `sudo dnf install ./mihomo-dns-<target>-<version>.rpm`，Arch 系�
 
 ## 数字修订版本
 
-新发行版本形式为 `v1.19.32-dns-optimized-1`，tag、Release 标题与 `mihomo -v` 使用相同版本。新命名序列从审计基线提交后的修复开始；末尾数字由 `DNS_RELEASE_BASE` 之后的 first-parent 提交数量确定，因此可复现、随主线推进递增，并不要求每次发行连续编号。上游稳定版更新仍由原同步流程处理。提交 SHA 不再放入二进制版本或发行文件名，保留于 `BUILDINFO.json` 和提交记录。
+新发行版本形式为 `v1.19.32-dns-optimized-1`，tag、Release 标题与 `mihomo -v` 使用相同版本。新命名序列从审计基线提交后的修复开始；末尾数字由 `DNS_RELEASE_BASE` 之后的 first-parent 提交数量确定，因此可复现、随主线推进递增，并不要求每次发行连续编号。纯文档提交仍计入主线历史，但不会自动创建 Release，因此后续发行编号可能跳号。上游稳定版更新仍由原同步流程处理。提交 SHA 不再放入二进制版本或发行文件名，保留于 `BUILDINFO.json` 和提交记录。
 
 包管理器版本保留 UTC 构建时间前缀以保证从已有带哈希版本正常升级，其末尾改为数字修订号。安装包不会自动重启服务，升级后仍需校验配置并手动重启。
 
