@@ -164,6 +164,8 @@ type DNS struct {
 	DefaultNameserver     []dns.NameServer
 	CacheAlgorithm        string
 	CacheMaxSize          int
+	SpeedCheck            dns.SpeedCheckConfig
+	CacheOptions          *dns.CacheOptions
 	FakeIPRange           netip.Prefix
 	FakeIPPool            *fakeip.Pool
 	FakeIPRange6          netip.Prefix
@@ -243,6 +245,13 @@ type RawDNS struct {
 	DefaultNameserver            []string                            `yaml:"default-nameserver" json:"default-nameserver"`
 	CacheAlgorithm               string                              `yaml:"cache-algorithm" json:"cache-algorithm"`
 	CacheMaxSize                 int                                 `yaml:"cache-max-size" json:"cache-max-size"`
+	SpeedCheckMode               []string                            `yaml:"speed-check-mode" json:"speed-check-mode"`
+	SpeedCheckTimeout            int64                               `yaml:"speed-check-timeout" json:"speed-check-timeout"`
+	SpeedCheckConcurrency        int                                 `yaml:"speed-check-concurrency" json:"speed-check-concurrency"`
+	PrefetchDomain               bool                                `yaml:"prefetch-domain" json:"prefetch-domain"`
+	ServeExpired                 *bool                               `yaml:"serve-expired" json:"serve-expired"`
+	ServeExpiredTTL              int64                               `yaml:"serve-expired-ttl" json:"serve-expired-ttl"`
+	ServeExpiredReplyTTL         *int64                              `yaml:"serve-expired-reply-ttl" json:"serve-expired-reply-ttl"`
 	NameServerPolicy             *orderedmap.OrderedMap[string, any] `yaml:"nameserver-policy" json:"nameserver-policy"`
 	ProxyServerNameserver        []string                            `yaml:"proxy-server-nameserver" json:"proxy-server-nameserver"`
 	ProxyServerNameserverPolicy  *orderedmap.OrderedMap[string, any] `yaml:"proxy-server-nameserver-policy" json:"proxy-server-nameserver-policy"`
@@ -1421,6 +1430,10 @@ func parseNameServerPolicy(nsPolicy *orderedmap.OrderedMap[string, any], adapter
 
 func parseDNS(rawCfg *RawConfig, ruleProviders map[string]P.RuleProvider) (*DNS, error) {
 	cfg := rawCfg.DNS
+	speedCheck, cacheOptions, err := parseDNSOptimizations(cfg)
+	if err != nil {
+		return nil, err
+	}
 	if rawCfg.DNSRuleRouting {
 		// Work on a copy: disabling the feature on the next full reload must
 		// restore the user's original resolver policy, not a mutated config.
@@ -1453,8 +1466,9 @@ func parseDNS(rawCfg *RawConfig, ruleProviders map[string]P.RuleProvider) (*DNS,
 		EnhancedMode:      cfg.EnhancedMode,
 		CacheAlgorithm:    cfg.CacheAlgorithm,
 		CacheMaxSize:      cfg.CacheMaxSize,
+		SpeedCheck:        speedCheck,
+		CacheOptions:      cacheOptions,
 	}
-	var err error
 	if dnsCfg.NameServer, err = parseNameServer(cfg.NameServer, cfg.RespectRules, cfg.PreferH3); err != nil {
 		return nil, err
 	}

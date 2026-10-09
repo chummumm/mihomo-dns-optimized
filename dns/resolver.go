@@ -41,12 +41,15 @@ type Resolver struct {
 	ipv6                  bool
 	ipv6Timeout           time.Duration
 	main                  []dnsClient
+	direct                []dnsClient
 	fallback              []dnsClient
 	fallbackDomainFilters []C.DomainMatcher
 	fallbackIPFilters     []C.IpMatcher
 	fallbackLazyQuery     bool
 	group                 singleflight.Group[*D.Msg]
 	cache                 dnsCache
+	cacheControl          *cacheControl
+	speedChecker          *directSpeedChecker
 	policy                []dnsPolicy
 	defaultResolver       *Resolver
 	ruleRouting           bool
@@ -159,13 +162,31 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 	// A cache refresh or shared lookup can outlive the caller. Keep its query
 	// immutable even when the caller reuses or changes the original message.
 	m = m.Copy()
+	if r.cacheControl != nil {
+		ctx = r.cacheControl.Context(ctx)
+		if !r.cacheControl.active(ctx) {
+			return nil, context.Canceled
+		}
+	}
 	ctx, msg, err = r.prepareDNSRouting(ctx, m)
 	if err != nil || msg != nil {
 		return msg, err
 	}
+	if r.cacheControl != nil && !r.cacheControl.active(ctx) {
+		return nil, context.Canceled
+	}
 	continueFetch := false
+	q := m.Question[0]
+	key := dnsCacheKey(ctx, q)
+	if r.cacheControl != nil {
+		r.cacheControl.Observe(ctx, m, key)
+	}
 	defer func() {
-		if continueFetch || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		if !cacheBackground(ctx) && (continueFetch || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
+			if r.cacheControl != nil {
+				r.cacheControl.Refresh(ctx, m, key)
+				return
+			}
 			go func() {
 				ctx, cancel := context.WithTimeout(contextutils.WithoutCancel(ctx), resolver.DefaultDNSTimeout)
 				defer cancel()
@@ -174,19 +195,22 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 		}
 	}()
 
-	q := m.Question[0]
 	domain := msgToDomain(m)
-	msg, expireTime, hit := getMsgFromCache(r.cache, dnsCacheKey(ctx, q))
+	msg, expireTime, hit := getMsgFromCache(r.cache, key)
+	staleTTL := uint32(1)
+	now := time.Now()
+	if hit && expireTime.Before(now) && r.cacheControl != nil {
+		hit, staleTTL = r.cacheControl.ServeStale(expireTime, now)
+	}
 	if hit {
 		msg.Id = m.Id
 		log.Debugln("[DNS] cache hit %s --> %s, expire at %s", domain, msgToLogString(msg), expireTime.Format("2006-01-02 15:04:05"))
-		now := time.Now()
 		if expireTime.Before(now) {
-			setMsgTTL(msg, uint32(1)) // Continue fetch
+			setMsgTTL(msg, staleTTL)
 			continueFetch = true
 		} else {
 			// updating TTL by subtracting common delta time from each DNS record
-			updateMsgTTL(msg, uint32(time.Until(expireTime).Seconds()))
+			updateMsgTTL(msg, uint32(expireTime.Sub(now).Seconds()))
 		}
 		return
 	}
@@ -197,11 +221,22 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.Msg, err error) {
 	q := m.Question[0]
 	key := dnsCacheKey(ctx, q)
+	flightKey := key
+	if r.cacheControl != nil {
+		flightKey = r.cacheControl.FlightKey(ctx, key)
+	}
 
 	retryNum := 0
 	retryMax := 3
+	canRetry := func() bool {
+		return !cacheBackground(ctx) && (r.cacheControl == nil || r.cacheControl.active(ctx))
+	}
 	fn := func() (result *D.Msg, err error) {
-		ctx, cancel := context.WithTimeout(contextutils.WithoutCancel(ctx), resolver.DefaultDNSTimeout) // preserve the caller's DNS route while sharing the lookup
+		workContext := ctx
+		if !cacheBackground(ctx) {
+			workContext = contextutils.WithoutCancel(ctx)
+		}
+		ctx, cancel := context.WithTimeout(workContext, resolver.DefaultDNSTimeout)
 		defer cancel()
 		cache := false
 
@@ -214,9 +249,18 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 			}
 
 			if cache {
-				putMsgToCache(r.cache, key, q, result)
+				if r.cacheControl != nil {
+					r.cacheControl.Store(ctx, key, q, result)
+				} else {
+					putMsgToCache(r.cache, key, q, result)
+				}
 			}
 		}()
+		// Legacy foreground singleflight retries can outlive their caller.
+		// Check the generation immediately before every actual network attempt.
+		if r.cacheControl != nil && !r.cacheControl.active(ctx) {
+			return nil, context.Canceled
+		}
 
 		isIPReq := isIPRequest(q)
 		if isIPReq {
@@ -225,14 +269,15 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 		}
 
 		if matched := r.matchPolicy(m); len(matched) != 0 {
-			result, cache, err = batchExchange(ctx, matched, m)
+			result, cache, err = r.exchangeBatch(ctx, matched, m)
 			return
 		}
-		result, cache, err = batchExchange(ctx, r.main, m)
+		main, _ := r.dnsQueryServers(ctx)
+		result, cache, err = r.exchangeBatch(ctx, main, m)
 		return
 	}
 
-	ch := r.group.DoChan(key, fn)
+	ch := r.group.DoChan(flightKey, fn)
 
 	var result singleflight.Result[*D.Msg]
 
@@ -244,20 +289,22 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 		case result = <-ch: // maybe ctxDone and chFinish in same time, get DoChan's result as much as possible
 			break
 		default:
-			go func() { // start a retrying monitor in background
-				result := <-ch
-				ret, err, shared := result.Val, result.Err, result.Shared
-				if err != nil && !shared && ret.Opcode < retryMax { // retry
-					r.group.DoChan(key, fn)
-				}
-			}()
+			if canRetry() {
+				go func() { // start a retrying monitor in background
+					result := <-ch
+					ret, err, shared := result.Val, result.Err, result.Shared
+					if err != nil && !shared && ret.Opcode < retryMax && canRetry() { // retry
+						r.group.DoChan(flightKey, fn)
+					}
+				}()
+			}
 			return nil, ctx.Err()
 		}
 	}
 
 	ret, err, shared := result.Val, result.Err, result.Shared
-	if err != nil && !shared && ret.Opcode < retryMax { // retry
-		r.group.DoChan(key, fn)
+	if err != nil && !shared && ret.Opcode < retryMax && canRetry() { // retry
+		r.group.DoChan(flightKey, fn)
 	}
 
 	if err == nil {
@@ -310,21 +357,22 @@ func (r *Resolver) shouldOnlyQueryFallback(m *D.Msg) bool {
 }
 
 func (r *Resolver) ipExchange(ctx context.Context, m *D.Msg) (msg *D.Msg, err error) {
+	main, fallback := r.dnsQueryServers(ctx)
 	if matched := r.matchPolicy(m); len(matched) != 0 {
 		res := <-r.asyncExchange(ctx, matched, m)
 		return res.Msg, res.Error
 	}
 
-	onlyFallback := r.shouldOnlyQueryFallback(m)
+	onlyFallback := len(fallback) != 0 && r.shouldOnlyQueryFallback(m)
 
 	if onlyFallback {
-		res := <-r.asyncExchange(ctx, r.fallback, m)
+		res := <-r.asyncExchange(ctx, fallback, m)
 		return res.Msg, res.Error
 	}
 
-	msgCh := r.asyncExchange(ctx, r.main, m)
+	msgCh := r.asyncExchange(ctx, main, m)
 
-	if r.fallback == nil { // directly return if no fallback servers are available
+	if len(fallback) == 0 { // a direct query never races the proxy fallback pool
 		res := <-msgCh
 		msg, err = res.Msg, res.Error
 		return
@@ -332,7 +380,7 @@ func (r *Resolver) ipExchange(ctx context.Context, m *D.Msg) (msg *D.Msg, err er
 
 	var fallbackMsg <-chan *result
 	if !r.fallbackLazyQuery {
-		fallbackMsg = r.asyncExchange(ctx, r.fallback, m)
+		fallbackMsg = r.asyncExchange(ctx, fallback, m)
 	}
 	res := <-msgCh
 	if res.Error == nil {
@@ -348,7 +396,7 @@ func (r *Resolver) ipExchange(ctx context.Context, m *D.Msg) (msg *D.Msg, err er
 	}
 
 	if fallbackMsg == nil {
-		fallbackMsg = r.asyncExchange(ctx, r.fallback, m)
+		fallbackMsg = r.asyncExchange(ctx, fallback, m)
 	}
 	res = <-fallbackMsg
 	msg, err = res.Msg, res.Error
@@ -389,7 +437,7 @@ func (r *Resolver) lookupIP(ctx context.Context, host string, dnsType uint16) (i
 func (r *Resolver) asyncExchange(ctx context.Context, client []dnsClient, msg *D.Msg) <-chan *result {
 	ch := make(chan *result, 1)
 	go func() {
-		res, _, err := batchExchange(ctx, client, msg)
+		res, _, err := r.exchangeBatch(ctx, client, msg)
 		ch <- &result{Msg: res, Error: err}
 	}()
 	return ch
@@ -405,7 +453,19 @@ func (r *Resolver) Invalid() bool {
 
 func (r *Resolver) ClearCache() {
 	if r != nil && r.cache != nil {
-		r.cache.Clear()
+		if r.cacheControl != nil {
+			r.cacheControl.Clear()
+		} else {
+			r.cache.Clear()
+		}
+	}
+}
+
+// Close stops this resolver's background refreshes when configuration replaces
+// it. Foreground callers may finish, but cannot repopulate a closed cache.
+func (r *Resolver) Close() {
+	if r != nil && r.cacheControl != nil {
+		r.cacheControl.Close()
 	}
 }
 
@@ -497,6 +557,8 @@ type Config struct {
 	ProxyServerPolicy    []Policy
 	CacheAlgorithm       string
 	CacheMaxSize         int
+	SpeedCheck           SpeedCheckConfig
+	CacheOptions         *CacheOptions
 }
 
 func (config Config) newCache() dnsCache {
@@ -530,15 +592,30 @@ func (rs Resolvers) ResetConnection() {
 	rs.DirectResolver.ResetConnection()
 }
 
+func (rs Resolvers) Close() {
+	rs.Resolver.Close()
+	rs.ProxyResolver.Close()
+	rs.DirectResolver.Close()
+	rs.BootstrapResolver.Close()
+}
+
 func NewResolverFromClient(client dnsClient) *Resolver {
-	return &Resolver{
+	r := &Resolver{
 		ipv6:  true,
 		main:  []dnsClient{client},
 		cache: Config{}.newCache(),
 	}
+	r.cacheControl = newCacheControl(r, nil)
+	return r
 }
 
 func NewResolver(config Config) (rs Resolvers) {
+	checker, checkErr := newDirectSpeedChecker(config.SpeedCheck)
+	if checkErr != nil {
+		// Public constructors cannot return an error; parsed configurations are
+		// validated beforehand. Invalid programmatic options never enable probes.
+		log.Warnln("[DNS] speed check disabled: %v", checkErr)
+	}
 	defaultResolver := &Resolver{
 		bootstrap:   true,
 		main:        transform(config.Default, nil),
@@ -644,6 +721,7 @@ func NewResolver(config Config) (rs Resolvers) {
 		if config.DirectFollowPolicy {
 			rs.DirectResolver.policy = r.policy
 		}
+		r.direct = rs.DirectResolver.main
 	}
 
 	if len(config.Fallback) != 0 {
@@ -651,6 +729,18 @@ func NewResolver(config Config) (rs Resolvers) {
 		r.fallbackIPFilters = config.FallbackIPFilter
 		r.fallbackDomainFilters = config.FallbackDomainFilter
 		r.fallbackLazyQuery = config.FallbackLazyQuery
+	}
+	for _, item := range []*Resolver{r, rs.DirectResolver} {
+		if item != nil {
+			item.speedChecker = checker
+			item.cacheControl = newCacheControl(item, config.CacheOptions)
+		}
+	}
+	// Infrastructure lookups stay independent; no proactive probes or prefetch
+	// are inherited from ordinary business-domain tuning.
+	defaultResolver.cacheControl = newCacheControl(defaultResolver, nil)
+	if rs.ProxyResolver != nil {
+		rs.ProxyResolver.cacheControl = newCacheControl(rs.ProxyResolver, nil)
 	}
 
 	return

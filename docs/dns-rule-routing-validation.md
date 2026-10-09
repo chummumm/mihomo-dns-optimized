@@ -1,57 +1,70 @@
-# DNS 全局开关：实施与复查记录
+# DNS 原生选池、优化与缓存：实施与复查记录
 
-## 交付范围
+## 本轮范围与状态
 
-本轮把旧专用 `dns-proxy-port` 改为顶层 `dns-rule-routing` 布尔开关，默认关闭。设计、实现、交叉复查和二进制验证围绕 [完整行为约定](dns-rule-routing-design.md) 进行。源码基线为根目录记录的 Mihomo `v1.19.32`；具体派生版本、提交与构建时间由每次 GitHub Actions 发布记录标识。
+本轮在已存在的 `dns-rule-routing` 和公共 53 分类基础上，补齐内置 DNS **首次按业务 QNAME 选实际出站，再选 direct / main 池**，并增加可选直连 IP 测速、预取和过期回答控制。原公共入站继续保留客户端请求的解析器地址；无需 SmartDNS，不使用 FakeIP。
 
-公共入口只接管 Rule 模式、未固定出站的普通明文 TCP / UDP 53 查询；普通业务、Global / Direct、固定入口按约定保留原路径。内置 DNS 和 TUN DNS 劫持保持本地服务身份，通过上游交换桥接同一 QNAME 路由核心。协议解析和域名匹配复用项目既有实现，不新增 DNS 域名规则列表，不使用 FakeIP。
+设计与边界以 [设计约定](dns-rule-routing-design.md) 为准，配置见 [使用说明](dns-proxy.md) 与 [原生 DNS 示例](dns-proxy.example.yaml)。本轮已完成实现、独立复审和下述本地验证；云构建会在精确源提交上重新执行规定门禁，成功后才发布。
 
-## 审查中发现并修正的问题
+## 本轮审查结论
 
-| 问题 | 修正及验证依据 |
+| 检查点 | 实现约束及回归依据 |
 | --- | --- |
-| 仅解析候选配置就临时改变在线 Mode / FindProcessMode | 临时配置只改变解析所需设置，不改变运行模式；回归验证失败解析和解析期间真实 API 模式变更不会被回滚覆盖 |
-| 关闭内置 DNS 后，外部解析器 Host 缺少独立引导 | 开关开启时仍保留 default / proxy bootstrap，业务 DNS 服务继续关闭；配置测试和 Host:53 二进制交换验证 |
-| 普通 IP 规则触发内部 DNS 时，配置重载可能等待重入的读锁 | 仅在阻塞解析期间释放公共 matcher 的读锁，返回后重新取得；测试在解析阻塞期间实际更新规则和出站 |
-| 切组可能改变同一次 DNS 重试的出口或 UDP 能力判断 | 冻结组、实际叶子和 UDP 能力；后续 main / fallback / TCP 截断重试不重选，保留组级 disable-udp |
-| 内置 DNS 在 Global 模式中被新增逻辑强行改走 GLOBAL | 非 Rule 模式不创建自动计划；分别验证 respect-rules 开关下的原 DNSDialer 行为 |
-| 本地 DNS 1053 或原网站 TCP:443 进入 DNS 规则元数据 | 上游目标端口匹配 53，IN-PORT 保留本地监听；真实 DNS 网络与内部 lookup 网络分开，进程查找继续使用原 source socket |
-| 内置 REJECT-DROP 被错误转为 SERVFAIL | 使用明确的 drop 标记；DNS listen 与 TUN relay 的 TCP / UDP 均不为被丢弃查询生成回答 |
-| 非 IP 查询误把闲置 fallback 算作实际候选，弱化拒绝动作 | 按原 isIPRequest 分支选择候选；TXT / MX / HTTPS 不受未使用的 fallback 影响 |
-| TCP 下游短写可能截断 DNS 长度帧 | 复用已有完整写入 helper；最大帧与流水线测试使用每次最多写 3 字节的连接 |
-| 旧 dedicated listener 留下无用握手扩展 | 删除专用 listener 及专属测试，将 SOCKS4/5 握手源文件恢复到上游基线；普通 mixed 实现继续复用上游 |
-| 云端第一条 HTTP CONNECT 测试早于内核完成启动 | 用阻塞本地 provider 初始化的实验复现 200 后 EOF：原版先打开监听，再加载 provider / profile 并进入 Running；测试改为先完成普通 SOCKS TCP:443 回声证明转发就绪，随后第一条 DNS 仍要求一次成功，不用重试掩盖 DNS 问题 |
+| 先选实际出口，再选解析器池 | 主 resolver 复用现有 direct 客户端；DIRECT / Compatible 走 direct，代理走 main，名称不代替类型 |
+| 直连失败串到海外池 | direct 计划的 fallback 为空，不递归 DirectResolver；故障回归确认不查询 main / fallback |
+| 未选池显式上游弱化拒绝 | 先冻结所选池，再只检查其实际参与集合；无关 direct 显式配置不能豁免 main REJECT / DROP |
+| 重试或缓存重新选择负载均衡 | 每次逻辑查询一份 plan；main / fallback / TC 共用；缓存身份含池、上游和叶子 |
+| 已有固定出站与 bootstrap | SpecialProxy 旁路新增选池；业务已选 leaf 可选池但不重匹配；基础解析不继承业务计划 |
+| 测速破坏回答语义 | 保留一个完整回答的 CNAME 链，仅收窄未签名地址记录；DNSSEC 等保护场景跳过，全部探测失败返回已有原回答 |
+| 测速丢失接口 / mark 或误测 TFO | 探测沿实际直连适配器；数字 IP 不解析；TCP 测真实握手，ICMP 继承 socket 策略 |
+| 后台查旧 socket 得到另一个进程 | 保存已知或未知 PROCESS 快照，后台不重查旧 source tuple，但重新匹配当前业务规则 |
+| 清理后旧查询重新写缓存 | generation 隔离后台、singleflight 和写回；clear / mode / flag / reload / close 取消旧任务 |
+| 预取无限扩张或自激活 | 真实来源和前台热度门槛、每 resolver 1024 热点、全局 16 后台任务、无无限排队；新作用域需重新获得真实请求 |
+| 遗留前台 singleflight 重试绕过清理 | 实际网络函数和重试入口均检查活动代；阻塞首请求后 Close / Clear / mode 往返的确定性测试确认没有第二次交换 |
+| 关闭本地 DNS 后遗留隐藏 bootstrap | executor 保留完整 resolver 集合所有权，在更新规则和节点前关闭全部实例，包括仅暴露 proxy handle 的情形 |
+| 私有 resolver 被空闲 ticker 永久持有 | stale 刷新结束或热度消退后停止调度器；新需求安全重启，旧 tick 不影响新实例；执行中仍检测策略变化 |
+| 测试 TCP 空闲端口被已有 UDP relay 占用 | 本地 fixture 同时检查 TCP / UDP 绑定；双协议 DNS stub 直接接收预绑定 socket，首次 DNS 查询不通过重试掩盖失败 |
 
-交叉复查同时核对了业务 DNS 策略停用、bootstrap 例外、缓存 / singleflight 范围、固定出站传递、未知目标 IP 的逻辑传播，以及失败是否意外改走 DIRECT。正式配置路径没有保留被停用的业务 nameserver-policy；未为不可达的策略组合增加额外算法。
+## 已执行的本轮核心验证
 
-## 本地验证
+以下为 native 选池核心落地后的定向执行记录，随后已执行最终集成门禁。
 
-以下记录来自本轮实现后的实际执行；CI 会对提交重新执行测试，发布结果以对应 Actions 的精确提交为准。
-
-| 验证 | 结果与覆盖 |
+| 命令 | 已观察结果 |
 | --- | --- |
-| `bash scripts/ci-check.sh test` | 通过；包括 7 项本地 Git 上游同步保护测试、相关 Go 包测试以及 DNS 专项 race 检查 |
-| 完整 Linux amd64 / arm64 内核 | 两个架构的 `with_gvisor`、CGO 关闭构建通过；arm64 为交叉编译 |
-| `scripts/test-dns-proxy.py` 真实二进制 | 通过；60 次实际 DNS 上游交换，另验证普通 TCP / UDP 转发和拒绝动作 |
-| 内置 resolver 专项 | 缓存、来源 / 子规则 / EDNS / 固定出口隔离、事务 ID、取消与后台刷新、main / fallback / TC、bootstrap 和模式矩阵通过 |
-| SmartDNS 48.4 实际程序 | SOCKS5 UDP、SOCKS5 TCP、HTTP CONNECT TCP 三种方式均通过；使用认证的原 mixed 入口，两个域名分别到达两条本地模拟出站 |
-| 示例配置与差异检查 | 最小 YAML 的 `-t` 校验、`git diff --check` 通过 |
+| `go test ./dns -run '^TestDNSRuleRoutingNative' -count=1` | 通过；7 个 native 用例 |
+| `go test -race ./dns -run '^(TestDNSRuleRouting\|TestDNSRouting)' -count=1` | 通过；新增 native 与原 QNAME 桥接回归 |
 
-真实二进制测试使用本地模拟 SOCKS / DNS 出站及文档保留的目标地址，不依赖用户账号或外部 DNS 服务。覆盖 HTTP CONNECT 首帧预发送、SOCKS4/4a/5、IPv4 / IPv6、解析器域名独立引导、同连接逐查询分流、选择器切换、IN / SRC / 端口规则、固定出站和子规则、REJECT / REJECT-DROP、非 DNS 原字节转发、响应 ID / Question 校验、PASS 控制、Global 切换和完整配置重载。
+Native 用例覆盖真实 QNAME 规则、A / AAAA / 非 IP 查询、DIRECT / Compatible / 代理实际类型、误导性节点名称、相同作用域缓存、池切换隔离、原 fallback、直连故障不串池、UDP→TCP 冻结、未选显式池不弱化 REJECT / DROP、选中显式池本身的例外、SpecialProxy、非 Rule 模式与原 DirectResolver 用途。
 
-内置 DNS 的二进制检查覆盖 TCP / UDP 本地监听、QNAME 规则、真实 IN-PORT / 来源 / 网络、停用旧 nameserver-policy、选择器变化后的缓存隔离、事务 ID、拒绝动作和原生连接面板。外部 tracker 另验证精确流量统计、完成清理和面板关闭取消。
+## 本轮最终集成记录
+
+| 项目 | 状态 |
+| --- | --- |
+| 规定 Go 门禁、上游同步保护与 race | `bash scripts/ci-check.sh test` 通过：7 项同步保护测试，受影响组件 CGO=0 / `with_gvisor` 测试，以及 DNS 相关 CGO=1 race 门禁 |
+| 测速专项 | DIRECT 普通 53 与显式传输边界、实际本地 TCP 握手、真实包装 Direct 的 TFO / 关闭端口 / 取消 / 地址族、CNAME、DNSSEC、全失败回退、总超时和并发上限通过 |
+| ICMP 平台能力 | 新增 IPv4 / IPv6 回环实测；本地容器创建 raw ICMP socket 返回 EPERM，两项明确 SKIP，未把该结果记为真实 echo/reply 收发通过 |
+| 缓存专项 | 热度与过期 TTL、来源 / PROCESS 快照、重新匹配规则、缓存分区、Clear / Close / mode 取消、旧代重试拒绝、完整 resolver 所有权、idle stop / restart 与 retired tick 回归通过；CacheControl race 通过 |
+| 原生 DNS 与公共入口实际二进制 | `python3 scripts/test-dns-proxy.py <binary>`：70 次实际 DNS 交换，以及普通 TCP / UDP、来源规则、面板统计、API 关闭和重载；真实 PROCESS 因诊断 socket 不可用明确 SKIP |
+| 示例 YAML 与差异检查 | 本轮 amd64 二进制对 README 的完整 YAML 和 `docs/dns-proxy.example.yaml` 执行 `-t` 均通过；`git diff --check` 通过 |
+| Linux amd64 / arm64 构建 | 两种架构均以 Go 1.26、CGO=0、`with_gvisor` 构建成功；amd64 已实际执行，arm64 为交叉编译 |
+| 精确源提交与云产物 | 同一源提交的 push 工作流重新测试并构建两个架构；Release 正文自动写入完整 SHA，tag 含 SHA 前 12 位，`SHA256SUMS` 对应两个 `.gz` 产物；实际状态可由下方 Actions / Releases 链接核对 |
+
+独立复审发现的 TFO 提前返回、代理包装隐藏探测配置、IPv4 / IPv6 约束丢失、隐藏 bootstrap 未关闭、空闲 ticker 持有解析器和旧 singleflight 重试问题均已修正并补充回归；最终独立复审未发现未解决的 P0 / P1。上述结论说明已检查的范围，不等同于所有网络环境和平台均无缺陷。
+
+## 先前版本基线
+
+此前公共分类器版本（本轮开始时 HEAD `5633c97d`）已完成 Go / race、真实二进制公共与 native 桥接、普通流量、面板统计及关闭，以及 SmartDNS 48.4 SOCKS5 UDP / TCP、HTTP CONNECT TCP 接入验证。这些构成本轮回归基线，不证明本轮新增选池、测速或缓存功能已经通过最终发布验证。
+
+先前审查还修正了 matcher 阻塞解析与重载读锁问题、切组后的 UDP 能力冻结、非 IP 查询闲置 fallback 弱化拒绝、内置 DROP 变 SERVFAIL、TCP 短写及原生初始化期间测试过早连接的问题。启动测试先确认普通 SOCKS TCP 回声可用，再要求首条 DNS 一次成功，不用重试掩盖首条 DNS 失败。
 
 ## 验证边界
 
-- 当前本地容器禁止原版进程查询所需的诊断 socket，返回 `socket: operation not permitted`。真实进程查询的这一项明确记为跳过；原版无法识别进程时的后续规则行为及已识别进程元数据有测试。云端若平台允许则执行真实进程识别断言。
-- TUN 已验证三种入口的本地 DNS 服务上下文及 TCP / UDP relay，不将其等同于已在所有操作系统、真实内核 TUN / tproxy / redir 网络配置中完成部署测试。其他代理协议依靠公共解包后的转发钩子接入，并未逐一连接实际远端协议服务器。
-- Linux arm64 由云端交叉编译；没有在本地声称执行 arm64 机器码。
-- 自动分类限于普通单问题明文 TCP / UDP 53。DoH / DoT / DoQ、非 53 和显式 DNS 出口仍沿用原路径。外部不支持的首份负载可以回到原流程；内置自动 resolver 对不支持的查询明确拒绝。
-- 本功能不验证 DNSSEC 签名，不替代 DNS 防污染服务器，也不保证消除普通 SSH 连接原有的 IP 到域名显示关联。
-- 缓存按来源端口等身份隔离，可能减少不同 socket 间的内置缓存复用；没有作未经测量的吞吐或延迟提升承诺。
+- 文档地址和本地模拟出站用于确定性测试，不依赖私人节点凭据；配置 `-t` 通过不代表文档保留地址可实际联网。
+- 真实 PROCESS 查询和 ICMP 取决于平台、权限与容器能力；任何跳过应在最终记录注明，不以已注入元数据的单测替代真实系统能力声明。
+- TUN 的本地服务上下文 / relay 测试不等同于在所有系统完成真实内核 TUN、redir、tproxy 部署。
+- arm64 交叉编译成功不等同于执行 arm64 二进制。
+- 自动分类限普通单问题明文 TCP / UDP 53；显式上游和加密 / 非 53 传输保留各自原行为。DNSSEC 数据可传递，但本功能不验证其签名。
+- IP 测速反映探测条件下的握手或 ICMP 耗时，不保证业务下载速度、全部域名加速或 SmartDNS 全量兼容。缓存按来源端口隔离，没有未经测量的命中率或吞吐提升承诺。
+- 普通 SSH 的 IP 到域名显示关联仍受原映射与嗅探影响。
 
-## 云编译与后续维护
-
-[构建工作流](../.github/workflows/build.yml) 对提交执行相同测试，构建 Linux amd64 / arm64 并发布带 SHA-256 的压缩包。amd64 构建会执行真实二进制端到端脚本；arm64 进行交叉编译。上游同步先通过同一测试与两种架构构建，再进行普通 merge 提交；代码冲突、测试失败或 main 并发变化时停止。
-
-具体运行见 [GitHub Actions](https://github.com/chummumm/mihomo-dns-optimized/actions/workflows/build.yml)，下载见 [Releases](https://github.com/chummumm/mihomo-dns-optimized/releases)。发布名称包含源提交前缀，可将下载文件与源码及测试记录对应起来。
+最终构建见 [GitHub Actions](https://github.com/chummumm/mihomo-dns-optimized/actions/workflows/build.yml)，产物见 [Releases](https://github.com/chummumm/mihomo-dns-optimized/releases)。发布记录应标明精确源提交和 SHA-256，使源码、测试和下载文件可对应。

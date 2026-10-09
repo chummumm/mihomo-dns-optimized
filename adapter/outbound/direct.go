@@ -23,12 +23,19 @@ type DirectOption struct {
 
 // DialContext implements C.ProxyAdapter
 func (d *Direct) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
+	return d.DialContextWithOptions(ctx, metadata)
+}
+
+// DialContextWithOptions preserves this DIRECT adapter's socket policy while
+// allowing a caller such as an IP latency probe to require an eager connection.
+func (d *Direct) DialContextWithOptions(ctx context.Context, metadata *C.Metadata, extra ...dialer.Option) (C.Conn, error) {
 	ctx = icontext.WithDNSFixedOutbound(ctx, d)
 	if err := d.loopBack.CheckConn(metadata); err != nil {
 		return nil, err
 	}
 	opts := d.DialOptions()
 	opts = append(opts, dialer.WithResolver(resolver.DirectHostResolver))
+	opts = append(opts, extra...)
 	c, err := dialer.DialContext(ctx, "tcp", metadata.RemoteAddress(), opts...)
 	if err != nil {
 		return nil, err

@@ -309,6 +309,10 @@ func selectDNSProxy(metadata *C.Metadata) (dnsProxyRoute, error) {
 }
 
 func selectDNSProxyWithOptions(metadata *C.Metadata, deferUDPCheck bool, processOrigin ...*C.Metadata) (dnsProxyRoute, error) {
+	return selectDNSProxyWithProcessSnapshot(metadata, deferUDPCheck, false, processOrigin...)
+}
+
+func selectDNSProxyWithProcessSnapshot(metadata *C.Metadata, deferUDPCheck, processSnapshot bool, processOrigin ...*C.Metadata) (dnsProxyRoute, error) {
 	var proxy C.Proxy
 	var rule C.Rule
 	var err error
@@ -326,7 +330,7 @@ func selectDNSProxyWithOptions(metadata *C.Metadata, deferUDPCheck bool, process
 		proxy = proxies[name]
 		configMux.RUnlock()
 	} else {
-		helper := newRuleMatchHelper(metadata, false, processOrigin...)
+		helper := newRuleMatchHelperWithProcessSnapshot(metadata, false, processSnapshot, processOrigin...)
 		proxy, rule, err = matchWithOptions(metadata, helper, ruleMatchOptions{
 			dnsQuery: true, deferUDPCheck: deferUDPCheck,
 			evaluate: func(rule C.Rule, metadata *C.Metadata, helper C.RuleMatchHelper) (bool, string) {

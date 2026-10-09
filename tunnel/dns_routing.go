@@ -16,10 +16,19 @@ import (
 )
 
 var dnsRuleRouting = atomic.NewBool(false)
+var dnsRoutingEpoch = atomic.NewUint64(0)
 
 func DNSRuleRoutingEnabled() bool { return dnsRuleRouting.Load() }
 
-func SetDNSRuleRouting(enabled bool) { dnsRuleRouting.Store(enabled) }
+func SetDNSRuleRouting(enabled bool) {
+	if dnsRuleRouting.Swap(enabled) != enabled {
+		dnsRoutingEpoch.Add(1)
+	}
+}
+
+// DNSRoutingEpoch also detects a mode/flag change followed by a change back.
+// Old background resolver work must not outlive either transition.
+func DNSRoutingEpoch() uint64 { return dnsRoutingEpoch.Load() }
 
 // Explicit inbound targets and non-rule modes retain the ordinary priority.
 func DNSRuleRoutingApplies(metadata *C.Metadata) bool {
@@ -66,7 +75,7 @@ func PrepareDNSRouting(ctx context.Context, qname string, origin *C.Metadata) (*
 	if fixed := icontext.DNSFixedOutbound(ctx); fixed != nil {
 		route, err = unwrapDNSProxyRoute(fixed, nil, metadata, true, false)
 	} else {
-		route, err = selectDNSProxyWithOptions(metadata, true, icontext.DNSRoutingMetadata(ctx))
+		route, err = selectDNSProxyWithProcessSnapshot(metadata, true, icontext.DNSProcessSnapshot(ctx), icontext.DNSRoutingMetadata(ctx))
 	}
 	if err != nil {
 		return nil, err
@@ -81,6 +90,10 @@ func PrepareDNSRouting(ctx context.Context, qname string, origin *C.Metadata) (*
 }
 
 func (p *DNSRoutingPlan) Type() C.AdapterType { return p.route.proxy.Type() }
+
+// OriginMetadata includes process identity discovered during rule matching.
+// Background refreshes reuse this snapshot instead of probing an expired socket.
+func (p *DNSRoutingPlan) OriginMetadata() *C.Metadata { return p.origin.Clone() }
 
 // Object identities invalidate routing-scoped cache entries when providers or
 // configuration replace a node while retaining its display name.

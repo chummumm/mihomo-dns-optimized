@@ -22,10 +22,13 @@ type dnsQueryRouteKey struct{}
 // One plan belongs to one logical resolver query, including its main/fallback
 // races and transport retries. Explicit nameserver exits do not use this plan.
 type dnsQueryRoute struct {
-	plan   *tunnel.DNSRoutingPlan
-	origin *C.Metadata
-	key    string
-	err    error
+	plan     *tunnel.DNSRoutingPlan
+	origin   *C.Metadata
+	key      string
+	err      error
+	pool     string
+	main     []dnsClient
+	fallback []dnsClient
 }
 
 func queryRoute(ctx context.Context) *dnsQueryRoute {
@@ -77,7 +80,7 @@ func (r *Resolver) prepareDNSRouting(ctx context.Context, message *D.Msg) (conte
 	if !r.ruleRouting || !tunnel.DNSRuleRoutingEnabled() || tunnel.Mode() != tunnel.Rule || icontext.DNSBootstrap(ctx) {
 		return ctx, nil, nil
 	}
-	var automatic, explicit bool
+	var automatic bool
 	var upstreamNetwork C.NetWork
 	clientSets := [][]dnsClient{r.main}
 	// Only IP lookups use fallback (see exchangeWithoutCache). An unused
@@ -86,14 +89,20 @@ func (r *Resolver) prepareDNSRouting(ctx context.Context, message *D.Msg) (conte
 	if isIPRequest(message.Question[0]) {
 		clientSets = append(clientSets, r.fallback)
 	}
+	origin := icontext.DNSRoutingMetadata(ctx)
+	nativePool := len(r.direct) > 0 && (origin == nil || origin.SpecialProxy == "")
+	if nativePool {
+		// A direct pool may be the only automatic DNS transport. It must not
+		// be ruled out by an explicit or encrypted, but unselected, main pool.
+		clientSets = append(clientSets, r.direct)
+	}
 	for _, clients := range clientSets {
 		for _, client := range clients {
-			auto, fixed := dnsRoutingCapability(client)
+			auto, _ := dnsRoutingCapability(client)
 			if auto && !automatic {
 				upstreamNetwork = dnsRoutingNetwork(client)
 			}
 			automatic = automatic || auto
-			explicit = explicit || fixed
 		}
 	}
 	if !automatic {
@@ -106,7 +115,6 @@ func (r *Resolver) prepareDNSRouting(ctx context.Context, message *D.Msg) (conte
 	if _, err := dnsmessage.UnpackQuery(wire); err != nil {
 		return ctx, nil, err
 	}
-	origin := icontext.DNSRoutingMetadata(ctx)
 	if origin == nil {
 		origin = &C.Metadata{Type: C.INNER, NetWork: C.UDP}
 	}
@@ -124,6 +132,22 @@ func (r *Resolver) prepareDNSRouting(ctx context.Context, message *D.Msg) (conte
 		qname = "."
 	}
 	plan, err := tunnel.PrepareDNSRouting(ctx, qname, origin)
+	if err == nil {
+		// Rule matching may have discovered the real client's process. Keep
+		// that complete source identity for cache partitioning and renewals.
+		origin = plan.OriginMetadata()
+	}
+	state := &dnsQueryRoute{plan: plan, origin: origin, err: err}
+	if nativePool {
+		state.pool, state.main, state.fallback = "main", r.main, r.fallback
+		if err == nil && (plan.Type() == C.Direct || plan.Type() == C.Compatible) {
+			// Use the existing direct clients without recursing through their
+			// Resolver: this question must keep its already selected leaf.
+			state.pool, state.main, state.fallback = "direct", r.direct, nil
+		}
+	}
+	main, fallback := r.dnsQueryServersWithRoute(state)
+	_, explicit := dnsQueryCapabilities(message, main, fallback)
 	if err != nil && !explicit {
 		return ctx, nil, err
 	}
@@ -154,9 +178,9 @@ func (r *Resolver) prepareDNSRouting(ctx context.Context, message *D.Msg) (conte
 	} else {
 		planKey = plan.CacheKey()
 	}
-	identity := fmt.Sprintf("%s|%s|%T:%p|%d", planKey, metadata, icontext.DNSFixedOutbound(ctx), icontext.DNSFixedOutbound(ctx), tunnel.Mode())
+	identity := fmt.Sprintf("%s|%s|%T:%p|%d|%s", planKey, metadata, icontext.DNSFixedOutbound(ctx), icontext.DNSFixedOutbound(ctx), tunnel.Mode(), state.poolIdentity())
 	digest := sha256.Sum256(append(append([]byte(identity), 0), wire...))
-	state := &dnsQueryRoute{plan: plan, origin: origin, key: fmt.Sprintf("dns-route:%x", digest), err: planErr}
+	state.key = fmt.Sprintf("dns-route:%x", digest)
 	return context.WithValue(ctx, dnsQueryRouteKey{}, state), nil, nil
 }
 

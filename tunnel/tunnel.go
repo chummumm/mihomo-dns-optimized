@@ -254,7 +254,9 @@ func Mode() TunnelMode {
 
 // SetMode change the mode of tunnel
 func SetMode(m TunnelMode) {
-	mode.Store(m)
+	if mode.Swap(m) != m {
+		dnsRoutingEpoch.Add(1)
+	}
 }
 
 func FindProcessMode() process.FindProcessMode {
@@ -338,6 +340,10 @@ func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err erro
 // DNS questions retain real source/process metadata but must not resolve the
 // queried website just to decide how that DNS question should be routed.
 func newRuleMatchHelper(metadata *C.Metadata, allowResolveIP bool, processOrigin ...*C.Metadata) C.RuleMatchHelper {
+	return newRuleMatchHelperWithProcessSnapshot(metadata, allowResolveIP, false, processOrigin...)
+}
+
+func newRuleMatchHelperWithProcessSnapshot(metadata *C.Metadata, allowResolveIP, processSnapshot bool, processOrigin ...*C.Metadata) C.RuleMatchHelper {
 	processMetadata := metadata
 	if len(processOrigin) != 0 && processOrigin[0] != nil {
 		// Internal DNS has its own transport network/port, while process
@@ -347,7 +353,7 @@ func newRuleMatchHelper(metadata *C.Metadata, allowResolveIP bool, processOrigin
 	var (
 		resolved bool
 		// dns.listen uses INNER but still has a real client source tuple.
-		attemptProcessLookup = processMetadata.Type != C.INNER || (!allowResolveIP && processMetadata.InName == "DNS" && processMetadata.SourceValid())
+		attemptProcessLookup = !processSnapshot && (processMetadata.Type != C.INNER || (!allowResolveIP && processMetadata.InName == "DNS" && processMetadata.SourceValid()))
 	)
 
 	if node, ok := resolver.DefaultHosts.Search(metadata.Host, false); allowResolveIP && ok {

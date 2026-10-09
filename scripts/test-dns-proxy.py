@@ -7,6 +7,7 @@ The reserved resolver addresses must arrive unchanged at the selected outbound.
 
 import argparse
 import contextlib
+import errno
 import ipaddress
 import json
 import pathlib
@@ -219,10 +220,36 @@ class MockHandler(socketserver.BaseRequestHandler):
             return
 
 
+allocated_ports = set()
+
+
+@contextlib.contextmanager
+def reserve_local_port():
+    # TCP's ephemeral allocator does not know about existing SOCKS UDP relays.
+    # Hold both bindings while checking, and do not reuse an earlier returned
+    # fixture port which its caller may not have started listening on yet.
+    for _ in range(128):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp, \
+                socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+            tcp.bind(("127.0.0.1", 0))
+            address = tcp.getsockname()
+            if address[1] in allocated_ports:
+                continue
+            try:
+                udp.bind(address)
+            except OSError as error:
+                if error.errno != errno.EADDRINUSE:
+                    raise
+                continue
+            allocated_ports.add(address[1])
+            yield tcp, udp
+            return
+    raise RuntimeError("could not allocate an unused TCP/UDP fixture port")
+
+
 def unused_port():
-    with socket.socket() as conn:
-        conn.bind(("127.0.0.1", 0))
-        return conn.getsockname()[1]
+    with reserve_local_port() as (tcp, _):
+        return tcp.getsockname()[1]
 
 
 def connect(port):
@@ -514,6 +541,146 @@ def check_builtin_dns(config, api_port, upstream_a, upstream_b):
             gate.set()
             check_answer(udp.recvfrom(65535)[0], query, upstream_b.answer)
     print("PASS built-in DNS TCP/UDP: QNAME routing, real IN/SRC/transport metadata, disabled nameserver-policy, selector-aware cache/ID, REJECT/DROP and dashboard")
+
+
+@contextlib.contextmanager
+def local_plain_dns(answer):
+    """A local direct-pool endpoint, with ordinary DNS on an unprivileged port."""
+    records, lock = [], threading.Lock()
+
+    def respond(wire, network):
+        with lock:
+            records.append((question_name(wire), network))
+        return make_answer(wire, answer)
+
+    class TCPHandler(socketserver.BaseRequestHandler):
+        def handle(self):
+            self.request.settimeout(3)
+            try:
+                while True:
+                    self.request.sendall(frame(respond(read_frame(self.request), "tcp")))
+            except (EOFError, OSError):
+                pass
+
+    class UDPHandler(socketserver.BaseRequestHandler):
+        def handle(self):
+            wire, sock = self.request
+            sock.sendto(respond(wire, "udp"), self.client_address)
+
+    # Adopt the already bound sockets, so another ephemeral UDP allocation
+    # cannot steal this fixture's port between checking it and starting it.
+    with reserve_local_port() as (tcp_socket, udp_socket):
+        address = tcp_socket.getsockname()
+        with socketserver.ThreadingTCPServer(address, TCPHandler, bind_and_activate=False) as tcp, \
+                socketserver.ThreadingUDPServer(address, UDPHandler, bind_and_activate=False) as udp:
+            tcp.socket.close()
+            tcp.socket = tcp_socket
+            tcp.server_activate()
+            udp.socket.close()
+            udp.socket = udp_socket
+            tcp.daemon_threads = True
+            udp.daemon_threads = True
+            for server in (tcp, udp):
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                yield tcp.server_address[1], records, lock
+            finally:
+                for server in (tcp, udp):
+                    server.shutdown()
+
+
+def check_native_dns_pools(config, api_port, upstream_a, upstream_b):
+    # A high-port direct server intentionally exercises the selected pool's
+    # legacy explicit-transport exception. Native pool selection is real; the
+    # automatic port-53 DIRECT transport and speed probes have Go integration
+    # tests, rather than requiring privileged listeners in this binary test.
+    direct_answer = "198.51.100.33"
+    dns_port = unused_port()
+    with local_plain_dns(direct_answer) as (direct_port, direct_records, direct_lock):
+        for network in ("udp", "tcp"):
+            endpoint = f"127.0.0.1:{direct_port}"
+            if network == "tcp":
+                endpoint = "tcp://" + endpoint
+            native_config = config.replace("  enable: false\n", f"""  enable: true
+  listen: 127.0.0.1:{dns_port}
+  enhanced-mode: redir-host
+  use-hosts: false
+  respect-rules: false
+  nameserver: [203.0.113.53]
+  direct-nameserver: [{endpoint}]
+  speed-check-mode: [tcp:443, tcp:80, ping]
+  speed-check-timeout: 1000
+  speed-check-concurrency: 16
+  prefetch-domain: true
+  serve-expired: true
+  serve-expired-ttl: 604800
+  serve-expired-reply-ttl: 1
+""")
+            native_config = native_config.replace("  - name: Chosen\n    type: select\n    proxies: [A, B]\n",
+                                                  "  - name: Chosen\n    type: select\n    proxies: [A, B, DIRECT]\n")
+            native_config = native_config.replace("  - DOMAIN,first.example,A\n", """  - DOMAIN-SUFFIX,native-direct.example,DIRECT
+  - DOMAIN-SUFFIX,native-proxy.example,B
+  - DOMAIN-SUFFIX,native-selector.example,Chosen
+  - DOMAIN-SUFFIX,native-blocked.example,REJECT
+  - DOMAIN,first.example,A
+""")
+            api_request(api_port, "/configs", {"payload": native_config}, "PUT")
+
+            def seen(name):
+                with direct_lock:
+                    direct = [row for row in direct_records if row[0] == name]
+                with upstream_a.record_lock:
+                    proxied = [row for row in upstream_a.records if row[1] == name]
+                assert all(transport == network for _, transport in direct), direct
+                assert all(target == ("203.0.113.53", 53) for _, _, target, _ in proxied), proxied
+                return len(direct), len(proxied)
+
+            # TCP clients and UDP clients both enter the primary native
+            # resolver; neither sends these queries through the mixed port.
+            with connect(dns_port) as tcp:
+                for index, (suffix, answer, counts) in enumerate((
+                        ("native-direct.example", direct_answer, (1, 0)),
+                        ("native-proxy.example", upstream_b.answer, (0, 1)))):
+                    name = f"{network}.{suffix}"
+                    query = question(name, 601 + index)
+                    tcp.sendall(frame(query))
+                    check_answer(read_frame(tcp), query, answer)
+                    assert seen(name) == counts, (name, seen(name), counts)
+
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+                udp.bind(("127.0.0.1", 0))
+                udp.settimeout(3)
+
+                def exchange(query):
+                    udp.sendto(query, ("127.0.0.1", dns_port))
+                    return udp.recvfrom(65535)[0]
+
+                # Same question/source socket, including returning to a prior
+                # pool: each pool/leaf keeps its own cached answer and ID.
+                # Two hits per scope also keep optional prefetch below its
+                # threshold, so background work cannot alter these counters.
+                name = f"{network}.native-selector.example"
+                for index, (choice, answer, counts) in enumerate((
+                        ("DIRECT", direct_answer, (1, 0)),
+                        ("B", upstream_b.answer, (1, 1)),
+                        ("B", upstream_b.answer, (1, 1)),
+                        ("DIRECT", direct_answer, (1, 1)),
+                        ("A", upstream_a.answer, (1, 2)),
+                        ("A", upstream_a.answer, (1, 2)))):
+                    api_request(api_port, "/proxies/Chosen", {"name": choice}, "PUT")
+                    query = question(name, 611 + index)
+                    check_answer(exchange(query), query, answer)
+                    assert seen(name) == counts, (network, choice, seen(name), counts)
+
+                name = f"{network}.native-blocked.example"
+                query = question(name, 620)
+                response = exchange(query)
+                assert response[:2] == query[:2] and response[3] & 15 == 5
+                assert seen(name) == (0, 0), "REJECT contacted a native DNS pool"
+        with direct_lock:
+            direct_count = len(direct_records)
+    print("PASS native DNS first-query pools: DIRECT only uses local UDP/TCP upstream; proxy retains main IP:53; same-source DIRECT/proxy cache isolation and REJECT before both pools (high-port explicit transport, no privileged port or speed probe)")
+    return direct_count
 
 
 def run(binary):
@@ -815,10 +982,11 @@ rules:
                     tcp_query(mixed_port, q2, upstream_b.answer)
                     print("PASS full reload toggles classifier while retaining the existing mixed port; unsafe scalar PATCH rejected atomically")
                     check_builtin_dns(config, api_port, upstream_a, upstream_b)
+                    native_direct_count = check_native_dns_pools(config, api_port, upstream_a, upstream_b)
                     with record_lock:
                         assert all(target[1] == 53 and target[0] in (resolver[0], resolver_v6[0])
                                    for _, _, target, _ in records)
-                        exchange_count = len(records)
+                        exchange_count = len(records) + native_direct_count
                     print(f"PASS actual binary end-to-end: {exchange_count} DNS exchanges plus ordinary TCP/UDP forwarding")
                 except BaseException:
                     log.flush()

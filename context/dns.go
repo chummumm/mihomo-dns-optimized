@@ -13,6 +13,19 @@ type dnsRoutingMetadataKey struct{}
 type dnsRoutingInboundKey struct{}
 type dnsFixedOutboundKey struct{}
 type dnsBootstrapKey struct{}
+type dnsProcessSnapshotKey struct{}
+
+// WithDNSProcessSnapshot marks saved DNS origin metadata as the complete
+// process identity. A background refresh must not look up an old source socket
+// that may now belong to another process; an unknown process stays unknown.
+func WithDNSProcessSnapshot(ctx context.Context) context.Context {
+	return context.WithValue(ctx, dnsProcessSnapshotKey{}, true)
+}
+
+func DNSProcessSnapshot(ctx context.Context) bool {
+	value, _ := ctx.Value(dnsProcessSnapshotKey{}).(bool)
+	return value
+}
 
 // WithDNSRoutingMetadata preserves the actual caller of an internal DNS query.
 // It must never replace the DNS server address with the queried site's name.

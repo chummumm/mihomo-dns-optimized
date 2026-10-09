@@ -44,6 +44,11 @@ import (
 
 var mux sync.Mutex
 
+// Keep ownership of every resolver constructed by updateDNS, even when the
+// local DNS service is disabled and only its proxy/bootstrap handle is exposed.
+// ApplyConfig serializes replacement with mux.
+var dnsResolverOwner *dns.Resolvers
+
 func readConfig(path string) ([]byte, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil, err
@@ -87,6 +92,10 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	log.SetLevel(cfg.General.LogLevel)
 
 	tunnel.OnSuspend()
+	// Cancel old DNS background work before replacing rules, nodes or pools.
+	// Old DNS listeners may briefly remain reachable, but closed resolvers
+	// reject new work until updateDNS installs the replacement service.
+	closeDNSResolvers()
 
 	ca.ResetCertificate()
 	for _, c := range cfg.TLS.CustomTrustCert {
@@ -242,7 +251,23 @@ func updateNTP(c *config.NTP) {
 	}
 }
 
+func closeDNSResolvers() {
+	// Replaced resolvers must stop proactive refreshes before their routing
+	// configuration and client pool become stale. Close is idempotent because
+	// these public resolver handles may refer to the same resolver collection.
+	if dnsResolverOwner != nil {
+		dnsResolverOwner.Close()
+		dnsResolverOwner = nil
+	}
+	for _, old := range []resolver.Resolver{resolver.DefaultResolver, resolver.ProxyServerHostResolver, resolver.DirectHostResolver} {
+		if closer, ok := old.(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}
+}
+
 func updateDNS(c *config.DNS, generalIPv6 bool) {
+	closeDNSResolvers()
 	if !c.Enable {
 		resolver.DefaultResolver = nil
 		resolver.DefaultHostMapper = nil
@@ -262,6 +287,7 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 				CacheAlgorithm:    c.CacheAlgorithm,
 				CacheMaxSize:      c.CacheMaxSize,
 			})
+			dnsResolverOwner = &r
 			if r.ProxyResolver.Invalid() {
 				resolver.ProxyServerHostResolver = r.ProxyResolver
 			} else {
@@ -290,7 +316,10 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 		DirectFollowPolicy:   c.DirectFollowPolicy,
 		CacheAlgorithm:       c.CacheAlgorithm,
 		CacheMaxSize:         c.CacheMaxSize,
+		SpeedCheck:           c.SpeedCheck,
+		CacheOptions:         c.CacheOptions,
 	})
+	dnsResolverOwner = &r
 	m := dns.NewEnhancer(dns.EnhancerConfig{
 		IPv6:          ipv6,
 		EnhancedMode:  c.EnhancedMode,

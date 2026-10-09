@@ -18,7 +18,7 @@ case "${1:-test}" in
       ./adapter ./component/dnsmessage/... ./component/resolver/... ./context/... ./dns/... \
       ./listener/sing_tun/... ./tunnel/... ./rules/logic/... ./rules/provider/... \
       ./config/... ./hub/route/... ./hub/executor/... \
-      -run 'DNSRouting|DNSRuleRouting|DNSProxy|DNSDrop'
+      -run 'DNSRouting|DNSRuleRouting|DNSProxy|DNSDrop|DNSDirectProbe|DNSOptimization|SpeedCheck|CacheControl'
     ;;
   build)
     arch=${2:?architecture required: amd64 or arm64}

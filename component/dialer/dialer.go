@@ -192,12 +192,25 @@ func dialContext(ctx context.Context, network string, destination netip.Addr, po
 }
 
 func ICMPControl(destination netip.Addr) func(network, address string, conn syscall.RawConn) error {
+	return ICMPControlWithOptions(destination)
+}
+
+// ICMPControlWithOptions lets probes inherit an explicit DIRECT adapter's
+// interface and mark while retaining the existing global defaults and hook.
+func ICMPControlWithOptions(destination netip.Addr, options ...Option) func(network, address string, conn syscall.RawConn) error {
+	opt := applyOptions(options...)
 	return func(network, address string, conn syscall.RawConn) error {
+		if (opt.network == 4 && !destination.Unmap().Is4()) || (opt.network == 6 && !destination.Is6()) {
+			return errors.New("ICMP destination does not match the DIRECT IP version")
+		}
 		if DefaultSocketHook != nil {
 			return DefaultSocketHook(network, address, conn)
 		}
 		dialer := &net.Dialer{}
-		interfaceName := DefaultInterface.Load()
+		interfaceName := opt.interfaceName
+		if interfaceName == "" {
+			interfaceName = DefaultInterface.Load()
+		}
 		if interfaceName == "" {
 			if finder := DefaultInterfaceFinder.Load(); finder != nil {
 				interfaceName = finder.FindInterfaceName(destination)
@@ -208,7 +221,10 @@ func ICMPControl(destination netip.Addr) func(network, address string, conn sysc
 				return err
 			}
 		}
-		routingMark := int(DefaultRoutingMark.Load())
+		routingMark := opt.routingMark
+		if routingMark == 0 {
+			routingMark = int(DefaultRoutingMark.Load())
+		}
 		if routingMark != 0 {
 			bindMarkToDialer(routingMark, dialer, network, destination)
 		}

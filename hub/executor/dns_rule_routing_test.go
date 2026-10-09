@@ -1,6 +1,8 @@
 package executor
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/metacubex/mihomo/component/process"
@@ -8,6 +10,8 @@ import (
 	"github.com/metacubex/mihomo/config"
 	"github.com/metacubex/mihomo/dns"
 	"github.com/metacubex/mihomo/tunnel"
+
+	D "github.com/miekg/dns"
 )
 
 func TestDNSRuleRoutingParsingDoesNotToggleLiveClassifier(t *testing.T) {
@@ -55,9 +59,14 @@ func TestDNSRuleRoutingTemporaryGeneralPreservesLiveRoutingPolicy(t *testing.T) 
 }
 
 func TestDNSRuleRoutingBootstrapNeverFallsBackToBusinessResolver(t *testing.T) {
+	oldOwner := dnsResolverOwner
+	dnsResolverOwner = nil
 	oldDefault, oldMapper, oldService := resolver.DefaultResolver, resolver.DefaultHostMapper, resolver.DefaultService
 	oldProxy, oldDirect, oldHosts := resolver.ProxyServerHostResolver, resolver.DirectHostResolver, resolver.UseSystemHosts
+	resolver.DefaultResolver, resolver.ProxyServerHostResolver, resolver.DirectHostResolver = nil, nil, nil
 	t.Cleanup(func() {
+		closeDNSResolvers()
+		dnsResolverOwner = oldOwner
 		resolver.DefaultResolver, resolver.DefaultHostMapper, resolver.DefaultService = oldDefault, oldMapper, oldService
 		resolver.ProxyServerHostResolver, resolver.DirectHostResolver, resolver.UseSystemHosts = oldProxy, oldDirect, oldHosts
 	})
@@ -79,9 +88,14 @@ func TestDNSRuleRoutingBootstrapNeverFallsBackToBusinessResolver(t *testing.T) {
 }
 
 func TestDNSRuleRoutingBootstrapWithoutLocalDNSService(t *testing.T) {
+	oldOwner := dnsResolverOwner
+	dnsResolverOwner = nil
 	oldDefault, oldMapper, oldService := resolver.DefaultResolver, resolver.DefaultHostMapper, resolver.DefaultService
 	oldProxy, oldDirect := resolver.ProxyServerHostResolver, resolver.DirectHostResolver
+	resolver.DefaultResolver, resolver.ProxyServerHostResolver, resolver.DirectHostResolver = nil, nil, nil
 	t.Cleanup(func() {
+		closeDNSResolvers()
+		dnsResolverOwner = oldOwner
 		resolver.DefaultResolver, resolver.DefaultHostMapper, resolver.DefaultService = oldDefault, oldMapper, oldService
 		resolver.ProxyServerHostResolver, resolver.DirectHostResolver = oldProxy, oldDirect
 	})
@@ -104,5 +118,38 @@ func TestDNSRuleRoutingBootstrapWithoutLocalDNSService(t *testing.T) {
 				t.Fatal("feature-off behavior changed for disabled DNS")
 			}
 		}
+	}
+}
+
+func TestCacheControlDisabledDNSClosesUnexposedBootstrap(t *testing.T) {
+	oldOwner := dnsResolverOwner
+	oldDefault, oldMapper, oldService := resolver.DefaultResolver, resolver.DefaultHostMapper, resolver.DefaultService
+	oldProxy, oldDirect := resolver.ProxyServerHostResolver, resolver.DirectHostResolver
+	dnsResolverOwner = nil
+	resolver.DefaultResolver, resolver.ProxyServerHostResolver, resolver.DirectHostResolver = nil, nil, nil
+	t.Cleanup(func() {
+		closeDNSResolvers()
+		dnsResolverOwner = oldOwner
+		resolver.DefaultResolver, resolver.DefaultHostMapper, resolver.DefaultService = oldDefault, oldMapper, oldService
+		resolver.ProxyServerHostResolver, resolver.DirectHostResolver = oldProxy, oldDirect
+	})
+	updateDNS(&config.DNS{
+		DNSRuleRouting:        true,
+		ProxyServerNameserver: []dns.NameServer{{Net: "udp", Addr: "127.0.0.1:53"}},
+	}, false)
+	if dnsResolverOwner == nil || resolver.ProxyServerHostResolver == dnsResolverOwner.BootstrapResolver {
+		t.Fatal("fixture did not create a privately owned bootstrap resolver")
+	}
+	bootstrap := dnsResolverOwner.BootstrapResolver
+	updateDNS(&config.DNS{}, false)
+	query := new(D.Msg)
+	query.SetQuestion("bootstrap.example.", D.TypeA)
+	// The empty bootstrap pool cannot contact the network even if Close is
+	// broken. Cancellation specifically proves that its owner was closed.
+	if _, err := bootstrap.ExchangeContext(context.Background(), query); !errors.Is(err, context.Canceled) {
+		t.Fatalf("disabled DNS left its unexposed bootstrap resolver open: %v", err)
+	}
+	if dnsResolverOwner != nil {
+		t.Fatal("disabled DNS retained its replaced resolver owner")
 	}
 }
