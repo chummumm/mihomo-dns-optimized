@@ -181,16 +181,6 @@ rules:
 
 面板按次展示 QNAME、来源、规则和策略链，底层长连接标记为 `DNS-TRANSPORT`、显示真实解析器，不沿用首个域名冒充后续请求。逻辑查询计数展示 DNS 负载，底层只统计一次真实线路流量；关闭一条逻辑查询不关闭共享连接上的其他查询。普通 SSH 的反向域名显示不由本功能改写。完整限制见[使用说明](docs/dns-proxy.md)。
 
-## 从旧配置迁移
-
-1. 删除旧 `dns-proxy-port` 或专用 DNS listener 设置，添加顶层 `dns-rule-routing: true`；保留原 mixed / SOCKS / HTTP 入口。
-2. 使用原生方案时开启 `dns.listen`，配置 direct / main 和独立 bootstrap，把业务分流集中到原 `rules`，不再要求 SmartDNS 前置处理。
-3. 先执行 `-t` 校验，再加载完整配置。开关不支持通过 `PATCH /configs` 单独修改；`GET /configs` 可查看生效值，完整配置可通过原 `PUT /configs` 重载。
-
-原 SmartDNS 的测速、`fastest-ip` 目标、DIRECT 双栈选择、预取、过期缓存、缓存容量和 TTL / CNAME 调整可按[迁移对照](docs/smartdns-migration.md)迁入。域名屏蔽清单可放入普通 Mihomo `rule-providers` 并由原 `rules` 引用，不增加第二套 DNS 域名策略。SmartDNS 的 UI 插件、日志库等不属于这些 DNS 功能。
-
-已有 SmartDNS 也可按[兼容接入模板](docs/smartdns-dns-proxy.conf)继续转发上游 53 查询，原 6053 / 6553 本地服务不自动改投；其独立缓存仍由 SmartDNS 管理。本项目不声称兼容全部 SmartDNS 功能。
-
 ## 云编译、更新与验证
 
 [构建工作流](https://github.com/chummumm/mihomo-dns-optimized/actions/workflows/build.yml)先执行规定 Go 测试、DNS race、同步保护与安装包检查，再构建完整 37 目标矩阵；Linux amd64 产物运行本地模拟服务的实际二进制端到端测试。其他目标为交叉编译，不等同于在各设备实际执行。所有必需归档和安装包齐全、摘要一致后才发布。
