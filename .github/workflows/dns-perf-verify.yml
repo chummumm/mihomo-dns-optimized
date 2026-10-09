@@ -2,6 +2,16 @@ name: DNS optimization verification
 on:
   push:
     branches: [perf/dns-path-optimization]
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.mdx"
+      - "**/*.markdown"
+      - "**/*.rst"
+      - "**/*.adoc"
+      - "docs/**"
+      - "Meta.png"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE/**"
 permissions:
   contents: read
 concurrency:

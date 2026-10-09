@@ -4,8 +4,28 @@ on:
   push:
     branches: [main]
     tags: ["v*-dns-optimized-*"]
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.mdx"
+      - "**/*.markdown"
+      - "**/*.rst"
+      - "**/*.adoc"
+      - "docs/**"
+      - "Meta.png"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE/**"
   pull_request:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.mdx"
+      - "**/*.markdown"
+      - "**/*.rst"
+      - "**/*.adoc"
+      - "docs/**"
+      - "Meta.png"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE/**"
   workflow_dispatch:
     inputs:
       publish_release:
