@@ -2,9 +2,6 @@ package dns
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/json"
-	"fmt"
 	"net/netip"
 	"strings"
 	"sync/atomic"
@@ -163,31 +160,13 @@ func (r *Resolver) prepareDNSRouting(ctx context.Context, message *D.Msg) (conte
 			return ctx, nil, resolver.ErrDNSDrop
 		}
 	}
-	metadata, err := json.Marshal(origin)
-	if err != nil {
-		return ctx, nil, err
-	}
-	// The question alone cannot distinguish caller/sub-rule scopes, fixed
-	// exits, live selection changes or EDNS-sensitive answers. Exclude only
-	// the transaction ID so repeated queries still share their scoped cache.
-	wire[0], wire[1] = 0, 0
-	planKey := ""
-	if planErr != nil {
-		// A fixed nameserver remains usable even when the automatic branch
-		// has no valid route. Only its automatic peers fail in that case.
-		planKey = "error:" + planErr.Error()
-	} else {
-		planKey = plan.CacheKey()
-	}
-	identity := fmt.Sprintf("%s|%s|%T:%p|%d|%s", planKey, metadata, icontext.DNSFixedOutbound(ctx), icontext.DNSFixedOutbound(ctx), tunnel.Mode(), state.poolIdentity())
-	digest := sha256.Sum256(append(append([]byte(identity), 0), wire...))
-	state.key = fmt.Sprintf("dns-route:%x", digest)
+	state.key = makeDNSRouteKey(ctx, state, wire, !explicit && planErr == nil)
 	return context.WithValue(ctx, dnsQueryRouteKey{}, state), nil, nil
 }
 
 func dnsCacheKey(ctx context.Context, question D.Question) string {
 	if route := queryRoute(ctx); route != nil && !icontext.DNSBootstrap(ctx) {
-		return route.key + "|" + question.String()
+		return route.key
 	}
 	return question.String()
 }

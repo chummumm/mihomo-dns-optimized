@@ -29,6 +29,12 @@
 
 后者不要求开启内置 DNS，也不依赖普通 sniffer。普通网页、SSH、非 53 流量继续原有流程。
 
+## DNS 路径性能优化
+
+开启 `dns-rule-routing` 时，DNS 规则执行使用派生视图和 classical 纯域名连续段索引，仍按原业务规则顺序判断 SRC / PROCESS / IN。成功的自动查询应答可以在同一来源、进程和入站作用域内跨临时源端口复用；每个请求仍先匹配当前规则，在途查询保持独立取消语义。DIRECT 探测使用共享有界任务池、同出口目标 IP 合并及短期结果复用，代理结果不进行本地探测。
+
+没有新增指标 API、遥测或需要用户维护的第二份规则。优化范围、缓存安全边界及测试方式见 [DNS 性能说明](docs/dns-performance.md)。正式发布使用 `v1.19.32-dns.数字修订号` 形式，不再将提交哈希放入版本号；源码哈希保留在 BUILDINFO 中供核对。
+
 ## 快速开始
 
 1. 从 [Releases](https://github.com/chummumm/mihomo-dns-optimized/releases) 下载对应系统和 CPU 的文件，核对 `SHA256SUMS`；直接运行可选 `.gz` / Windows `.zip`，Linux 也提供安装包。

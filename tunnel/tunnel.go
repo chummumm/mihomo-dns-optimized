@@ -204,7 +204,9 @@ func Listeners() map[string]C.InboundListener {
 
 // UpdateRules handle update rules
 func UpdateRules(newRules []C.Rule, newSubRule map[string][]C.Rule, rp map[string]P.RuleProvider) {
+	compiled := prepareDNSCompiled(newRules, newSubRule)
 	configMux.Lock()
+	dnsCompiled.Store(compiled)
 	rules = newRules
 	ruleProviders = rp
 	subRules = newSubRule
@@ -714,8 +716,14 @@ func matchWithOptions(metadata *C.Metadata, helper C.RuleMatchHelper, options ru
 	for {
 		var rematchProxy C.Proxy
 		var rematchRule C.Rule
+		selectedRules := rules
+		if !options.dnsQuery || log.DNSDebugEnabled() {
+			selectedRules = getRules(metadata)
+		} else if list, ok := subRules[metadata.SpecialRules]; ok {
+			selectedRules = list
+		}
 	GetRules:
-		for _, rule := range getRules(metadata) {
+		for _, rule := range selectedRules {
 			var matched bool
 			var ada string
 			if options.evaluate == nil {

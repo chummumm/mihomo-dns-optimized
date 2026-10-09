@@ -19,7 +19,7 @@ case "${1:-test}" in
       ./adapter ./common/arc/... ./component/dnsmessage/... ./component/resolver/... ./context/... ./dns/... \
       ./listener/sing_tun/... ./tunnel/... ./rules/logic/... ./rules/provider/... \
       ./config/... ./hub/route/... ./hub/executor/... \
-      -run 'DNSRouting|DNSRuleRouting|DNSProxy|DNSDrop|DNSDirectProbe|DNSOptimization|SpeedCheck|DualStack|CacheControl|ARCDelete'
+      -run 'DNSRouting|DNSRuleRouting|DNSProxy|DNSDrop|DNSDirectProbe|DNSOptimization|SpeedCheck|DualStack|CacheControl|ARCDelete|DNSPerf'
     ;;
   build)
     target=${2:?release target required (amd64/arm64 aliases remain supported)}

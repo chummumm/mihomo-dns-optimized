@@ -132,15 +132,18 @@ func exchangeDNSProxy(ctx context.Context, wire []byte, resolver *C.Metadata, se
 	if err := validateDNSProxyResponse(request, response); err != nil {
 		return nil, err
 	}
-	chain := route.proxy.Name()
-	for index := len(route.groups) - 1; index >= 0; index-- {
-		chain = route.groups[index].Name() + "[" + chain + "]"
+	if log.DNSDebugEnabled() {
+		chain := route.proxy.Name()
+		for index := len(route.groups) - 1; index >= 0; index-- {
+			chain = route.groups[index].Name() + "[" + chain + "]"
+		}
+		if route.rule != nil {
+			log.Debugln("[DNS proxy] %s (%s) --> %s match %s(%s) using %s", host, dns.TypeToString[question.Qtype], destination.RemoteAddress(), route.rule.RuleType(), route.rule.Payload(), chain)
+		} else {
+			log.Debugln("[DNS proxy] %s (%s) --> %s using %s", host, dns.TypeToString[question.Qtype], destination.RemoteAddress(), chain)
+		}
 	}
-	if route.rule != nil {
-		log.Debugln("[DNS proxy] %s (%s) --> %s match %s(%s) using %s", host, dns.TypeToString[question.Qtype], destination.RemoteAddress(), route.rule.RuleType(), route.rule.Payload(), chain)
-	} else {
-		log.Debugln("[DNS proxy] %s (%s) --> %s using %s", host, dns.TypeToString[question.Qtype], destination.RemoteAddress(), chain)
-	}
+
 	return response, nil
 }
 
@@ -344,7 +347,7 @@ func selectDNSProxyWithProcessSnapshot(metadata *C.Metadata, deferUDPCheck, proc
 		proxy, rule, err = matchWithOptions(metadata, helper, ruleMatchOptions{
 			dnsQuery: true, deferUDPCheck: deferUDPCheck,
 			evaluate: func(rule C.Rule, metadata *C.Metadata, helper C.RuleMatchHelper) (bool, string) {
-				result := matchDNSProxyRuleContext(rule, metadata, dnsRuleContext{helper: helper}, 0)
+				result := evaluateDNSCompiled(rule, metadata, dnsRuleContext{helper: helper})
 				return result.known && result.match, result.adapter
 			},
 		})
@@ -477,11 +480,9 @@ func matchDNSProxyRuleContext(rule C.Rule, metadata *C.Metadata, evaluation dnsR
 				return dnsProxyMatch{match: provider.Match(metadata, evaluation.helper), known: true, adapter: rule.Adapter()}
 			}
 		case P.Classical:
-			if children, ok := provider.Strategy().(dnsProxyRuleChildren); ok {
-				result := matchDNSProxyChildrenContext(children.Rules(), C.OR, metadata, evaluation, depth+1)
-				result.adapter = rule.Adapter()
-				return result
-			}
+			result := matchDNSClassical(provider.Strategy(), metadata, evaluation, depth+1)
+			result.adapter = rule.Adapter()
+			return result
 		}
 	case C.AND, C.OR, C.NOT:
 		if children, ok := rule.(dnsProxyRuleChildren); ok {

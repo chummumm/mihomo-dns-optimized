@@ -59,11 +59,20 @@ def epoch(build_time):
     return int(datetime.fromisoformat(build_time.replace("Z", "+00:00")).timestamp())
 
 
-def package_versions(build_time, commit, upstream):
+def package_versions(build_time, commit, upstream, version=None):
     if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", upstream):
         raise ValueError("invalid recorded upstream version")
     stamp = datetime.fromtimestamp(epoch(build_time), timezone.utc).strftime("%Y%m%d%H%M%S")
-    suffix = f"dns.{stamp}.{commit[:12]}"
+    # Keep the timestamp prefix for monotonic upgrades from existing packages,
+    # but use a numeric fork revision instead of a commit hash. Git SHA remains
+    # in BUILDINFO/manifests solely for source verification.
+    revision = "0"
+    if version is not None:
+        match = re.fullmatch(re.escape(upstream) + r"-dns\.([1-9][0-9]*)", version)
+        if not match:
+            raise ValueError("release version must contain a numeric DNS revision")
+        revision = match.group(1)
+    suffix = f"dns.{stamp}.{revision}"
     base = upstream[1:]
     return {"deb": f"{base}+{suffix}", "rpm_version": base,
             "rpm_release": f"1.{suffix}", "archlinux": f"{base}.{suffix}-1"}
@@ -228,7 +237,7 @@ def inspect_package(path, kind, architecture, binary, versions):
 
 def package_binary(binary, row, version, output, build_time, commit, upstream):
     timestamp = epoch(build_time)
-    versions = package_versions(build_time, commit, upstream)
+    versions = package_versions(build_time, commit, upstream, version)
     built = []
     with tempfile.TemporaryDirectory(prefix="mihomo-package-") as temp:
         work = Path(temp)
@@ -341,6 +350,7 @@ def build(row, output, version, build_time):
             subprocess.run([str(binary), "-v"], check=True)
             subprocess.run([str(binary), "-t", "-d", temp, "-f", str(ROOT / "packaging/config.yaml")], check=True)
             subprocess.run(["python3", "scripts/test-dns-proxy.py", str(binary)], cwd=ROOT, check=True)
+            subprocess.run(["python3", "scripts/test-dns-perf.py", str(binary), "--expect-shared"], cwd=ROOT, check=True)
         built = [write_archive(binary, row, version, output, timestamp)]
         built.extend(package_binary(binary, row, version, output, build_time, commit, upstream))
         assets = []

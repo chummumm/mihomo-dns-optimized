@@ -51,6 +51,8 @@ type directSpeedChecker struct {
 	concurrency int
 	slots       chan struct{}
 	probe       speedCheckProbe
+	candidates  *dnsCandidateCache
+	pool        *dnsProbePool
 }
 
 // ValidateSpeedCheckConfig also validates disabled configurations, so a typo
@@ -106,6 +108,8 @@ func newDirectSpeedChecker(config SpeedCheckConfig) (*directSpeedChecker, error)
 	return &directSpeedChecker{
 		modes: modes, timeout: config.Timeout, concurrency: config.Concurrency,
 		slots: make(chan struct{}, config.Concurrency), probe: probeDirectIP,
+		pool:       newDNSProbePool(config.Concurrency, maxSpeedCheckCandidates, config.Timeout),
+		candidates: newDNSCandidateCache(),
 	}, nil
 }
 
@@ -182,25 +186,13 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 			}
 		}(worker)
 	}
-	jobs := make(chan speedCheckCandidate, maxSpeedCheckCandidates)
-	probes := make(chan speedCheckResult, s.concurrency)
-	for i := 0; i < s.concurrency; i++ {
-		go func() {
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case candidate := <-jobs:
-					rtt, err := s.checkIP(ctx, candidate.ip, probe)
-					select {
-					case probes <- speedCheckResult{candidate, rtt, err}:
-					case <-ctx.Done():
-						return
-					}
-				}
-			}
-		}()
-	}
+	probes := make(chan speedCheckResult, maxSpeedCheckCandidates)
+	var tickets []*dnsProbeTicket
+	defer func() {
+		for _, ticket := range tickets {
+			ticket.Release()
+		}
+	}()
 
 	var firstResponse *D.Msg
 	var firstAddressResponse *D.Msg
@@ -260,10 +252,25 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 				}
 				seen[candidate.ip] = true
 				pending++
-				jobs <- candidate // bounded by maxSpeedCheckCandidates
+				candidate := candidate
+				ticket, err := s.pool.submit(ctx, dnsProbeScope(ctx, candidate.ip),
+					func(workCtx context.Context) (time.Duration, error) { return s.checkIP(workCtx, candidate.ip, probe) },
+					func(rtt time.Duration, err error) { probes <- speedCheckResult{candidate, rtt, err} })
+				if err != nil {
+					probes <- speedCheckResult{candidate, 0, err}
+				}
+				if ticket != nil {
+					tickets = append(tickets, ticket)
+				}
 			}
 		case result := <-probes:
 			pending--
+			// Every waiter, including a reused result, owns its family
+			// measurements. Recording only inside the actual socket probe
+			// would lose measurements for coalesced or cached callers.
+			if measurements, ok := ctx.Value(dnsProbeMeasurementsKey{}).(*dualStackMeasurements); ok {
+				measurements.observe(result.candidate.ip, result.rtt, result.err)
+			}
 			if result.err == nil && result.rtt >= 0 && (best == nil || result.rtt < best.rtt) {
 				best = &result
 			}

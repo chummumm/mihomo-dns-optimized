@@ -15,7 +15,7 @@ sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location('release_build', Path(__file__).with_name('release-build.py'))
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
-VERSION = 'v1.19.32-dns-123456789abc'
+VERSION = 'v1.19.32-dns.12'
 COMMIT = '123456789abcdef0123456789abcdef0123456789'
 TIME = '2026-10-09T02:00:00+00:00'
 
@@ -45,12 +45,15 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(any('abi1' in row['id'] or 'go120' in row['id'] for row in rows))
 
     def test_version_upgrade_order_and_timestamp_timezone(self):
-        versions = release.package_versions(TIME, COMMIT, 'v1.19.32')
-        self.assertEqual(versions['deb'], '1.19.32+dns.20261009020000.123456789abc')
-        later = release.package_versions('2026-10-09T02:01:00Z', '0' * 40, 'v1.19.32')
+        versions = release.package_versions(TIME, COMMIT, 'v1.19.32', VERSION)
+        self.assertEqual(versions['deb'], '1.19.32+dns.20261009020000.12')
+        later = release.package_versions('2026-10-09T02:01:00Z', '0' * 40, 'v1.19.32', 'v1.19.32-dns.13')
         release.run('dpkg', '--compare-versions', later['deb'], 'gt', versions['deb'])
-        same_time = release.package_versions('2026-10-09T10:00:00+08:00', COMMIT, 'v1.19.32')
+        same_time = release.package_versions('2026-10-09T10:00:00+08:00', COMMIT, 'v1.19.32', VERSION)
         self.assertEqual(versions, same_time)
+        release.run('dpkg', '--compare-versions', later['deb'], 'gt', '1.19.32+dns.20261009020000.123456789abc')
+        with self.assertRaises(ValueError):
+            release.package_versions(TIME, COMMIT, 'v1.19.32', 'v1.19.32-dns-deadbeef1234')
         with self.assertRaises(ValueError):
             release.basename(release.target('amd64'), '../unsafe')
 

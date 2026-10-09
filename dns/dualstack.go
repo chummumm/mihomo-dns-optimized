@@ -29,9 +29,23 @@ func ValidateDualStackConfig(config DualStackConfig) error {
 	return nil
 }
 
+type dnsProbeMeasurementsKey struct{}
+
 type dualStackMeasurements struct {
 	mu   sync.Mutex
 	rtts map[netip.Addr]time.Duration
+}
+
+func (m *dualStackMeasurements) observe(ip netip.Addr, rtt time.Duration, err error) {
+	if err != nil || rtt < 0 {
+		return
+	}
+	m.mu.Lock()
+	previous, exists := m.rtts[ip]
+	if !exists || rtt < previous {
+		m.rtts[ip] = rtt
+	}
+	m.mu.Unlock()
 }
 
 func (m *dualStackMeasurements) wrap(probe speedCheckProbe) speedCheckProbe {
@@ -73,6 +87,9 @@ func (m *dualStackMeasurements) fastest(query, response *D.Msg) (time.Duration, 
 // recursively, selects a second outbound, or writes an auxiliary cache entry.
 // Existing checker slots bound all probes across both families and callers.
 func (s *directSpeedChecker) ExchangeDualStackWithProbe(ctx context.Context, clients []dnsClient, query *D.Msg, probe speedCheckProbe, config DualStackConfig) (*D.Msg, bool, error) {
+	if query != nil && speedCheckQuestion(query) {
+		clients = s.shareCandidateClients(ctx, clients)
+	}
 	eligible := s != nil && probe != nil && config.Enabled && query != nil && speedCheckQuestion(query)
 	if eligible && query.Question[0].Qtype == D.TypeA && !config.AllowForceAAAA {
 		eligible = false // Preserve IPv4 for applications without IPv6 support.
@@ -101,10 +118,10 @@ func (s *directSpeedChecker) ExchangeDualStackWithProbe(ctx context.Context, cli
 	otherMeasurements := &dualStackMeasurements{rtts: make(map[netip.Addr]time.Duration)}
 	otherResult := make(chan result, 1)
 	go func() {
-		message, cache, err := s.ExchangeWithProbe(ctx, clients, other, otherMeasurements.wrap(probe))
+		message, cache, err := s.ExchangeWithProbe(context.WithValue(ctx, dnsProbeMeasurementsKey{}, otherMeasurements), clients, other, probe)
 		otherResult <- result{message, cache, err}
 	}()
-	message, cache, err := s.ExchangeWithProbe(ctx, clients, query, primaryMeasurements.wrap(probe))
+	message, cache, err := s.ExchangeWithProbe(context.WithValue(ctx, dnsProbeMeasurementsKey{}, primaryMeasurements), clients, query, probe)
 	if err != nil {
 		return message, cache, err
 	}

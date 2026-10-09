@@ -5,9 +5,9 @@
 所有文件名包含平台、CPU 和版本，例如：
 
 ```text
-mihomo-dns-linux-amd64-v1.19.32-dns-<12位提交号>.gz
-mihomo-dns-linux-amd64-v1.19.32-dns-<12位提交号>.deb
-mihomo-dns-windows-amd64-v1.19.32-dns-<12位提交号>.zip
+mihomo-dns-linux-amd64-v1.19.32-dns.<数字修订号>.gz
+mihomo-dns-linux-amd64-v1.19.32-dns.<数字修订号>.deb
+mihomo-dns-windows-amd64-v1.19.32-dns.<数字修订号>.zip
 ```
 
 `SHA256SUMS` 覆盖全部 66 个二进制归档/安装包及 `BUILDINFO.json`。`BUILDINFO.json` 记录完整提交号、各目标的 Go 架构参数、工具链、CGO、编译标签以及每个文件的大小和 SHA-256。每个目标缺少文件或校验不一致时，整个 Release 发布失败。已有同名 Release 的文件不被覆盖；重新发布时也必须验证其文件集合和摘要一致。
@@ -76,3 +76,9 @@ RPM 系统用 `sudo dnf install ./mihomo-dns-<target>-<version>.rpm`，Arch 系�
 构建脚本会检查每个包的架构、版本、配置保留标记、无生命周期脚本、文件清单/权限，以及包内二进制与该目标编译结果完全一致。Linux amd64 还实际执行 `-v`、通用配置 `-t` 和本地 DNS 端到端测试。安装包没有在测试宿主机上执行安装或启动服务。
 
 开发者可运行 `python3 scripts/release-build.py matrix` 查看 Actions 矩阵，或通过 `bash scripts/ci-check.sh build <target> <绝对输出目录> <版本> <ISO时间>` 复现一个目标；`amd64` / `arm64` 仍是对应 Linux 目标的简写。测试/打包依赖 `dpkg-deb`、`rpm`/`rpmbuild`/`rpm2cpio`、`cpio`、`zstd`、Python 3.12 和 Go；Android 还需上述固定 NDK，并设置 `ANDROID_NDK_HOME`。
+
+## 数字修订版本
+
+新发行版本形式为 `v1.19.32-dns.数字`，对应 tag 为 `dns-v1.19.32.数字`。数字由 `DNS_RELEASE_BASE` 之后的 first-parent 提交数量确定，因此可复现、随主线推进递增，并不要求每次发行连续编号。上游稳定版更新仍由原同步流程处理。提交 SHA 不再放入二进制版本或发行文件名，保留于 `BUILDINFO.json` 和提交记录。
+
+包管理器版本保留 UTC 构建时间前缀以保证从已有带哈希版本正常升级，其末尾改为数字修订号。安装包不会自动重启服务，升级后仍需校验配置并手动重启。

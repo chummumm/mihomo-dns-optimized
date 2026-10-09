@@ -126,6 +126,7 @@ func (c *cacheControl) validLocked(ctx context.Context) bool {
 // FlightKey isolates an old, still-unwinding singleflight from queries after a
 // clear, reload or mode change. It is intentionally separate from the cache key.
 func (c *cacheControl) FlightKey(ctx context.Context, key string) string {
+	key = dnsQueryFlightKey(ctx, key)
 	stamp, ok := ctx.Value(cacheGenerationKey{}).(cacheGeneration)
 	if !ok || stamp.control != c {
 		return key
@@ -159,6 +160,7 @@ func (c *cacheControl) Observe(ctx context.Context, query *D.Msg, key string) {
 		return
 	}
 	now := c.now()
+	ownedQuery := query.Copy()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.syncPolicyLocked()
@@ -182,7 +184,7 @@ func (c *cacheControl) Observe(ctx context.Context, query *D.Msg, key string) {
 	if entry.hits < cacheHotThreshold {
 		entry.hits++
 	}
-	entry.ctx, entry.query, entry.lastSeen = ctx, query.Copy(), now
+	entry.ctx, entry.query, entry.lastSeen = ctx, ownedQuery, now
 	if entry.next.IsZero() && c.r.cache != nil {
 		if _, expires, ok := c.r.cache.GetWithExpire(key); ok {
 			c.scheduleLocked(entry, now, expires)
@@ -224,13 +226,24 @@ func cacheRefreshContext(ctx context.Context) (context.Context, bool) {
 // Store is the sole generation-aware write hook. Clear holds the same mutex,
 // so a response from an older query cannot refill the cache after it was cleared.
 func (c *cacheControl) Store(ctx context.Context, key string, question D.Question, message *D.Msg) bool {
+	if message == nil {
+		return false
+	}
+	var staged stagedDNSWrite
+	if c.r.ruleRouting {
+		putMsgToCache(&staged, key, question, message)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.syncPolicyLocked()
 	if !c.validLocked(ctx) || message == nil || c.r.cache == nil {
 		return false
 	}
-	putMsgToCache(c.r.cache, key, question, message)
+	if c.r.ruleRouting {
+		staged.apply(c.r.cache)
+	} else {
+		putMsgToCache(c.r.cache, key, question, message)
+	}
 	if entry := c.hot[key]; entry != nil {
 		if _, expires, ok := c.r.cache.GetWithExpire(key); ok {
 			c.scheduleLocked(entry, c.now(), expires)

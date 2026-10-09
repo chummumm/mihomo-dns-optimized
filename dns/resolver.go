@@ -13,6 +13,7 @@ import (
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/trie"
 	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/dns/internal/routearc"
 	"github.com/metacubex/mihomo/log"
 
 	D "github.com/miekg/dns"
@@ -206,7 +207,9 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 	}
 	if hit {
 		msg.Id = m.Id
-		log.Debugln("[DNS] cache hit %s --> %s, expire at %s", domain, msgToLogString(msg), expireTime.Format("2006-01-02 15:04:05"))
+		if queryRoute(ctx) == nil || log.DNSDebugEnabled() {
+			log.Debugln("[DNS] cache hit %s --> %s, expire at %s", domain, msgToLogString(msg), expireTime.Format("2006-01-02 15:04:05"))
+		}
 		if expireTime.Before(now) {
 			setMsgTTL(msg, staleTTL)
 			continueFetch = true
@@ -223,7 +226,7 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.Msg, err error) {
 	q := m.Question[0]
 	key := r.cacheKey(ctx, m)
-	flightKey := key
+	flightKey := dnsQueryFlightKey(ctx, key)
 	if r.cacheControl != nil {
 		flightKey = r.cacheControl.FlightKey(ctx, key)
 	}
@@ -234,6 +237,11 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 		return !cacheBackground(ctx) && !dnsQueryClosed(ctx) && (r.cacheControl == nil || r.cacheControl.active(ctx))
 	}
 	fn := func() (result *D.Msg, err error) {
+		release, admissionErr := admitDNSNativeWork(ctx)
+		if admissionErr != nil {
+			return &D.Msg{MsgHdr: D.MsgHdr{Opcode: retryMax}}, admissionErr
+		}
+		defer release()
 		workContext := ctx
 		if !cacheBackground(ctx) {
 			workContext = contextutils.WithoutCancel(ctx)
@@ -455,6 +463,11 @@ func (r *Resolver) Invalid() bool {
 }
 
 func (r *Resolver) ClearCache() {
+	defer func() {
+		if r != nil && r.speedChecker != nil {
+			r.speedChecker.candidates.Clear()
+		}
+	}()
 	if r != nil && r.cache != nil {
 		if r.cacheControl != nil {
 			r.cacheControl.Clear()
@@ -467,6 +480,10 @@ func (r *Resolver) ClearCache() {
 // Close stops this resolver's background refreshes when configuration replaces
 // it. Foreground callers may finish, but cannot repopulate a closed cache.
 func (r *Resolver) Close() {
+	if r != nil && r.speedChecker != nil {
+		r.speedChecker.candidates.Close()
+		r.speedChecker.pool.Close()
+	}
 	if r != nil && r.cacheControl != nil {
 		r.cacheControl.Close()
 	}
@@ -579,6 +596,9 @@ func (config Config) newCache() dnsCache {
 	}
 	switch config.CacheAlgorithm {
 	case "arc":
+		if config.RuleRouting {
+			return routearc.New(routearc.WithSize[string, *D.Msg](config.CacheMaxSize))
+		}
 		return arc.New(arc.WithSize[string, *D.Msg](config.CacheMaxSize))
 	default:
 		return lru.New(lru.WithSize[string, *D.Msg](config.CacheMaxSize), lru.WithStale[string, *D.Msg](true))
