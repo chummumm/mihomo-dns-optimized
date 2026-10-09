@@ -68,7 +68,7 @@ def package_versions(build_time, commit, upstream, version=None):
     # in BUILDINFO/manifests solely for source verification.
     revision = "0"
     if version is not None:
-        match = re.fullmatch(re.escape(upstream) + r"-dns\.([1-9][0-9]*)", version)
+        match = re.fullmatch(re.escape(upstream) + r"-dns-optimized-([1-9][0-9]*)", version)
         if not match:
             raise ValueError("release version must contain a numeric DNS revision")
         revision = match.group(1)
@@ -386,13 +386,18 @@ def collect(directory, version, commit):
                 raise ValueError(f"asset checksum file mismatch: {name}")
             assets[name] = asset["sha256"]
         records.append(record)
-    allowed = set(assets) | {name + ".sha256" for name in assets} | {f"manifest-{row['id']}.json" for row in targets()} | {"BUILDINFO.json", "SHA256SUMS"}
+    allowed = set(assets) | {name + ".sha256" for name in assets} | {f"manifest-{row['id']}.json" for row in targets()} | {"BUILDINFO.json", "SHA256SUMS", "version.txt"}
     unexpected = {path.name for path in directory.iterdir()} - allowed
     if unexpected:
         raise ValueError(f"unexpected release files: {sorted(unexpected)}")
     buildinfo = directory / "BUILDINFO.json"
     buildinfo.write_text(json.dumps({"commit": commit, "version": version, "targets": records}, indent=2) + "\n")
     assets[buildinfo.name] = digest(buildinfo)
+    # The in-core updater discovers Latest once, then pins this exact version
+    # tag for both SHA256SUMS and the architecture-specific archive.
+    version_file = directory / "version.txt"
+    version_file.write_text(version + "\n")
+    assets[version_file.name] = digest(version_file)
     (directory / "SHA256SUMS").write_text("".join(f"{sha}  {name}\n" for name, sha in sorted(assets.items())))
     print(f"PASS release collection: {len(records)} targets, {len(assets)} checksummed assets", flush=True)
 
@@ -407,7 +412,9 @@ def verify_published(directory, metadata):
     expected["SHA256SUMS"] = {"size": (directory / "SHA256SUMS").stat().st_size,
                               "digest": "sha256:" + digest(directory / "SHA256SUMS")}
     actual = {asset["name"]: {"size": asset["size"], "digest": asset.get("digest")} for asset in release["assets"]}
-    if release.get("draft") or actual != expected or len(actual) != len(release["assets"]):
+    if (release.get("draft") or release.get("prerelease") or
+            release.get("tag_name") != (directory / "version.txt").read_text().strip() or
+            actual != expected or len(actual) != len(release["assets"])):
         raise ValueError("existing release is incomplete or differs from this build; refusing to overwrite or promote it")
     print("PASS existing immutable release contains every expected asset", flush=True)
 

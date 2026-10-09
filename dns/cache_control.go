@@ -230,8 +230,9 @@ func (c *cacheControl) Store(ctx context.Context, key string, question D.Questio
 		return false
 	}
 	var staged stagedDNSWrite
+	expires := dnsAnswerExpires(ctx, message)
 	if c.r.ruleRouting {
-		putMsgToCache(&staged, key, question, message)
+		putMsgToCacheWithExpiry(&staged, key, question, message, expires)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -242,7 +243,7 @@ func (c *cacheControl) Store(ctx context.Context, key string, question D.Questio
 	if c.r.ruleRouting {
 		staged.apply(c.r.cache)
 	} else {
-		putMsgToCache(c.r.cache, key, question, message)
+		putMsgToCacheWithExpiry(c.r.cache, key, question, message, expires)
 	}
 	if entry := c.hot[key]; entry != nil {
 		if _, expires, ok := c.r.cache.GetWithExpire(key); ok {

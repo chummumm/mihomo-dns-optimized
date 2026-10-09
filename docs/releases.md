@@ -5,12 +5,12 @@
 所有文件名包含平台、CPU 和版本，例如：
 
 ```text
-mihomo-dns-linux-amd64-v1.19.32-dns.<数字修订号>.gz
-mihomo-dns-linux-amd64-v1.19.32-dns.<数字修订号>.deb
-mihomo-dns-windows-amd64-v1.19.32-dns.<数字修订号>.zip
+mihomo-dns-linux-amd64-v1.19.32-dns-optimized-1.gz
+mihomo-dns-linux-amd64-v1.19.32-dns-optimized-1.deb
+mihomo-dns-windows-amd64-v1.19.32-dns-optimized-1.zip
 ```
 
-`SHA256SUMS` 覆盖全部 66 个二进制归档/安装包及 `BUILDINFO.json`。`BUILDINFO.json` 记录完整提交号、各目标的 Go 架构参数、工具链、CGO、编译标签以及每个文件的大小和 SHA-256。每个目标缺少文件或校验不一致时，整个 Release 发布失败。已有同名 Release 的文件不被覆盖；重新发布时也必须验证其文件集合和摘要一致。
+`SHA256SUMS` 覆盖全部 66 个二进制归档/安装包，以及 `BUILDINFO.json` 和 `version.txt`。`BUILDINFO.json` 记录完整提交号、各目标的 Go 架构参数、工具链、CGO、编译标签以及每个文件的大小和 SHA-256。每个目标缺少文件或校验不一致时，整个 Release 发布失败。已有同名 Release 的文件不被覆盖；重新发布时也必须验证其文件集合和摘要一致。
 
 ## 支持矩阵
 
@@ -65,7 +65,7 @@ sudo systemctl enable --now mihomo
 
 Debian 使用 conffile；RPM 使用 `%config(noreplace)`；Arch 使用 `backup` 标记。升级会保留用户修改的配置，冲突时由相应包管理器提示或保存 `.dpkg-dist` / `.rpmnew` / `.pacnew` 等候选文件。不要使用强制覆盖配置的包管理器选项。包内无个人配置、节点、API 密钥或认证信息。
 
-安装包内部版本包含上游版本、UTC 提交时间和提交号，例如 `1.19.32+dns.20261009020000.123456789abc`，正常的新提交能按时间升级；具体文件名仍与 Release 的源码版本一致。
+安装包内部版本包含上游版本、UTC 提交时间和数字修订号，例如 `1.19.32+dns.20261009120000.1`，保留时间前缀以支持从旧版本安装包正常升级；具体文件名仍与 Release 的源码版本一致。
 
 ## RPM / Arch 与直接使用核心
 
@@ -79,6 +79,16 @@ RPM 系统用 `sudo dnf install ./mihomo-dns-<target>-<version>.rpm`，Arch 系�
 
 ## 数字修订版本
 
-新发行版本形式为 `v1.19.32-dns.数字`，对应 tag 为 `dns-v1.19.32.数字`。数字由 `DNS_RELEASE_BASE` 之后的 first-parent 提交数量确定，因此可复现、随主线推进递增，并不要求每次发行连续编号。上游稳定版更新仍由原同步流程处理。提交 SHA 不再放入二进制版本或发行文件名，保留于 `BUILDINFO.json` 和提交记录。
+新发行版本形式为 `v1.19.32-dns-optimized-1`，tag、Release 标题与 `mihomo -v` 使用相同版本。新命名序列从审计基线提交后的修复开始；末尾数字由 `DNS_RELEASE_BASE` 之后的 first-parent 提交数量确定，因此可复现、随主线推进递增，并不要求每次发行连续编号。上游稳定版更新仍由原同步流程处理。提交 SHA 不再放入二进制版本或发行文件名，保留于 `BUILDINFO.json` 和提交记录。
 
 包管理器版本保留 UTC 构建时间前缀以保证从已有带哈希版本正常升级，其末尾改为数字修订号。安装包不会自动重启服务，升级后仍需校验配置并手动重启。
+
+## 内核一键更新
+
+本版本的核心 `/upgrade` 使用 **chummumm/mihomo-dns-optimized** 的正式 Release。默认、`auto` 和 `release` 通道都先读取本仓库 Latest 的 `version.txt`，再将校验和及对应架构归档的下载固定到该版本标签；下载过程中 Latest 改变不会混用版本。未提供本仓库 alpha 发行，显式请求 `alpha` 会提示使用 `release`，不会跳转官方仓库。
+
+更新保留当前平台和 CPU 变体，包括 amd64 v1/v2/v3、386 softfloat、ARM、MIPS 浮点 ABI、LoongArch ABI2 和 Android 文件名。不存在对应发行目标时明确失败。版本比较按上游版本和数字修订号进行；未设置 `force` 时不会降级。
+
+归档必须通过本版本 `SHA256SUMS` 校验，解压到独立临时目录后才替换内核；HTTP 错误、版本格式错误、缺失校验、摘要不符或无效归档不会覆盖当前文件。原内核保存在同目录 `meta-backup/`。一键更新成功后仍沿用现有接口的重启行为，配置文件不被替换。
+
+**旧版 `v1.19.32-dns.2` 等内核的更新逻辑已经编译在旧文件中，首次迁移需手动安装本次修复版。** 此后才使用上述二开源一键更新。用 deb/rpm/pkg 安装的用户建议继续通过相应安装包升级，以保持包管理器记录一致；直接使用核心的用户可使用面板的内核更新入口。

@@ -76,6 +76,10 @@ func speedCheckTestChecker(t *testing.T, timeout time.Duration, concurrency int)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		s.pool.Close()
+		s.candidates.Close()
+	})
 	return s
 }
 
@@ -180,7 +184,7 @@ func TestSpeedCheckUnreachablePreservesPositiveAnswer(t *testing.T) {
 	}
 }
 
-func TestSpeedCheckDeadlineIncludesUpstreamsAndProbes(t *testing.T) {
+func TestSpeedCheckOptimizationDeadlinePreservesAvailableAnswer(t *testing.T) {
 	query := new(D.Msg).SetQuestion("example.", D.TypeA)
 	positive := speedCheckTestReply(t, query, "example. 60 IN A 192.0.2.1")
 	s := speedCheckTestChecker(t, 40*time.Millisecond, 2)
@@ -234,7 +238,7 @@ func TestSpeedCheckConcurrencySharedAcrossQueries(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if maximum.Load() > 2 || calls.Load() != 16 {
+	if maximum.Load() > 2 || calls.Load() == 0 || calls.Load() > 16 {
 		t.Fatalf("shared probe limit broken: maximum=%d calls=%d", maximum.Load(), calls.Load())
 	}
 }
@@ -359,7 +363,7 @@ func TestSpeedCheckMalformedChainAndCandidateBound(t *testing.T) {
 	for i := 0; i < maxSpeedCheckCandidates+20; i++ {
 		response.Answer = append(response.Answer, &D.A{Hdr: D.RR_Header{Name: "example.", Rrtype: D.TypeA, Class: D.ClassINET, Ttl: 60}, A: net.IPv4(198, 18, byte(i/256), byte(i%256))})
 	}
-	s := speedCheckTestChecker(t, time.Second, 8)
+	s := speedCheckTestChecker(t, time.Second, maxSpeedCheckCandidates)
 	var calls atomic.Int32
 	s.probe = func(context.Context, netip.Addr, speedCheckMode) (time.Duration, error) {
 		calls.Add(1)

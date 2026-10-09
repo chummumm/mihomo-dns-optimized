@@ -33,7 +33,7 @@
 
 开启 `dns-rule-routing` 时，DNS 规则执行使用派生视图和 classical 纯域名连续段索引，仍按原业务规则顺序判断 SRC / PROCESS / IN。成功的自动查询应答可以在同一来源、进程和入站作用域内跨临时源端口复用；每个请求仍先匹配当前规则，在途查询保持独立取消语义。DIRECT 探测使用共享有界任务池、同出口目标 IP 合并及短期结果复用，代理结果不进行本地探测。
 
-没有新增指标 API、遥测或需要用户维护的第二份规则。优化范围、缓存安全边界及测试方式见 [DNS 性能说明](docs/dns-performance.md)。正式发布使用 `v1.19.32-dns.数字修订号` 形式，不再将提交哈希放入版本号；源码哈希保留在 BUILDINFO 中供核对。
+没有新增指标 API、遥测或需要用户维护的第二份规则。优化范围、缓存安全边界及测试方式见 [DNS 性能说明](docs/dns-performance.md)。正式发布使用 `v1.19.32-dns-optimized-1` 形式，末尾为数字修订号；tag、发行标题与内核版本一致，源码哈希保留在 BUILDINFO 中供核对。内核一键更新使用本二开仓库的正式发行并验证 SHA256，不会回装官方内核，见[更新说明](docs/releases.md#内核一键更新)。
 
 ## 快速开始
 
@@ -139,8 +139,8 @@ rules:
 | 测速字段 | 默认值 | 含义与单位 |
 | --- | --- | --- |
 | `speed-check-mode` | 空 / `[none]` | 关闭；可设 `tcp:端口`、`ping`；`none` 不能与其他项混用 |
-| `speed-check-timeout` | 0 → 1000 | 毫秒；显式范围 1–5000，本轮上游收集和探测共用预算 |
-| `speed-check-concurrency` | 0 → 16 | 最大 256；共享测速器的并发探测上限；每轮最多 256 个候选 IP |
+| `speed-check-timeout` | 0 → 1000 | 毫秒；显式范围 1–5000，只限制本轮可选优选等待；无有效答复时，已发出的 DNS 继续使用正常解析期限 |
+| `speed-check-concurrency` | 0 → 16 | 最大 256；只限制活动 IP 探测，满额立即跳过新探测，不排队，不限制 DNS 上游请求；每轮最多 256 个候选 IP |
 | `dualstack-ip-selection` | `false` | 开启 DIRECT 双栈优选；仍需启用测速 |
 | `dualstack-ip-selection-threshold` | 10 | 毫秒；0–1000，另一族至少快多少才过滤当前族 |
 | `dualstack-ip-allow-force-aaaa` | `false` | 是否允许反向过滤 A、只保留更快的 IPv6；默认保留 IPv4 |

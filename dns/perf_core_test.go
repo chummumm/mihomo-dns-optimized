@@ -51,7 +51,7 @@ func TestDNSPerfReplyCacheSharesPortsButNotWork(t *testing.T) {
 }
 
 func TestDNSPerfProbePoolCoalescesAndCancels(t *testing.T) {
-	p := newDNSProbePool(2, 4, time.Second)
+	p := newDNSProbePool(2, time.Second)
 	defer p.Close()
 	var calls atomic.Int32
 	gate := make(chan struct{})
@@ -101,7 +101,7 @@ func TestDNSPerfProbePoolCoalescesAndCancels(t *testing.T) {
 }
 
 func TestDNSPerfProbePoolClose(t *testing.T) {
-	p := newDNSProbePool(1, 2, time.Second)
+	p := newDNSProbePool(1, time.Second)
 	started := make(chan struct{})
 	results := make(chan error, 1)
 	_, err := p.submit(context.Background(), "close", func(ctx context.Context) (time.Duration, error) { close(started); <-ctx.Done(); return 0, ctx.Err() }, func(_ time.Duration, err error) { results <- err })

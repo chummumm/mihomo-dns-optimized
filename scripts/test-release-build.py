@@ -15,7 +15,7 @@ sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location('release_build', Path(__file__).with_name('release-build.py'))
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
-VERSION = 'v1.19.32-dns.12'
+VERSION = 'v1.19.32-dns-optimized-12'
 COMMIT = '123456789abcdef0123456789abcdef0123456789'
 TIME = '2026-10-09T02:00:00+00:00'
 
@@ -47,11 +47,16 @@ class ReleaseTests(unittest.TestCase):
     def test_version_upgrade_order_and_timestamp_timezone(self):
         versions = release.package_versions(TIME, COMMIT, 'v1.19.32', VERSION)
         self.assertEqual(versions['deb'], '1.19.32+dns.20261009020000.12')
-        later = release.package_versions('2026-10-09T02:01:00Z', '0' * 40, 'v1.19.32', 'v1.19.32-dns.13')
+        later = release.package_versions('2026-10-09T02:01:00Z', '0' * 40, 'v1.19.32', 'v1.19.32-dns-optimized-13')
         release.run('dpkg', '--compare-versions', later['deb'], 'gt', versions['deb'])
         same_time = release.package_versions('2026-10-09T10:00:00+08:00', COMMIT, 'v1.19.32', VERSION)
         self.assertEqual(versions, same_time)
         release.run('dpkg', '--compare-versions', later['deb'], 'gt', '1.19.32+dns.20261009020000.123456789abc')
+        first_new = release.package_versions('2026-10-09T02:01:00Z', COMMIT, 'v1.19.32', 'v1.19.32-dns-optimized-1')
+        release.run('dpkg', '--compare-versions', first_new['deb'], 'gt', '1.19.32+dns.20261009020000.2')
+        for invalid in ['v1.19.32-dns.12', 'v1.19.32-dns-optimized-0', 'v1.19.32-dns-optimized-01']:
+            with self.assertRaises(ValueError):
+                release.package_versions(TIME, COMMIT, 'v1.19.32', invalid)
         with self.assertRaises(ValueError):
             release.package_versions(TIME, COMMIT, 'v1.19.32', 'v1.19.32-dns-deadbeef1234')
         with self.assertRaises(ValueError):
@@ -95,7 +100,8 @@ class ReleaseTests(unittest.TestCase):
     def test_collection_requires_every_target_and_exact_checksums(self):
         self.fixture_collection()
         release.collect(self.out, VERSION, COMMIT)
-        self.assertEqual(len((self.out / 'SHA256SUMS').read_text().splitlines()), 67)
+        self.assertEqual(len((self.out / 'SHA256SUMS').read_text().splitlines()), 68)
+        self.assertEqual((self.out / 'version.txt').read_text(), VERSION + '\n')
         with self.assertRaisesRegex(ValueError, 'identity mismatch'):
             release.collect(self.out, VERSION, '0' * 40)
         asset = self.out / release.asset_names(release.target('amd64'), VERSION)[0]
@@ -112,7 +118,7 @@ class ReleaseTests(unittest.TestCase):
         self.fixture_collection()
         release.collect(self.out, VERSION, COMMIT)
         names = [line.split('  ', 1)[1] for line in (self.out / 'SHA256SUMS').read_text().splitlines()] + ['SHA256SUMS']
-        metadata = {'draft': False, 'assets': [{'name': name, 'size': (self.out / name).stat().st_size, 'digest': 'sha256:' + release.digest(self.out / name)} for name in names]}
+        metadata = {'draft': False, 'prerelease': False, 'tag_name': VERSION, 'assets': [{'name': name, 'size': (self.out / name).stat().st_size, 'digest': 'sha256:' + release.digest(self.out / name)} for name in names]}
         saved = self.root / 'published.json'
         saved.write_text(json.dumps(metadata))
         release.verify_published(self.out, saved)

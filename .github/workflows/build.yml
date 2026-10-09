@@ -3,7 +3,7 @@ name: Build DNS optimized
 on:
   push:
     branches: [main]
-    tags: ["dns-v*"]
+    tags: ["v*-dns-optimized-*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -84,9 +84,9 @@ jobs:
           git merge-base --is-ancestor "$base" HEAD
           revision=$(git rev-list --first-parent --count "$base"..HEAD)
           [[ "$revision" =~ ^[1-9][0-9]*$ ]]
-          version="${upstream}-dns.${revision}"
-          release_tag="dns-${upstream}.${revision}"
-          if [[ "$EVENT_REF" == refs/tags/dns-v* ]]; then
+          version="${upstream}-dns-optimized-${revision}"
+          release_tag="$version"
+          if [[ "$EVENT_REF" == refs/tags/* ]]; then
             [[ "$EVENT_REF_NAME" == "$release_tag" ]] || { echo 'Tag does not match this numeric revision' >&2; exit 1; }
           fi
           {
@@ -141,14 +141,38 @@ jobs:
           retention-days: 30
           compression-level: 0
 
+  updater-platforms:
+    name: Core updater (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Set up upstream-compatible Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: "1.26"
+          go-download-base-url: https://github.com/MetaCubeX/go/releases/download/build
+          cache: true
+      - name: Verify native core replacement, rollback and macOS signing
+        run: go test -tags with_gvisor -count=1 -timeout=5m ./component/updater
+
   release:
     name: Publish GitHub release
-    needs: [check, build]
+    needs: [check, build, updater-platforms]
     if: >-
       github.repository == 'chummumm/mihomo-dns-optimized' &&
       github.event_name != 'pull_request' &&
       ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-       startsWith(github.ref, 'refs/tags/dns-v') ||
+       (startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '-dns-optimized-')) ||
        (inputs.publish_release && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -180,7 +204,7 @@ jobs:
           cd dist
           sha256sum --check SHA256SUMS
           shopt -s nullglob
-          assets=( ./*.gz ./*.zip ./*.deb ./*.rpm ./*.pkg.tar.zst BUILDINFO.json SHA256SUMS )
+          assets=( ./*.gz ./*.zip ./*.deb ./*.rpm ./*.pkg.tar.zst BUILDINFO.json SHA256SUMS version.txt )
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             printf 'Release %s already exists; checking its immutable assets.\n' "$RELEASE_TAG"
           else
@@ -194,7 +218,8 @@ jobs:
               printf 'Matrix, installation and compatibility: https://github.com/%s/blob/%s/docs/releases.md\n\n' "$GITHUB_REPOSITORY" "$BUILD_SHA"
               printf 'Enable top-level `dns-rule-routing: true` for forwarded TCP/UDP DNS on port 53. Native DNS supports configured UDP/TCP upstream ports, DoT, DoH including HTTP/3, and DoQ; DIRECT uses `direct-nameserver`, proxy routes use `nameserver`, with the selected outbound retained.\n'
               printf 'Optional DIRECT IP speed checks and dual-stack selection, bounded cache prefetch/stale answers, TTL bounds and safe CNAME flattening are configured under `dns:`. These optional optimizations default to off; see the migration, DNSSEC protection and scope notes.\n'
-              printf 'This numeric DNS revision includes authorized cross-source-port answer reuse, DNS-only compiled rule views/classical indexes, bounded shared DIRECT probes, short-lived candidate reuse and lower DNS logging/cache overhead. Ordinary traffic and SRC/PROCESS/IN priority are unchanged.\n'
+              printf 'DNS correctness fixes preserve upstream/fallback identity, EDNS fields, elapsed TTL and address-family policy. Probe saturation skips measurement immediately; normal DNS requests keep their own deadline.\n'
+              printf 'The core updater uses this repository, pins the selected version and verifies SHA256SUMS before replacement. Use the release/auto channel; the official alpha channel is not used.\n'
               printf 'No production metrics endpoint or telemetry was added. Controlled load and regression tests run in CI; see docs/dns-performance.md.\n'
             } > "$RUNNER_TEMP/release-notes.txt"
             gh release create "$RELEASE_TAG" \

@@ -3,6 +3,7 @@ package dns
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"sync"
@@ -239,10 +240,101 @@ func TestDualStackBothFamiliesShareBudgetAndProbeLimit(t *testing.T) {
 			return 0, ctx.Err()
 		}
 	}
-	_, _, err = checker.ExchangeDualStackWithProbe(context.Background(), []dnsClient{client}, query, probe,
+	answer, _, err = checker.ExchangeDualStackWithProbe(context.Background(), []dnsClient{client}, query, probe,
 		DualStackConfig{Enabled: true, Threshold: 10 * time.Millisecond})
-	if err != nil || maximum.Load() > 2 || probes.Load() != 6 {
+	// Busy probe slots skip excess candidates immediately. Both families
+	// still share the limit and an unmeasured address remains a valid answer.
+	if err != nil || maximum.Load() > 2 || probes.Load() == 0 || probes.Load() > 6 || answer == nil || len(msgToIP(answer)) == 0 {
 		t.Fatalf("families did not share the probe limiter: maximum=%d probes=%d err=%v", maximum.Load(), probes.Load(), err)
+	}
+}
+
+func TestDualStackOptimizationDeadlinePreservesSlowPrimaryDNS(t *testing.T) {
+	checker := speedCheckTestChecker(t, 10*time.Millisecond, 2)
+	query := new(D.Msg).SetQuestion("slow-primary.example.", D.TypeA)
+	client := &dualStackTestClient{exchange: func(ctx context.Context, q *D.Msg) (*D.Msg, error) {
+		if q.Question[0].Qtype == D.TypeA {
+			timer := time.NewTimer(50 * time.Millisecond)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		return dualStackTestAnswer(q), nil
+	}}
+	start := time.Now()
+	answer, _, err := checker.ExchangeDualStackWithProbe(context.Background(), []dnsClient{client}, query,
+		func(context.Context, netip.Addr, speedCheckMode) (time.Duration, error) { return time.Millisecond, nil },
+		DualStackConfig{Enabled: true, Threshold: 10 * time.Millisecond, AllowForceAAAA: true})
+	if err != nil || answer == nil || len(msgToIP(answer)) != 1 || msgToIP(answer)[0].String() != "192.0.2.4" {
+		t.Fatalf("optimization deadline lost the primary DNS response: answer=%v err=%v", answer, err)
+	}
+	if elapsed := time.Since(start); elapsed < 50*time.Millisecond || elapsed > 500*time.Millisecond {
+		t.Fatalf("primary DNS did not retain its normal budget: %v", elapsed)
+	}
+}
+
+func TestDualStackDisabledIPv6CannotSuppressIPv4(t *testing.T) {
+	routingTestEnable(t)
+	for _, settings := range []struct {
+		globalIPv6 bool
+		dnsIPv6    bool
+	}{
+		{globalIPv6: true, dnsIPv6: false},
+		{globalIPv6: false, dnsIPv6: true},
+		{globalIPv6: false, dnsIPv6: false},
+		{globalIPv6: true, dnsIPv6: true},
+	} {
+		for _, force := range []bool{false, true} {
+			t.Run(fmt.Sprintf("global=%v/dns=%v/force=%v", settings.globalIPv6, settings.dnsIPv6, force), func(t *testing.T) {
+				// The executor supplies this effective value to both the
+				// resolver and listener. Preserve that real service boundary.
+				effectiveIPv6 := settings.globalIPv6 && settings.dnsIPv6
+				config := selectionTestConfig()
+				config.IPv6, config.Fallback = effectiveIPv6, nil
+				config.DualStack = DualStackConfig{Enabled: true, Threshold: 10 * time.Millisecond, AllowForceAAAA: force}
+				rs := NewResolver(config)
+				defer rs.Close()
+				r := rs.Resolver
+				main := &selectionTestClient{dnsClient: r.main[0], exchange: func(_ context.Context, query *D.Msg) (*D.Msg, error) {
+					return dualStackTestAnswer(query), nil
+				}}
+				r.main = []dnsClient{main}
+				service := NewService(r, NewEnhancer(EnhancerConfig{IPv6: effectiveIPv6}))
+				leaf := newSelectionTestOutbound()
+				leaf.delays[netip.MustParseAddr("192.0.2.4")] = 40 * time.Millisecond
+				ctx := routingTestContext(leaf, routingTestOrigin())
+				query := new(D.Msg).SetQuestion("disabled-v6.example.", D.TypeA)
+				v4, err := service.ServeMsg(ctx, query)
+				if err != nil || v4 == nil || v4.Rcode != D.RcodeSuccess {
+					t.Fatalf("A query failed: answer=%v err=%v", v4, err)
+				}
+				wantV4 := 1
+				if effectiveIPv6 && force {
+					wantV4 = 0
+				}
+				if len(msgToIP(v4)) != wantV4 {
+					t.Fatalf("disabled or unrequested IPv6 preference hid IPv4: %v", v4)
+				}
+				query = new(D.Msg).SetQuestion("disabled-v6.example.", D.TypeAAAA)
+				v6, err := service.ServeMsg(ctx, query)
+				if err != nil || v6 == nil || v6.Rcode != D.RcodeSuccess {
+					t.Fatalf("AAAA query failed: answer=%v err=%v", v6, err)
+				}
+				if !effectiveIPv6 {
+					if len(msgToIP(v6)) != 0 || main.count(D.TypeAAAA) != 0 || leaf.probed("2001:db8::6") {
+						t.Fatalf("disabled IPv6 caused auxiliary traffic: AAAA=%d answer=%v", main.count(D.TypeAAAA), v6)
+					}
+				} else if len(msgToIP(v6)) != 1 || main.count(D.TypeAAAA) != 1 || !leaf.probed("2001:db8::6") {
+					t.Fatalf("enabled dual-stack behavior was lost: AAAA=%d answer=%v", main.count(D.TypeAAAA), v6)
+				}
+				if main.count(D.TypeA) != 1 {
+					t.Fatalf("original A query was lost or repeated: %d", main.count(D.TypeA))
+				}
+			})
+		}
 	}
 }
 

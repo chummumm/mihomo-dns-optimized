@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/common/picker"
@@ -26,23 +27,179 @@ const (
 const serverFailureCacheTTL uint32 = 5
 
 func minimalTTL(records []D.RR) uint32 {
-	rr := lo.MinBy(records, func(r1 D.RR, r2 D.RR) bool {
-		return r1.Header().Ttl < r2.Header().Ttl
-	})
-	if rr == nil {
-		return 0
+	var ttl uint32
+	found := false
+	for _, rr := range records {
+		if rr.Header().Rrtype == D.TypeOPT {
+			continue // OPT carries EDNS control bits, never a record lifetime.
+		}
+		if !found || rr.Header().Ttl < ttl {
+			ttl, found = rr.Header().Ttl, true
+		}
 	}
-	return rr.Header().Ttl
+	return ttl
 }
 
 func updateTTL(records []D.RR, ttl uint32) {
 	if len(records) == 0 {
 		return
 	}
-	delta := minimalTTL(records) - ttl
-	for i := range records {
-		records[i].Header().Ttl = lo.Clamp(records[i].Header().Ttl-delta, 1, records[i].Header().Ttl)
+	minimum := minimalTTL(records)
+	var delta uint32
+	if minimum > ttl {
+		delta = minimum - ttl
 	}
+	for _, rr := range records {
+		header := rr.Header()
+		if header.Rrtype == D.TypeOPT || header.Ttl == 0 {
+			continue
+		}
+		// Keep the existing positive-TTL cache-hit floor without unsigned
+		// underflow, changing EDNS flags, or making a zero-TTL RR cacheable.
+		if delta >= header.Ttl {
+			header.Ttl = 1
+		} else {
+			header.Ttl -= delta
+		}
+	}
+}
+
+type dnsAnswerLifetimesKey struct{}
+
+// A lifetime table belongs to one actual resolver exchange, including its
+// main/fallback and dual-stack work. It is never stored with a cached reply or
+// shared between unrelated resolver invocations.
+type dnsAnswerLifetimes struct {
+	mu       sync.Mutex
+	received map[*D.Msg]time.Time
+	expires  map[*D.Msg]time.Time
+}
+
+func withDNSAnswerLifetimes(ctx context.Context) context.Context {
+	return context.WithValue(ctx, dnsAnswerLifetimesKey{}, &dnsAnswerLifetimes{
+		received: make(map[*D.Msg]time.Time),
+	})
+}
+
+func hasDNSAnswerLifetimes(ctx context.Context) bool {
+	lifetimes, _ := ctx.Value(dnsAnswerLifetimesKey{}).(*dnsAnswerLifetimes)
+	return lifetimes != nil
+}
+
+func recordDNSAnswerReceived(ctx context.Context, message *D.Msg, receivedAt time.Time) time.Time {
+	lifetimes, _ := ctx.Value(dnsAnswerLifetimesKey{}).(*dnsAnswerLifetimes)
+	if lifetimes == nil || message == nil || receivedAt.IsZero() {
+		return receivedAt
+	}
+	lifetimes.mu.Lock()
+	defer lifetimes.mu.Unlock()
+	// A raw candidate hit already knows when its upstream response arrived.
+	// A wrapper or collector must not reset that clock on the next handoff.
+	if previous, ok := lifetimes.received[message]; !ok || receivedAt.Before(previous) {
+		lifetimes.received[message] = receivedAt
+	}
+	return lifetimes.received[message]
+}
+
+func inheritDNSAnswerLifetime(ctx context.Context, message, original *D.Msg) {
+	lifetimes, _ := ctx.Value(dnsAnswerLifetimesKey{}).(*dnsAnswerLifetimes)
+	if lifetimes == nil || message == nil || original == nil || message == original {
+		return
+	}
+	lifetimes.mu.Lock()
+	defer lifetimes.mu.Unlock()
+	if receivedAt, ok := lifetimes.received[original]; ok {
+		if previous, ok := lifetimes.received[message]; !ok || receivedAt.Before(previous) {
+			lifetimes.received[message] = receivedAt
+		}
+	}
+	if expires, ok := lifetimes.expires[original]; ok {
+		if previous, ok := lifetimes.expires[message]; !ok || expires.Before(previous) {
+			lifetimes.expires[message] = expires
+		}
+	}
+}
+
+// TTL policy applies to the lifetime received from upstream, before subtracting
+// the time spent collecting and probing. Applying a minimum after this aging
+// would grant an already-expired answer a new cache lifetime.
+func ageDNSAnswerAfterPolicy(ctx context.Context, original, adjusted *D.Msg) *D.Msg {
+	lifetimes, _ := ctx.Value(dnsAnswerLifetimesKey{}).(*dnsAnswerLifetimes)
+	if lifetimes == nil || original == nil || adjusted == nil {
+		return adjusted
+	}
+	lifetimes.mu.Lock()
+	receivedAt, ok := lifetimes.received[original]
+	lifetimes.mu.Unlock()
+	if !ok {
+		return adjusted
+	}
+	answer := ageDNSAnswerAt(adjusted, receivedAt, time.Now())
+	// DNS wire TTLs have whole-second precision, but cache expiration must
+	// retain the fractional second already spent probing. Otherwise rounding
+	// the elapsed time down and storing at now+TTL silently extends validity.
+	expires := receivedAt.Add(time.Duration(dnsMessageCacheTTL(adjusted)) * time.Second)
+	lifetimes.mu.Lock()
+	defer lifetimes.mu.Unlock()
+	if previous, ok := lifetimes.expires[original]; ok && previous.Before(expires) {
+		expires = previous
+	}
+	if previous, ok := lifetimes.expires[answer]; ok && previous.Before(expires) {
+		expires = previous
+	}
+	if lifetimes.expires == nil {
+		lifetimes.expires = make(map[*D.Msg]time.Time)
+	}
+	lifetimes.expires[answer] = expires
+	return answer
+}
+
+func dnsAnswerExpires(ctx context.Context, message *D.Msg) time.Time {
+	lifetimes, _ := ctx.Value(dnsAnswerLifetimesKey{}).(*dnsAnswerLifetimes)
+	if lifetimes == nil || message == nil {
+		return time.Time{}
+	}
+	lifetimes.mu.Lock()
+	defer lifetimes.mu.Unlock()
+	return lifetimes.expires[message]
+}
+
+func ageDNSAnswerAt(message *D.Msg, receivedAt, now time.Time) *D.Msg {
+	if message == nil || receivedAt.IsZero() || !now.After(receivedAt) {
+		return message
+	}
+	elapsed := uint64(now.Sub(receivedAt) / time.Second)
+	if elapsed == 0 {
+		return message
+	}
+	for _, records := range [][]D.RR{message.Answer, message.Ns, message.Extra} {
+		for _, rr := range records {
+			// TSIG and SIG(0) authenticate the whole transaction, including
+			// ordinary record TTLs. RRSIG instead permits ordinary TTL aging
+			// while its signed OrigTtl and signature fields remain unchanged.
+			if rr.Header().Rrtype == D.TypeTSIG {
+				return message
+			}
+			if signature, ok := rr.(*D.SIG); ok && signature.TypeCovered == 0 {
+				return message
+			}
+		}
+	}
+	answer := message.Copy()
+	for _, records := range [][]D.RR{answer.Answer, answer.Ns, answer.Extra} {
+		for _, rr := range records {
+			header := rr.Header()
+			if header.Rrtype == D.TypeOPT {
+				continue
+			}
+			if elapsed >= uint64(header.Ttl) {
+				header.Ttl = 0
+			} else {
+				header.Ttl -= uint32(elapsed)
+			}
+		}
+	}
+	return answer
 }
 
 // getMsgFromCache returns a cached dns message if it exists, otherwise returns nil.
@@ -58,6 +215,19 @@ func getMsgFromCache(c dnsCache, key string) (*D.Msg, time.Time, bool) {
 // putMsgToCache puts a dns message into the cache.
 // the msg is copied before being stored in the cache, so it can be modified without affecting the original msg.
 func putMsgToCache(c dnsCache, key string, q D.Question, msg *D.Msg) {
+	putMsgToCacheWithExpiry(c, key, q, msg, time.Time{})
+}
+
+func dnsMessageCacheTTL(msg *D.Msg) uint32 {
+	if msg.Rcode == D.RcodeServerFailure {
+		// [...] a resolver MAY cache a server failure response.
+		// If it does so it MUST NOT cache it for longer than five (5) minutes [...]
+		return serverFailureCacheTTL
+	}
+	return minimalTTL(lo.Concat(msg.Answer, msg.Ns, msg.Extra))
+}
+
+func putMsgToCacheWithExpiry(c dnsCache, key string, q D.Question, msg *D.Msg, expires time.Time) {
 	// skip dns cache for acme challenge
 	if q.Qtype == D.TypeTXT && strings.HasPrefix(q.Name, "_acme-challenge.") {
 		log.Debugln("[DNS] dns cache ignored because of acme challenge for: %s", q.Name)
@@ -71,15 +241,9 @@ func putMsgToCache(c dnsCache, key string, q D.Question, msg *D.Msg) {
 		return rr.Header().Rrtype != D.TypeOPT
 	})
 
-	var ttl uint32
-	if msg.Rcode == D.RcodeServerFailure {
-		// [...] a resolver MAY cache a server failure response.
-		// If it does so it MUST NOT cache it for longer than five (5) minutes [...]
-		ttl = serverFailureCacheTTL
-	} else {
-		ttl = minimalTTL(lo.Concat(msg.Answer, msg.Ns, msg.Extra))
-	}
-	if ttl == 0 {
+	ttl := dnsMessageCacheTTL(msg)
+	now := time.Now()
+	if ttl == 0 || (!expires.IsZero() && !expires.After(now)) {
 		if msg.Rcode == D.RcodeSuccess || msg.Rcode == D.RcodeNameError {
 			// A successful fresh answer can deliberately be uncacheable (for
 			// example a transient dual-stack preference). It supersedes any
@@ -89,23 +253,21 @@ func putMsgToCache(c dnsCache, key string, q D.Question, msg *D.Msg) {
 		return
 	}
 
-	c.SetWithExpire(key, msg, time.Now().Add(time.Duration(ttl)*time.Second))
+	remainingExpires := now.Add(time.Duration(ttl) * time.Second)
+	if expires.IsZero() || remainingExpires.Before(expires) {
+		expires = remainingExpires
+	}
+	c.SetWithExpire(key, msg, expires)
 }
 
 func setMsgTTL(msg *D.Msg, ttl uint32) {
-	for _, answer := range msg.Answer {
-		answer.Header().Ttl = ttl
-	}
-
-	for _, ns := range msg.Ns {
-		ns.Header().Ttl = ttl
-	}
-
-	for _, extra := range msg.Extra {
-		if extra.Header().Rrtype == D.TypeOPT { // TTL section in OPT is the extended RCODE and flags (RFC 6891), not real TTL value
-			continue
+	for _, records := range [][]D.RR{msg.Answer, msg.Ns, msg.Extra} {
+		for _, rr := range records {
+			if rr.Header().Rrtype == D.TypeOPT { // RFC 6891: EDNS control bits are not a TTL.
+				continue
+			}
+			rr.Header().Ttl = ttl
 		}
-		extra.Header().Ttl = ttl
 	}
 }
 
@@ -435,6 +597,11 @@ func batchExchange(ctx context.Context, clients []dnsClient, m *D.Msg) (msg *D.M
 				log.Debugln("[DNS] resolve %s %s from %s", domain, qTypeStr, client.Address())
 			}
 			m, err := client.ExchangeContext(ctx, m)
+			if err == nil {
+				// Even an unoptimized fallback can arrive early and wait for
+				// main selection. Its lifetime starts here, not when selected.
+				recordDNSAnswerReceived(ctx, m, time.Now())
+			}
 			if err != nil {
 				return nil, err
 			} else if cache && (m.Rcode == D.RcodeServerFailure || m.Rcode == D.RcodeRefused) {

@@ -85,7 +85,7 @@ jobs:
           bash scripts/ci-check.sh test
           revision=$(git rev-list --first-parent --count "$(cat DNS_RELEASE_BASE)"..HEAD)
           revision=$((revision + 1)) # candidate is committed after this step
-          candidate_version="${UPSTREAM_TAG}-dns.${revision}"
+          candidate_version="${UPSTREAM_TAG}-dns-optimized-${revision}"
           bash scripts/ci-check.sh build amd64 "$RUNNER_TEMP/sync-amd64" "$candidate_version" "$(date -u +%FT%TZ)"
           bash scripts/ci-check.sh build arm64 "$RUNNER_TEMP/sync-arm64" "$candidate_version" "$(date -u +%FT%TZ)"
       - name: Commit and push the tested merge
