@@ -53,6 +53,11 @@ func (p *DNSRoutingPlan) nativeDestination(ctx context.Context, network, addr st
 		}
 		metadata.DstIP = address.Unmap()
 	}
+	// Bootstrap can complete concurrently with cancellation. Do not begin an
+	// outbound operation just because that lookup returned a valid address.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !(metadata.DstIP.IsGlobalUnicast() || metadata.DstIP.IsLoopback() || metadata.DstIP.IsLinkLocalUnicast()) {
 		return nil, errors.New("native DNS requires a unicast resolver address")
 	}

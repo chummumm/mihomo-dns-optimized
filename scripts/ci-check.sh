@@ -20,6 +20,13 @@ case "${1:-test}" in
       ./listener/sing_tun/... ./tunnel/... ./rules/logic/... ./rules/provider/... \
       ./config/... ./hub/route/... ./hub/executor/... \
       -run 'DNSRouting|DNSRuleRouting|DNSProxy|DNSDrop|DNSDirectProbe|DNSOptimization|SpeedCheck|DualStack|CacheControl|ARCDelete|DNSPerf'
+    # A single green rerun cannot validate detached HTTP/2 dial shutdown.
+    # Repeat the lifecycle barriers with different Go scheduler parallelism.
+    for procs in 1 4; do
+      GOMAXPROCS="$procs" CGO_ENABLED=1 go test -race -tags with_gvisor \
+        -count=50 -timeout=5m ./dns ./tunnel \
+        -run 'DNSRuleRoutingNative(CloseDuringEncryptedConstruction|H2CloseBeforeLateDialReturns|DashboardCloseDoesNotRetry)$|DNSRoutingNativeCanceledBootstrapDoesNotDial$|DNSProxyCanceledBootstrapDoesNotExchange$|DNSProxyCanceledLateSocketNeverWrites$'
+    done
     ;;
   build)
     target=${2:?release target required (amd64/arm64 aliases remain supported)}

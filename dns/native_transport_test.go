@@ -168,7 +168,9 @@ func TestDNSRuleRoutingNativeDashboardCloseDoesNotRetry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			flightKey := r.cacheControl.FlightKey(ctx, dnsCacheKey(prepared, query.Question[0]))
+			// Use the prepared routing context: the in-flight identity includes
+			// its source port even when the completed-answer cache shares ports.
+			flightKey := r.cacheControl.FlightKey(prepared, r.cacheKey(prepared, query))
 			result := make(chan error, 1)
 			go func() { _, err := r.ExchangeContext(ctx, query); result <- err }()
 			seen()
@@ -219,7 +221,9 @@ func TestDNSRuleRoutingNativeDashboardCloseDoesNotRetry(t *testing.T) {
 type nativeLateDialOutbound struct {
 	*encryptedRoutingOutbound
 	started, canceled, release chan struct{}
-	once                       sync.Once
+	resourceClosed             chan struct{}
+	once, closeOnce            sync.Once
+	entered                    atomic.Int32
 }
 
 func (a *nativeLateDialOutbound) gate(ctx context.Context) {
@@ -232,14 +236,50 @@ func (a *nativeLateDialOutbound) gate(ctx context.Context) {
 }
 
 func (a *nativeLateDialOutbound) DialContext(ctx context.Context, md *C.Metadata) (C.Conn, error) {
+	a.entered.Add(1) // Count invocation, not eventual completion after cancellation.
 	a.gate(ctx)
 	// Deliberately emulate an adapter which completes a dial after cancellation.
-	return a.encryptedRoutingOutbound.DialContext(context.Background(), md)
+	conn, err := a.encryptedRoutingOutbound.DialContext(context.Background(), md)
+	if err != nil {
+		return nil, err
+	}
+	return &nativeLateTCPConn{Conn: conn, notify: a.notifyClosed}, nil
 }
 
 func (a *nativeLateDialOutbound) ListenPacketContext(ctx context.Context, md *C.Metadata) (C.PacketConn, error) {
+	a.entered.Add(1)
 	a.gate(ctx)
-	return a.encryptedRoutingOutbound.ListenPacketContext(context.Background(), md)
+	conn, err := a.encryptedRoutingOutbound.ListenPacketContext(context.Background(), md)
+	if err != nil {
+		return nil, err
+	}
+	return &nativeLatePacketConn{PacketConn: conn, notify: a.notifyClosed}, nil
+}
+
+func (a *nativeLateDialOutbound) notifyClosed() {
+	a.closeOnce.Do(func() { close(a.resourceClosed) })
+}
+
+type nativeLateTCPConn struct {
+	C.Conn
+	notify func()
+}
+
+func (c *nativeLateTCPConn) Close() error {
+	err := c.Conn.Close()
+	c.notify()
+	return err
+}
+
+type nativeLatePacketConn struct {
+	C.PacketConn
+	notify func()
+}
+
+func (c *nativeLatePacketConn) Close() error {
+	err := c.PacketConn.Close()
+	c.notify()
+	return err
 }
 
 func TestDNSRuleRoutingNativeCloseDuringEncryptedConstruction(t *testing.T) {
@@ -248,7 +288,7 @@ func TestDNSRuleRoutingNativeCloseDuringEncryptedConstruction(t *testing.T) {
 			routingTestEnable(t)
 			server := newEncryptedRoutingServer(t, protocol, true, nil)
 			leaf := &nativeLateDialOutbound{encryptedRoutingOutbound: newEncryptedRoutingOutbound("late-" + protocol),
-				started: make(chan struct{}), canceled: make(chan struct{}), release: make(chan struct{})}
+				started: make(chan struct{}), canceled: make(chan struct{}), release: make(chan struct{}), resourceClosed: make(chan struct{})}
 			var release sync.Once
 			unblock := func() { release.Do(func() { close(leaf.release) }) }
 			t.Cleanup(unblock)
@@ -295,13 +335,99 @@ func TestDNSRuleRoutingNativeCloseDuringEncryptedConstruction(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("late construction did not unwind")
 			}
-			calls := leaf.count()
+			// HTTP may finish a request and Close before an old DialContext
+			// callback unwinds. Its completion is not a new dial invocation.
+			// Explicitly wait for the late socket to be disposed of as well.
+			select {
+			case <-leaf.resourceClosed:
+			case <-time.After(time.Second):
+				t.Fatal("late connection was not closed")
+			}
+			if calls := leaf.entered.Load(); calls != 1 {
+				t.Fatalf("unexpected dial invocation count after close: %d", calls)
+			}
 			if _, err := scoped.ExchangeContext(context.Background(), routingTestQuery("closed.example", 82)); !errors.Is(err, net.ErrClosed) {
 				t.Fatalf("closed scoped transport was reusable: %v", err)
 			}
-			if leaf.count() != calls {
+			if leaf.entered.Load() != 1 {
 				t.Fatal("closed client dialed again")
 			}
 		})
+	}
+}
+
+// Force the HTTP/2 ordering which the original test only hit intermittently:
+// Close and the request return while an old, canceled adapter call is still
+// blocked. Completing that old call must close its socket, not count as redial.
+func TestDNSRuleRoutingNativeH2CloseBeforeLateDialReturns(t *testing.T) {
+	routingTestEnable(t)
+	server := newEncryptedRoutingServer(t, "h2", true, nil)
+	leaf := &nativeLateDialOutbound{
+		encryptedRoutingOutbound: newEncryptedRoutingOutbound("late-h2-barrier"),
+		started:                  make(chan struct{}), canceled: make(chan struct{}),
+		release: make(chan struct{}), resourceClosed: make(chan struct{}),
+	}
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(leaf.release) }) }
+	r := NewResolver(Config{RuleRouting: true, Main: []NameServer{server.ns}}).Resolver
+	t.Cleanup(func() { unblock(); r.Close() })
+	result := make(chan error, 1)
+	go func() {
+		_, err := encryptedRoutingRawExchange(r, routingTestContext(leaf, routingTestOrigin()), routingTestQuery("late-h2.example", 83))
+		result <- err
+	}()
+	wait := func(ch <-chan struct{}, what string) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal(what)
+		}
+	}
+	wait(leaf.started, "initial dial did not start")
+	state, _, _, _ := nativeClientDetails(r.main[0])
+	state.mu.Lock()
+	pool := state.pool
+	state.mu.Unlock()
+	pool.mu.Lock()
+	var scoped dnsClient
+	for _, entry := range pool.entries {
+		scoped = entry.client
+	}
+	pool.mu.Unlock()
+	if scoped == nil {
+		t.Fatal("missing scoped HTTP/2 client")
+	}
+	closed := make(chan struct{})
+	go func() { r.Close(); close(closed) }()
+	wait(leaf.canceled, "close did not cancel the detached HTTP dial")
+	// Do not unblock the old adapter until both caller-visible operations end.
+	wait(closed, "HTTP/2 Close waited for the deliberately uncooperative adapter")
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("canceled request succeeded")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("HTTP/2 request failed to observe cancellation")
+	}
+	if leaf.entered.Load() != 1 || leaf.count() != 0 {
+		t.Fatal("test failed to isolate an in-flight dial from its completion")
+	}
+	if _, err := scoped.ExchangeContext(context.Background(), routingTestQuery("after-close.example", 84)); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("closed client accepted new work: %v", err)
+	}
+	if leaf.entered.Load() != 1 {
+		t.Fatal("closed client started a new adapter call")
+	}
+	unblock()
+	wait(leaf.resourceClosed, "late connection leaked after request cancellation")
+	if leaf.entered.Load() != 1 || leaf.count() != 1 {
+		t.Fatal("expected exactly one old dial to finish and be closed")
+	}
+	select {
+	case query := <-server.seen:
+		t.Fatalf("closed transport sent a DNS query: %+v", query)
+	default:
 	}
 }

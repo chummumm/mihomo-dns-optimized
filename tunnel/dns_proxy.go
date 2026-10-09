@@ -125,6 +125,11 @@ func exchangeDNSProxy(ctx context.Context, wire []byte, resolver *C.Metadata, se
 	destination.DNSMode = C.DNSNormal
 	destination.SpecialProxy = ""
 	destination.SpecialRules = ""
+	// A resolver-host bootstrap may return just after this query was canceled.
+	// Check before invoking the actual exchange, not only before bootstrap.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	response, err := exchange(ctx, wire, destination, route)
 	if err != nil {
 		return nil, err
@@ -181,9 +186,16 @@ func exchangeDNSProxyWire(ctx context.Context, query []byte, resolver *C.Metadat
 	if err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if resolver.NetWork == C.TCP {
 		conn, err := route.proxy.DialContext(ctx, resolver)
 		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			_ = conn.Close()
 			return nil, err
 		}
 		appendDNSProxyGroups(conn, route.groups)
@@ -200,7 +212,7 @@ func exchangeDNSProxyWire(ctx context.Context, query []byte, resolver *C.Metadat
 		stop := closeDNSProxyOnCancel(ctx, normalClose)
 		defer stop()
 		frame := make([]byte, len(query)+2)
-		binary.BigEndian.PutUint16(frame, uint16(len(query)))
+		binary.BigEndian.PutUint16(frame[:2], uint16(len(query)))
 		copy(frame[2:], query)
 		if err := writeDNSProxyFrame(conn, frame); err != nil {
 			return nil, err
@@ -221,6 +233,10 @@ func exchangeDNSProxyWire(ctx context.Context, query []byte, resolver *C.Metadat
 	}
 	conn, err := route.proxy.ListenPacketContext(ctx, resolver)
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		_ = conn.Close()
 		return nil, err
 	}
 	appendDNSProxyGroups(conn, route.groups)
