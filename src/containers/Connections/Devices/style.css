@@ -41,6 +41,15 @@
     color: var(--on-ink);
 }
 
+.connections-devices-item[aria-hidden="true"] {
+    pointer-events: none;
+}
+
+/* Keep the fading button's exact width without exposing its former count. */
+.connections-devices-item[aria-hidden="true"] .device-count {
+    visibility: hidden;
+}
+
 /* The selection travels between sources. */
 .device-highlight {
     position: absolute;

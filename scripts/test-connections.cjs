@@ -100,12 +100,30 @@ async function main() {
     const waitCount = count => page.waitForFunction(count => document.querySelector('.connections-devices-item')?.textContent.trim() === 'All (' + count + ')', count)
     const waitRows = count => page.waitForFunction(count => Number(document.querySelector('[role="table"]')?.getAttribute('aria-rowcount')) === count + 1, count)
     async function assertSourceCounts(label) {
-        const counts = await page.locator('.connections-devices-item .device-count').evaluateAll(items => items.map(item => Number(item.textContent.replace(/[()\s]/g, ''))))
-        assert.equal(counts.slice(1).reduce((sum, count) => sum + count, 0), counts[0], label + ': visible source counts partition the current All count without exiting ghost groups')
-        assert.ok(counts.slice(1).every(count => count > 0), label + ': zero-count source buttons are absent')
+        const { counts, exiting } = await page.evaluate(() => ({
+            counts: [...document.querySelectorAll('.connections-devices-item:not([aria-hidden="true"]) .device-count')].map(item => Number(item.textContent.replace(/[()\s]/g, ''))),
+            exiting: [...document.querySelectorAll('.connections-devices-item[aria-hidden="true"]')].map(button => ({
+                label: button.querySelector('.device-label').textContent,
+                disabled: button.disabled, tabIndex: button.tabIndex,
+                selected: button.getAttribute('aria-pressed'),
+                highlight: button.querySelector('.device-highlight') !== null,
+                pointerEvents: getComputedStyle(button).pointerEvents,
+                countVisibility: getComputedStyle(button.querySelector('.device-count')).visibility,
+            })),
+        }))
+        assert.equal(counts.slice(1).reduce((sum, count) => sum + count, 0), counts[0], label + ': active source counts partition the current All count')
+        assert.ok(counts.slice(1).every(count => count > 0), label + ': zero-count source buttons are absent from active filters')
+        for (const button of exiting) {
+            assert.equal(button.disabled, true, label + ': exiting button is disabled: ' + button.label)
+            assert.equal(button.tabIndex, -1, label + ': exiting button leaves keyboard navigation: ' + button.label)
+            assert.equal(button.selected, 'false', label + ': exiting button is not selected: ' + button.label)
+            assert.equal(button.highlight, false, label + ': exiting button releases the selection highlight: ' + button.label)
+            assert.equal(button.pointerEvents, 'none', label + ': exiting button ignores pointers: ' + button.label)
+            assert.equal(button.countVisibility, 'hidden', label + ': fading label never displays its old count: ' + button.label)
+        }
     }
     async function assertPinnedInternal(total, count, label) {
-        const buttons = page.locator('.connections-source-filters > button')
+        const buttons = page.locator('.connections-source-filters > button:not([aria-hidden="true"])')
         const labels = (await buttons.allTextContents()).map(text => text.trim())
         assert.equal(labels[0], 'All (' + total + ')', label + ': All stays first')
         if (count > 0) {
@@ -146,7 +164,7 @@ async function main() {
                 first: first?.dataset.connectionId, last: last?.dataset.connectionId,
                 rendered: rows.length,
                 tableRows: Number(document.querySelector('[role="table"]').getAttribute('aria-rowcount')) - 1,
-                devices: [...document.querySelectorAll('.connections-devices-item')].map(item => item.textContent.trim()),
+                devices: [...document.querySelectorAll('.connections-devices-item:not([aria-hidden="true"])')].map(item => item.textContent.trim()),
                 stickyLeft: first?.querySelector('.fixed')?.getBoundingClientRect().left,
                 scrollLeft: rect.left,
                 lastBottom: last?.getBoundingClientRect().bottom,
@@ -242,13 +260,13 @@ async function main() {
         ...item,
         metadata: { ...item.metadata, sourceIP: `2001:db8:1234:5678:9abc:def0:1234:111${index + 1}` },
     })))
-    await page.waitForFunction(() => document.querySelectorAll('.connections-devices-item').length === 6)
+    await page.waitForFunction(() => document.querySelectorAll('.connections-devices-item:not([aria-hidden="true"])').length === 6)
     await waitTableSize()
     const wrapped = await position('narrow_device_wrap')
     stillBottom(wrapped, 'device wrapping during refresh')
     assert.ok(wrapped.devicesHeight > narrow.devicesHeight, 'device controls wrap to another line')
     await send(beforeNarrow)
-    await page.waitForFunction(() => document.querySelectorAll('.connections-devices-item').length === 3)
+    await page.waitForFunction(() => document.querySelectorAll('.connections-devices-item:not([aria-hidden="true"])').length === 3)
     await waitTableSize()
     stillBottom(await position('narrow_device_unwrap'), 'device unwrapping during refresh')
     await page.setViewportSize({ width: 1440, height: 900 })
@@ -261,7 +279,7 @@ async function main() {
     await waitRows(2)
     await send([connection(20001)])
     await waitCount(1); await waitRows(1)
-    assert.equal(await page.getByRole('button', { name: /^192\.0\.2\.101 \(/ }).count(), 0, 'a disappeared device is removed without an exit-animation delay')
+    assert.equal(await page.getByRole('button', { name: /^192\.0\.2\.101 \(/ }).count(), 0, 'a disappearing device leaves active filters immediately while its label fades')
     assert.equal(await page.getByRole('button', { name: 'All (1)', exact: true }).getAttribute('aria-pressed'), 'true', 'a removed selected device falls back to All')
     await send(null)
     await waitCount(0); await waitRows(0)
@@ -418,6 +436,103 @@ async function main() {
     await assertPinnedInternal(0, 0, 'cleared mobile history')
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, 'mobile page has no horizontal body overflow')
     observations.push({ label: 'mobile_connections', width: 390, internalRows: 200, visibleNavigation: true, boundedDrawer: true, processColumnKept: true })
+
+    for (const reducedMotion of ['no-preference', 'reduce']) {
+        const base = connection(51000)
+        base.metadata.sourceIP = '192.0.2.10'
+        const device = connection(51001)
+        device.metadata.sourceIP = '192.0.2.20'
+        const internal = connection(51002)
+        internal.dns = true; internal.metadata.type = 'Inner'; internal.metadata.sourceIP = ''
+        connections = [base, device, internal]
+        await page.emulateMedia({ reducedMotion })
+        await page.setViewportSize({ width: 900, height: 700 })
+        await page.reload({ waitUntil: 'networkidle' })
+        await waitCount(3); await waitRows(3)
+        await assertPinnedInternal(3, 1, reducedMotion + ': animation fixture')
+        const internalButton = page.locator('[data-source-key="internal"]')
+        const deviceButton = page.locator('[data-source-key="device:192.0.2.20"]')
+        await internalButton.click()
+        await waitRows(1)
+        const previousInternal = await internalButton.elementHandle()
+        const previousDevice = await deviceButton.elementHandle()
+        const widths = await page.evaluate(({ internal, device }) => [internal, device].map(button => button.querySelector('.device-count').offsetWidth), { internal: previousInternal, device: previousDevice })
+        await send([base])
+        await waitCount(1); await waitRows(1)
+        const exit = await page.evaluate(async ({ internal, device }) => {
+            const buttons = [internal, device]
+            const before = buttons.map(button => {
+                button.click()
+                button.focus()
+                return {
+                    connected: button.isConnected,
+                    ariaHidden: button.getAttribute('aria-hidden'),
+                    disabled: button.disabled,
+                    focused: document.activeElement === button,
+                    countVisibility: getComputedStyle(button.querySelector('.device-count')).visibility,
+                    countWidth: button.querySelector('.device-count').offsetWidth,
+                    opacity: Number(getComputedStyle(button).opacity),
+                }
+            })
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+            return { before, after: buttons.map(button => ({ connected: button.isConnected, opacity: Number(getComputedStyle(button).opacity) })) }
+        }, { internal: previousInternal, device: previousDevice })
+        for (let index = 0; index < 2; index++) {
+            const before = exit.before[index]
+            const after = exit.after[index]
+            assert.equal(before.connected, true, reducedMotion + ': exiting button remains briefly for its animation')
+            assert.equal(before.ariaHidden, 'true', reducedMotion + ': exiting button immediately leaves accessible source filters')
+            assert.equal(before.disabled, true, reducedMotion + ': exiting button ignores programmatic clicks')
+            assert.equal(before.focused, false, reducedMotion + ': exiting button cannot receive keyboard focus')
+            assert.equal(before.countVisibility, 'hidden', reducedMotion + ': no stale numeric count is drawn during the fade')
+            assert.equal(before.countWidth, widths[index], reducedMotion + ': hiding count preserves the exact fade width')
+            assert.equal(after.connected, true, reducedMotion + ': quick return is tested before exit completion')
+            if (reducedMotion === 'no-preference') {
+                assert.ok(before.opacity > 0 && before.opacity < 1 && after.opacity < before.opacity, 'normal-motion source opacity actually fades across animation frames')
+            }
+        }
+        assert.equal(await page.getByRole('button', { name: 'All (1)', exact: true }).getAttribute('aria-pressed'), 'true', reducedMotion + ': disabled old source cannot steal selection from All')
+        await send([
+            base, device, { ...device, id: 'returned-device' },
+            internal, { ...internal, id: 'returned-internal' },
+        ])
+        await waitCount(5); await waitRows(5)
+        const returned = await page.evaluate(({ internal, device }) => [
+            { previous: internal, key: 'internal' },
+            { previous: device, key: 'device:192.0.2.20' },
+        ].map(({ previous, key }) => {
+            const buttons = document.querySelectorAll('[data-source-key="' + key + '"]')
+            const button = buttons[0]
+            return {
+                count: buttons.length, sameNode: button === previous,
+                disabled: button.disabled, ariaHidden: button.getAttribute('aria-hidden'),
+                tabIndex: button.tabIndex, text: button.textContent.trim(),
+                countVisibility: getComputedStyle(button.querySelector('.device-count')).visibility,
+            }
+        }), { internal: previousInternal, device: previousDevice })
+        for (let index = 0; index < 2; index++) {
+            const button = returned[index]
+            assert.equal(button.count, 1, reducedMotion + ': rapid reappearance does not duplicate the source button')
+            assert.equal(button.sameNode, true, reducedMotion + ': returning source reuses its still-exiting keyed button')
+            assert.equal(button.disabled, false, reducedMotion + ': returning source becomes interactive again')
+            assert.equal(button.ariaHidden, null, reducedMotion + ': returning source re-enters accessible filters')
+            assert.equal(button.tabIndex, 0, reducedMotion + ': returning source re-enters keyboard navigation')
+            assert.equal(button.countVisibility, 'visible', reducedMotion + ': returning source displays its current count')
+            assert.equal(button.text, index === 0 ? 'mihomo (2)' : '192.0.2.20 (2)', reducedMotion + ': rapid return uses fresh counts')
+        }
+        await assertPinnedInternal(5, 2, reducedMotion + ': rapid return remains pinned')
+        assert.equal(await page.getByRole('button', { name: 'All (5)', exact: true }).getAttribute('aria-pressed'), 'true', reducedMotion + ': rapid return preserves All selection')
+        await deviceButton.click()
+        await waitRows(2)
+        await send([base])
+        await waitCount(1); await waitRows(1)
+        await page.waitForFunction(() => !document.querySelector('[data-source-key="internal"], [data-source-key="device:192.0.2.20"]'))
+        await assertPinnedInternal(1, 0, reducedMotion + ': finished exits are unmounted')
+        assert.equal(await page.getByRole('button', { name: 'All (1)', exact: true }).getAttribute('aria-pressed'), 'true', reducedMotion + ': removed selected normal source falls back to All')
+        observations.push({ label: 'source_exit_animation', reducedMotion, exit, rapidReturn: returned, activeCountsStayAccurate: true, finishedExitsUnmounted: true })
+        await previousInternal.dispose(); await previousDevice.dispose()
+    }
+
     assert.deepEqual(pageErrors, [])
     assert.ok(externalRequests.every(request => request.type === 'font' && request.url === 'http://at.alicdn.com/t/font_841708_ok9czskbhel.ttf'), 'only the inherited icon font may attempt an external request; all external requests are blocked')
     console.log(JSON.stringify({ passed: true, browser: browser.version(), observations, pageErrors, blockedExternalRequests: externalRequests }, null, 2))

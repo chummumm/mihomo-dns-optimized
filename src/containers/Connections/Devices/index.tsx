@@ -1,6 +1,6 @@
 import classnames from 'classnames'
-import { LayoutGroup, motion } from 'motion/react'
-import { useId, useMemo } from 'react'
+import { AnimatePresence, LayoutGroup, motion, useIsPresent } from 'motion/react'
+import { forwardRef, useId, useMemo } from 'react'
 
 import { springs } from '@components'
 import { type BaseComponentProps } from '@models'
@@ -17,6 +17,40 @@ interface DevicesProps extends BaseComponentProps {
     internalCount: number
     onChange?: (label: string) => void
 }
+
+interface SourceButtonProps {
+    sourceKey: string
+    label: string
+    count: number
+    selected: boolean
+    onChange?: (key: string) => void
+}
+
+const SourceButton = forwardRef<HTMLButtonElement, SourceButtonProps>(function SourceButton (props, ref) {
+    const isPresent = useIsPresent()
+    const selected = isPresent && props.selected
+
+    return (
+        <motion.button
+            ref={ref}
+            type="button"
+            data-source-key={props.sourceKey}
+            layout="position"
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.9 }}
+            transition={springs.reflow}
+            aria-hidden={!isPresent || undefined}
+            aria-pressed={selected}
+            disabled={!isPresent}
+            tabIndex={isPresent ? undefined : -1}
+            className={classnames('connections-devices-item', { selected })}
+            onClick={() => { if (isPresent) props.onChange?.(props.sourceKey) }}>
+            {selected && <motion.span className="device-highlight" layoutId="device-highlight" transition={springs.snap} />}
+            <span className="device-label">{ props.label }</span> <span className="device-count">({ props.count })</span>
+        </motion.button>
+    )
+})
 
 export function Devices (props: DevicesProps) {
     const { translation } = useI18n()
@@ -37,29 +71,16 @@ export function Devices (props: DevicesProps) {
                     {props.selected === ALL_CONNECTIONS && <motion.span className="device-highlight" layoutId="device-highlight" transition={springs.snap} />}
                     <span className="device-label">{ t('filter.all') }</span> <span className="device-count">({ props.total })</span>
                 </button>
-                {props.internalCount > 0 && <button type="button" aria-pressed={props.selected === INTERNAL_CONNECTIONS} className={classnames('connections-devices-item', { selected: props.selected === INTERNAL_CONNECTIONS })} onClick={() => props.onChange?.(INTERNAL_CONNECTIONS)}>
-                    {props.selected === INTERNAL_CONNECTIONS && <motion.span className="device-highlight" layoutId="device-highlight" transition={springs.snap} />}
-                    <span className="device-label">mihomo</span> <span className="device-count">({ props.internalCount })</span>
-                </button>}
-                {
-                    props.devices.map(
-                        device => device.key !== INTERNAL_CONNECTIONS && (
-                            <motion.button
-                                type="button"
-                                key={device.key}
-                                layout="position"
-                                initial={{ opacity: 0, scale: 0.9 }}
-                                animate={{ opacity: 1, scale: 1 }}
-                                transition={springs.reflow}
-                                aria-pressed={props.selected === device.key}
-                                className={classnames('connections-devices-item', { selected: props.selected === device.key })}
-                                onClick={() => props.onChange?.(device.key)}>
-                                {props.selected === device.key && <motion.span className="device-highlight" layoutId="device-highlight" transition={springs.snap} />}
-                                <span className="device-label">{ label(device) }</span> <span className="device-count">({ device.number })</span>
-                            </motion.button>
-                        ),
-                    )
-                }
+                <AnimatePresence initial={false} mode="popLayout">
+                    {props.internalCount > 0 && <SourceButton key={INTERNAL_CONNECTIONS} sourceKey={INTERNAL_CONNECTIONS} label="mihomo" count={props.internalCount} selected={props.selected === INTERNAL_CONNECTIONS} onChange={props.onChange} />}
+                    {
+                        props.devices.map(
+                            device => device.key !== INTERNAL_CONNECTIONS && (
+                                <SourceButton key={device.key} sourceKey={device.key} label={label(device)} count={device.number} selected={props.selected === device.key} onChange={props.onChange} />
+                            ),
+                        )
+                    }
+                </AnimatePresence>
             </div>
         </LayoutGroup>
     )
