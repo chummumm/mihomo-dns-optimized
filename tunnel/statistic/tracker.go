@@ -23,6 +23,7 @@ type Tracker interface {
 
 type TrackerInfo struct {
 	UUID          uuid.UUID    `json:"id"`
+	DNS           bool         `json:"dns,omitempty"`
 	Metadata      *C.Metadata  `json:"metadata"`
 	UploadTotal   atomic.Int64 `json:"upload"`
 	DownloadTotal atomic.Int64 `json:"download"`
@@ -117,6 +118,16 @@ func (tt *tcpTracker) Upstream() any {
 }
 
 func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager bool) *tcpTracker {
+	return newTCPTracker(conn, manager, metadata, rule, uploadTotal, downloadTotal, pushToManager, false)
+}
+
+// NewDNSTCPTracker identifies DNS work independently of its original inbound
+// type or destination port. The marker is immutable once the manager sees it.
+func NewDNSTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager bool) *tcpTracker {
+	return newTCPTracker(conn, manager, metadata, rule, uploadTotal, downloadTotal, pushToManager, true)
+}
+
+func newTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager, dns bool) *tcpTracker {
 	metadata.RemoteDst = conn.RemoteDestination()
 
 	t := &tcpTracker{
@@ -124,6 +135,7 @@ func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.R
 		manager: manager,
 		TrackerInfo: &TrackerInfo{
 			UUID:          utils.NewUUIDV4(),
+			DNS:           dns,
 			Start:         time.Now(),
 			Metadata:      metadata,
 			Chain:         conn.Chains(),
@@ -209,6 +221,15 @@ func (ut *udpTracker) Upstream() any {
 }
 
 func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager bool) *udpTracker {
+	return newUDPTracker(conn, manager, metadata, rule, uploadTotal, downloadTotal, pushToManager, false)
+}
+
+// NewDNSUDPTracker marks a resolver's UDP work before registering the tracker.
+func NewDNSUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager bool) *udpTracker {
+	return newUDPTracker(conn, manager, metadata, rule, uploadTotal, downloadTotal, pushToManager, true)
+}
+
+func newUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager, dns bool) *udpTracker {
 	metadata.RemoteDst = conn.RemoteDestination()
 
 	ut := &udpTracker{
@@ -216,6 +237,7 @@ func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, ru
 		manager:    manager,
 		TrackerInfo: &TrackerInfo{
 			UUID:          utils.NewUUIDV4(),
+			DNS:           dns,
 			Start:         time.Now(),
 			Metadata:      metadata,
 			Chain:         conn.Chains(),

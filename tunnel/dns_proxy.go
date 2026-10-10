@@ -191,7 +191,7 @@ func exchangeDNSProxyWire(ctx context.Context, query []byte, resolver *C.Metadat
 		if closeState != nil {
 			conn = &dnsQueryNotifyConn{Conn: conn, state: closeState}
 		}
-		conn = statistic.NewTCPTracker(conn, statistic.DefaultManager, dnsProxyDisplayMetadata(resolver, route.qname), route.rule, 0, 0, true)
+		conn = statistic.NewDNSTCPTracker(conn, statistic.DefaultManager, dnsProxyDisplayMetadata(resolver, route.qname), route.rule, 0, 0, true)
 		normalClose := dnsQueryNormalCloser{close: conn.Close, state: closeState}
 		defer normalClose.Close()
 		if err := conn.SetDeadline(deadline); err != nil {
@@ -232,7 +232,7 @@ func exchangeDNSProxyWire(ctx context.Context, query []byte, resolver *C.Metadat
 	if closeState != nil {
 		conn = &dnsQueryNotifyPacketConn{PacketConn: conn, state: closeState}
 	}
-	conn = statistic.NewUDPTracker(conn, statistic.DefaultManager, dnsProxyDisplayMetadata(resolver, route.qname), route.rule, 0, 0, true)
+	conn = statistic.NewDNSUDPTracker(conn, statistic.DefaultManager, dnsProxyDisplayMetadata(resolver, route.qname), route.rule, 0, 0, true)
 	normalClose := dnsQueryNormalCloser{close: conn.Close, state: closeState}
 	defer normalClose.Close()
 	if err := conn.SetDeadline(deadline); err != nil {

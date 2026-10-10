@@ -135,7 +135,7 @@ func (d *DNSDialer) DialContext(ctx context.Context, network, addr string) (net.
 		}
 		logMetadata(metadata, rule, conn)
 
-		conn = statistic.NewTCPTracker(conn, statistic.DefaultManager, metadata, rule, 0, 0, false)
+		conn = statistic.NewDNSTCPTracker(conn, statistic.DefaultManager, metadata, rule, 0, 0, false)
 
 		return conn, nil
 	} else {
@@ -154,7 +154,7 @@ func (d *DNSDialer) DialContext(ctx context.Context, network, addr string) (net.
 		}
 		logMetadata(metadata, rule, packetConn)
 
-		packetConn = statistic.NewUDPTracker(packetConn, statistic.DefaultManager, metadata, rule, 0, 0, false)
+		packetConn = statistic.NewDNSUDPTracker(packetConn, statistic.DefaultManager, metadata, rule, 0, 0, false)
 
 		return N.NewBindPacketConn(packetConn, metadata.UDPAddr()), nil
 	}
@@ -221,7 +221,7 @@ func (d *DNSDialer) ListenPacket(ctx context.Context, network, addr string) (net
 	}
 	logMetadata(metadata, rule, packetConn)
 
-	packetConn = statistic.NewUDPTracker(packetConn, statistic.DefaultManager, metadata, rule, 0, 0, false)
+	packetConn = statistic.NewDNSUDPTracker(packetConn, statistic.DefaultManager, metadata, rule, 0, 0, false)
 
 	return packetConn, nil
 }

@@ -268,7 +268,7 @@ func exchangeNativeTransport(ctx context.Context, message *D.Msg, dc dnsClient) 
 	stop := context.AfterFunc(pool.lifetime, cancel)
 	defer stop()
 	defer cancel()
-	entry, err := pool.acquire(ctx, route.plan.TransportKey(), func() dnsClient { return cloneNativeClient(dc, route.plan, pool.lifetime) })
+	entry, err := pool.acquire(ctx, route.plan.NativeTransportKey(), func() dnsClient { return cloneNativeClient(dc, route.plan, pool.lifetime) })
 	if err != nil {
 		return nil, err, true
 	}
