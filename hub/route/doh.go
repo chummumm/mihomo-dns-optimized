@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"io"
+	"net"
 
+	"github.com/metacubex/mihomo/component/dnsstats"
 	"github.com/metacubex/mihomo/component/resolver"
 
 	"github.com/metacubex/chi/render"
@@ -49,6 +51,10 @@ func dohHandler(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), resolver.DefaultDNSTimeout)
 	defer cancel()
+	client, _, _ := net.SplitHostPort(r.RemoteAddr)
+	// The HTTP peer is observed without changing the existing DNS routing
+	// context or trusting unconfigured forwarded-client headers.
+	ctx = dnsstats.WithSource(ctx, dnsstats.Source{Client: client, Protocol: "doh", Name: "DoH"})
 
 	dnsData, err = resolver.RelayDnsPacket(ctx, dnsData, dnsData)
 	if err != nil {

@@ -351,6 +351,7 @@ def build(row, output, version, build_time):
             subprocess.run([str(binary), "-t", "-d", temp, "-f", str(ROOT / "packaging/config.yaml")], check=True)
             subprocess.run(["python3", "scripts/test-dns-proxy.py", str(binary)], cwd=ROOT, check=True)
             subprocess.run(["python3", "scripts/test-dns-perf.py", str(binary), "--expect-shared"], cwd=ROOT, check=True)
+            subprocess.run(["python3", "scripts/test-dns-observability.py", str(binary)], cwd=ROOT, check=True)
         built = [write_archive(binary, row, version, output, timestamp)]
         built.extend(package_binary(binary, row, version, output, build_time, commit, upstream))
         assets = []

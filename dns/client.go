@@ -33,13 +33,15 @@ func (c *client) Address() string {
 	return fmt.Sprintf("%s://%s", c.schema, net.JoinHostPort(c.host, c.port))
 }
 
-func (c *client) ExchangeContext(ctx context.Context, m *D.Msg) (*D.Msg, error) {
+func (c *client) ExchangeContext(ctx context.Context, m *D.Msg) (response *D.Msg, err error) {
 	if answer, err, handled := exchangeNativeTransport(ctx, m, c); handled {
 		return answer, err
 	}
 	if route := queryRoute(ctx); route != nil && !c.native.bound && !icontext.DNSBootstrap(ctx) && c.canRouteDNS() {
 		return c.exchangeRouted(ctx, m, route)
 	}
+	attempt := observeDNSUpstream(ctx, c.Address())
+	defer func() { finishDNSUpstream(attempt, response, err) }()
 	network := "udp"
 	if c.schema != "udp" {
 		network = "tcp"

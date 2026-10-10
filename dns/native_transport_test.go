@@ -196,7 +196,7 @@ func TestDNSRuleRoutingNativeDashboardCloseDoesNotRetry(t *testing.T) {
 			}
 			// The old automatic retry is registered before the caller returns.
 			// Joining its key is a deterministic barrier, not a sleep window.
-			barrier := r.group.DoChan(flightKey, func() (*D.Msg, error) { return new(D.Msg), nil })
+			barrier := r.group.DoChan(flightKey, func() (*dnsExchangeResult, error) { return &dnsExchangeResult{Msg: new(D.Msg)}, nil })
 			select {
 			case <-barrier:
 			case <-time.After(time.Second):

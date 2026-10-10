@@ -42,6 +42,7 @@ var _ dnsClient = rcodeClient{}
 func (r rcodeClient) ExchangeContext(ctx context.Context, m *D.Msg) (*D.Msg, error) {
 	m.Response = true
 	m.Rcode = r.rcode
+	markDNSLocalAnswer(ctx, m)
 	return m, nil
 }
 

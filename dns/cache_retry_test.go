@@ -86,7 +86,7 @@ func TestCacheControlForegroundRetryCannotOutliveInvalidation(t *testing.T) {
 			// before returning. Joining that key waits for any registered retry;
 			// when none exists, this harmless barrier runs instead. No sleep or
 			// probabilistic observation window is needed to detect a late dial.
-			barrier := r.group.DoChan(flightKey, func() (*D.Msg, error) { return new(D.Msg), nil })
+			barrier := r.group.DoChan(flightKey, func() (*dnsExchangeResult, error) { return &dnsExchangeResult{Msg: new(D.Msg)}, nil })
 			select {
 			case <-barrier:
 			case <-time.After(time.Second):

@@ -344,7 +344,9 @@ func (c clientWithDisableTypes) ExchangeContext(ctx context.Context, m *D.Msg) (
 		// In fact, DNS requests are not allowed to contain multiple questions:
 		// https://stackoverflow.com/questions/4082081/requesting-a-and-aaaa-records-in-single-dns-query/4083071
 		// so, when we find a question containing the type, we can simply discard the entire dns request.
-		return handleMsgWithEmptyAnswer(m), nil
+		msg = handleMsgWithEmptyAnswer(m)
+		markDNSLocalAnswer(ctx, msg)
+		return msg, nil
 	}
 
 	// do real exchange

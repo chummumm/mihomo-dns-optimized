@@ -149,6 +149,7 @@ type NTP struct {
 type DNS struct {
 	DNSRuleRouting        bool
 	Enable                bool
+	Observability         bool
 	PreferH3              bool
 	IPv6                  bool
 	IPv6Timeout           uint
@@ -228,6 +229,7 @@ type RawCors struct {
 
 type RawDNS struct {
 	Enable                        bool                                `yaml:"enable" json:"enable"`
+	Observability                 *bool                               `yaml:"observability" json:"observability"`
 	PreferH3                      bool                                `yaml:"prefer-h3" json:"prefer-h3"`
 	IPv6                          bool                                `yaml:"ipv6" json:"ipv6"`
 	IPv6Timeout                   uint                                `yaml:"ipv6-timeout" json:"ipv6-timeout"`
@@ -1479,6 +1481,7 @@ func parseDNS(rawCfg *RawConfig, ruleProviders map[string]P.RuleProvider) (*DNS,
 	dnsCfg := &DNS{
 		DNSRuleRouting:    rawCfg.DNSRuleRouting,
 		Enable:            cfg.Enable,
+		Observability:     cfg.Observability == nil || *cfg.Observability,
 		Listen:            cfg.Listen,
 		ListenRoutingMark: cfg.ListenRoutingMark,
 		PreferH3:          cfg.PreferH3,
