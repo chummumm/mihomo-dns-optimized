@@ -24,6 +24,8 @@ import (
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/component/ca"
 	C "github.com/metacubex/mihomo/constant"
+	icontext "github.com/metacubex/mihomo/context"
+	"github.com/metacubex/mihomo/tunnel/statistic"
 	"github.com/metacubex/quic-go"
 	"github.com/metacubex/quic-go/http3"
 	"github.com/metacubex/tls"
@@ -365,6 +367,22 @@ func TestDNSRuleRoutingEncryptedRealTransportReuseAndLeafIsolation(t *testing.T)
 				return seen
 			}
 			one := first(a, "first.example", 41)
+			tracked := false
+			endpoint := netip.MustParseAddrPort(server.address)
+			statistic.DefaultManager.Range(func(tracker statistic.Tracker) bool {
+				info := tracker.Info()
+				if info.Metadata.InName == "DNS-TRANSPORT" && info.Metadata.AddrPort() == endpoint && info.Chain.Last() == a.Name() {
+					tracked = true
+					if !info.DNS {
+						t.Error("encrypted DNS wire connection is missing its explicit DNS display marker")
+					}
+					return false
+				}
+				return true
+			})
+			if !tracked {
+				t.Fatal("encrypted DNS wire connection is absent from the connections API")
+			}
 			wantProtocol := map[string]string{"h2": "HTTP/2.0", "h3": "HTTP/3.0", "tls": "tls", "quic": "doq"}[protocol]
 			if one.protocol != wantProtocol {
 				t.Fatalf("encrypted protocol fell back: got %s, want %s", one.protocol, wantProtocol)
@@ -385,6 +403,97 @@ func TestDNSRuleRoutingEncryptedRealTransportReuseAndLeafIsolation(t *testing.T)
 			}
 			a.assertDestination(t, server.address)
 			b.assertDestination(t, server.address)
+		})
+	}
+}
+
+func TestDNSRuleRoutingEncryptedSameLeafAcrossGroupsReusesTransportOnly(t *testing.T) {
+	routingTestEnable(t)
+	for _, protocol := range []string{"h2", "h3", "tls", "quic"} {
+		t.Run(protocol, func(t *testing.T) {
+			server := newEncryptedRoutingServer(t, protocol, true, nil)
+			r := NewResolver(Config{RuleRouting: true, Main: []NameServer{server.ns}}).Resolver
+			t.Cleanup(r.Close)
+			leaf := newEncryptedRoutingOutbound("shared-leaf")
+			root := &routingTestGroup{routingTestBase: &routingTestBase{name: "root", kind: C.Selector}}
+			ctx, cancel := context.WithTimeout(routingTestContext(root, routingTestOrigin()), 8*time.Second)
+			defer cancel()
+			query := routingTestQuery("group-cache.example", 45)
+			var first encryptedRoutingObservation
+			var initialDials int
+			for i, kind := range []C.AdapterType{C.Selector, C.URLTest, C.Fallback, C.LoadBalance} {
+				// Each group has a distinct wrapper for the SAME underlying leaf.
+				// Group selection is still performed once for every logical query.
+				group := &routingTestGroup{routingTestBase: &routingTestBase{name: kind.String(), kind: kind}, leaf: routingTestProxy(leaf)}
+				root.leaf = routingTestProxy(group)
+				query.Id++
+				routingTestExchange(t, r, ctx, query)
+				seen := server.next(t)
+				if i == 0 {
+					first, initialDials = seen, leaf.count()
+				} else if seen.connection != first.connection || leaf.count() != initialDials {
+					t.Fatalf("%s split a transport already connected through the same leaf", kind)
+				}
+				if group.choices.Load() != 1 {
+					t.Fatal("pool reuse selected a proxy group more than once")
+				}
+				// The actual request above must reach the server: relaxing the
+				// connection identity must not relax the existing answer scope.
+				// Repeating that same complete route may still hit its answer cache.
+				query.Id++
+				routingTestExchange(t, r, ctx, query)
+				select {
+				case duplicate := <-server.seen:
+					t.Fatalf("unchanged route lost its answer cache: %+v", duplicate)
+				default:
+				}
+				if group.choices.Load() != 2 {
+					t.Fatal("answer cache skipped the current group selection")
+				}
+			}
+			// A provider may replace a node without changing its display name.
+			// A new object must not inherit the old node's connected transport.
+			replacement := newEncryptedRoutingOutbound(leaf.Name())
+			root.leaf = routingTestProxy(replacement)
+			routingTestExchange(t, r, ctx, routingTestQuery("replacement.example", 59))
+			if replaced := server.next(t); replaced.connection == first.connection || replacement.count() == 0 {
+				t.Fatal("same-name replacement reused the previous node's connection")
+			}
+		})
+	}
+}
+
+type encryptedRoutingUDPBlockedGroup struct{ *routingTestGroup }
+
+func (*encryptedRoutingUDPBlockedGroup) SupportUDP() bool { return false }
+
+func TestDNSRuleRoutingEncryptedWarmPoolCannotBypassGroupUDPRestriction(t *testing.T) {
+	routingTestEnable(t)
+	for _, protocol := range []string{"h3", "quic"} {
+		t.Run(protocol, func(t *testing.T) {
+			server := newEncryptedRoutingServer(t, protocol, true, nil)
+			r := NewResolver(Config{RuleRouting: true, Main: []NameServer{server.ns}}).Resolver
+			t.Cleanup(r.Close)
+			leaf := newEncryptedRoutingOutbound("shared-leaf")
+			allowed := &routingTestGroup{routingTestBase: &routingTestBase{name: "allowed", kind: C.Selector}, leaf: routingTestProxy(leaf)}
+			blocked := &encryptedRoutingUDPBlockedGroup{&routingTestGroup{routingTestBase: &routingTestBase{name: "blocked", kind: C.Selector}, leaf: routingTestProxy(leaf)}}
+			ctx, cancel := context.WithTimeout(routingTestContext(allowed, routingTestOrigin()), 5*time.Second)
+			defer cancel()
+			query := routingTestQuery("group-udp.example", 60)
+			routingTestExchange(t, r, ctx, query)
+			_ = server.next(t)
+			dials := leaf.count()
+			if _, err := r.ExchangeContext(icontext.WithDNSFixedOutbound(ctx, blocked), query); err == nil {
+				t.Fatal("UDP-disabled group borrowed a warm HTTP/3 or QUIC connection")
+			}
+			if leaf.count() != dials {
+				t.Fatal("UDP-disabled group attempted an unauthorized outbound connection")
+			}
+			select {
+			case seen := <-server.seen:
+				t.Fatalf("UDP-disabled route reached the DNS server: %+v", seen)
+			default:
+			}
 		})
 	}
 }
@@ -443,8 +552,11 @@ func TestDNSRuleRoutingEncryptedCancellationKeepsMultiplexedSibling(t *testing.T
 			leaf := newEncryptedRoutingOutbound("shared-leaf")
 			r := NewResolver(Config{RuleRouting: true, Main: []NameServer{server.ns}}).Resolver
 			t.Cleanup(r.Close)
-			ctx, cancelAll := context.WithTimeout(routingTestContext(leaf, routingTestOrigin()), 8*time.Second)
+			firstGroup := &routingTestGroup{routingTestBase: &routingTestBase{name: "cancel-group", kind: C.Selector}, leaf: routingTestProxy(leaf)}
+			secondGroup := &routingTestGroup{routingTestBase: &routingTestBase{name: "survive-group", kind: C.Fallback}, leaf: routingTestProxy(leaf)}
+			ctx, cancelAll := context.WithTimeout(routingTestContext(firstGroup, routingTestOrigin()), 8*time.Second)
 			defer cancelAll()
+			siblingCtx := icontext.WithDNSFixedOutbound(ctx, secondGroup)
 			if _, err := encryptedRoutingRawExchange(r, ctx, routingTestQuery("warmup.example", 61)); err != nil {
 				t.Fatal(err)
 			}
@@ -458,7 +570,7 @@ func TestDNSRuleRoutingEncryptedCancellationKeepsMultiplexedSibling(t *testing.T
 				canceled <- err
 			}()
 			go func() {
-				answer, err := encryptedRoutingRawExchange(r, ctx, routingTestQuery("blocked-survive.example", 63))
+				answer, err := encryptedRoutingRawExchange(r, siblingCtx, routingTestQuery("blocked-survive.example", 63))
 				if err == nil && (answer == nil || answer.Id != 63) {
 					err = fmt.Errorf("sibling lost its DNS response ID: %v", answer)
 				}

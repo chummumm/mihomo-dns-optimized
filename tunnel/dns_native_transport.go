@@ -13,17 +13,51 @@ import (
 	"github.com/metacubex/mihomo/common/atomic"
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/utils"
+	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	icontext "github.com/metacubex/mihomo/context"
 	"github.com/metacubex/mihomo/tunnel/statistic"
 )
 
-// TransportKey deliberately excludes QNAME and source-port: encrypted DNS may
-// multiplex unrelated questions over the same immutable exit. Query caches and
-// logical trackers retain their stricter per-request identity separately.
+// TransportKey retains the complete selected route for answer-cache and probe
+// scopes. It excludes QNAME/source-port, which those callers supply separately.
+// Do not weaken these existing scopes when optimizing connection reuse.
 func (p *DNSRoutingPlan) TransportKey() string {
 	return fmt.Sprintf("%s|%d|%v|%v|%d", p.CacheKey(), p.Type(), p.route.proxy.ProxyInfo(), p.route.udpSupportError, p.epoch)
+}
+
+// NativeTransportKey identifies the selected physical outbound for a configured
+// native DNS client's connection pool. Choosing that same leaf through another
+// rule/group does not require another TLS/HTTP/QUIC connection. The upstream
+// address, TLS options and protocol are isolated by the owning dnsClient.
+func (p *DNSRoutingPlan) NativeTransportKey() string {
+	leaf := p.route.proxy
+	if proxy, ok := leaf.(C.Proxy); ok {
+		// Providers/groups may expose different history wrappers around the
+		// same underlying adapter. A name is never a sufficient identity: a
+		// same-name provider replacement is a different physical outbound.
+		leaf = proxy.Adapter()
+	}
+	info := leaf.ProxyInfo()
+	iface, mark := info.Interface, info.RoutingMark
+	if iface == "" {
+		iface = dialer.DefaultInterface.Load()
+	}
+	if mark == 0 {
+		mark = int(dialer.DefaultRoutingMark.Load())
+	}
+	// A dialer-proxy is selected again below the leaf at actual dial time.
+	// Do not broaden that existing reuse scope without a frozen whole-chain
+	// identity. Unresolved/opaque groups receive the same conservative policy.
+	if !p.route.udpSupportFrozen || info.DialerProxy != "" || leaf.Type() == C.Relay || leaf.Type() == C.Selector ||
+		leaf.Type() == C.URLTest || leaf.Type() == C.Fallback || leaf.Type() == C.LoadBalance {
+		return fmt.Sprintf("native-route:%s|interface:%q|mark:%d", p.TransportKey(), iface, mark)
+	}
+	// UDP authorization remains part of the selection snapshot. A TCP-only
+	// group cannot borrow a UDP-capable group's existing HTTP/3/QUIC client.
+	return fmt.Sprintf("native-leaf:%T:%p|%d|%#v|udp:%t|epoch:%d|interface:%q|mark:%d",
+		leaf, leaf, leaf.Type(), info, p.route.udpSupportError == nil, p.epoch, iface, mark)
 }
 
 func (p *DNSRoutingPlan) nativeDestination(ctx context.Context, network, addr string, bootstrap resolver.Resolver) (*C.Metadata, error) {
@@ -91,7 +125,7 @@ func (p *DNSRoutingPlan) dialNativeDNS(ctx context.Context, network, addr string
 	appendDNSProxyGroups(connection, p.route.groups)
 	// This persistent transport is infrastructure, not the first QNAME that
 	// happened to create it. Count encrypted wire bytes here, exactly once.
-	return statistic.NewTCPTracker(connection, statistic.DefaultManager, metadata, nil, 0, 0, true), nil
+	return statistic.NewDNSTCPTracker(connection, statistic.DefaultManager, metadata, nil, 0, 0, true), nil
 }
 
 func (p *DNSRoutingPlan) nativePacket(ctx context.Context, metadata *C.Metadata) (C.PacketConn, error) {
@@ -104,7 +138,7 @@ func (p *DNSRoutingPlan) nativePacket(ctx context.Context, metadata *C.Metadata)
 		return nil, err
 	}
 	appendDNSProxyGroups(connection, p.route.groups)
-	return statistic.NewUDPTracker(connection, statistic.DefaultManager, metadata, nil, 0, 0, true), nil
+	return statistic.NewDNSUDPTracker(connection, statistic.DefaultManager, metadata, nil, 0, 0, true), nil
 }
 
 func (p *DNSRoutingPlan) listenNativeDNS(ctx context.Context, network, addr string, bootstrap resolver.Resolver) (net.PacketConn, error) {
@@ -209,7 +243,7 @@ func (p *DNSRoutingPlan) TrackNativeQuery(ctx context.Context, endpoint string, 
 	metadata.RemoteDst = endpoint
 	ctx, cancel := context.WithCancelCause(ctx)
 	tracker := &DNSNativeQueryTracker{
-		TrackerInfo: &statistic.TrackerInfo{UUID: utils.NewUUIDV4(), Start: time.Now(), Metadata: metadata,
+		TrackerInfo: &statistic.TrackerInfo{UUID: utils.NewUUIDV4(), Start: time.Now(), Metadata: metadata, DNS: true,
 			UploadTotal: atomic.NewInt64(int64(upload)), DownloadTotal: atomic.NewInt64(0)},
 		endpoint: endpoint, cancel: cancel,
 	}

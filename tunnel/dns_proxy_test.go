@@ -849,6 +849,9 @@ func TestDNSProxyConnectionStatisticsAndPanelClose(t *testing.T) {
 				}
 				tracker := waitDNSProxyTracker(t, "mixed.example", expectedUp)
 				info := tracker.Info()
+				if !info.DNS {
+					t.Fatal("port-53 DNS exchange is missing its explicit DNS display marker")
+				}
 				if statistic.DefaultManager.Get(tracker.ID()) != tracker {
 					t.Fatal("connection cannot be retrieved by its panel ID")
 				}
