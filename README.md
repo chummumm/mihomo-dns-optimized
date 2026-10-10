@@ -34,6 +34,8 @@ DNS 页由本二开内核的 `/dns/observability` API 提供数据：
 
 ## 安装和更新
 
+面板版本使用纯 `x.y.z` 格式（例如 `0.3.1`），不添加后缀。
+
 源码维护在本仓库的 [`clash-dashboard`](https://github.com/chummumm/mihomo-dns-optimized/tree/clash-dashboard) 分支。构建后的静态文件维护在 [`clash-dashboard-dist`](https://github.com/chummumm/mihomo-dns-optimized/tree/clash-dashboard-dist) 分支，使用独立 UI 工作流，不创建内核发行版。
 
 下载可直接安装的 [UI ZIP](https://github.com/chummumm/mihomo-dns-optimized/archive/refs/heads/clash-dashboard-dist.zip)。解压后，把唯一顶层目录中的 `index.html`、`assets` 等文件放入现有 `external-ui` 目录；先备份旧 UI 文件。
