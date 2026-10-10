@@ -1,12 +1,17 @@
 {
   "name": "clash-dashboard",
-  "version": "0.1.0-sniffhost.1",
-  "source_commit": "8d9a83c600631f9995920b95d3dbea445b07f688",
-  "source_url": "https://github.com/chummumm/mihomo-dns-optimized/tree/8d9a83c600631f9995920b95d3dbea445b07f688",
+  "version": "0.2.0-dns-memory.1",
+  "source_commit": "8fa66e522aebef8d5d7f47e675dd15ca4584aebf",
+  "source_url": "https://github.com/chummumm/mihomo-dns-optimized/tree/8fa66e522aebef8d5d7f47e675dd15ca4584aebf",
   "upstream_commit": "9a32d9d163ad233141c384ba365c6ef18c58cb94",
   "display_host_order": [
     "host",
     "sniffHost",
     "destinationIP"
-  ]
+  ],
+  "dns_observability_api": 1,
+  "dns_storage": "memory",
+  "dns_cache_ratio": "(cache_fresh + cache_stale) / queries",
+  "closed_connection_limit": 5000,
+  "virtualized_connections": true
 }
