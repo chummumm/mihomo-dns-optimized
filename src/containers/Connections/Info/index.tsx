@@ -5,6 +5,7 @@ import { basePath, formatTraffic } from '@lib/helper'
 import { type BaseComponentProps } from '@models'
 import { useI18n } from '@stores'
 
+import { getConnectionHost } from '../helper'
 import { type Connection } from '../store'
 
 interface ConnectionsInfoProps extends BaseComponentProps {
@@ -14,6 +15,7 @@ interface ConnectionsInfoProps extends BaseComponentProps {
 export function ConnectionInfo (props: ConnectionsInfoProps) {
     const { translation } = useI18n()
     const t = useMemo(() => translation('Connections').t, [translation])
+    const host = getConnectionHost(props.connection.metadata)
 
     return (
         <div className={classnames(props.className, 'flex flex-col overflow-y-auto text-sm')}>
@@ -34,8 +36,8 @@ export function ConnectionInfo (props: ConnectionsInfoProps) {
             <div className="my-3 flex">
                 <span className="w-20 font-bold">{t('info.host')}</span>
                 <span className="flex-1 break-all font-mono">{
-                    props.connection.metadata?.host
-                        ? `${props.connection.metadata.host}:${props.connection.metadata?.destinationPort}`
+                    host
+                        ? `${host}:${props.connection.metadata?.destinationPort}`
                         : t('info.hostEmpty')
                 }</span>
             </div>

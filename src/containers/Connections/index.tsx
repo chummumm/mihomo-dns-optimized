@@ -13,6 +13,7 @@ import { useClient, useConnectionStreamReader, useI18n } from '@stores'
 
 import { Devices } from './Devices'
 import { ConnectionInfo } from './Info'
+import { getConnectionHost } from './helper'
 import { type Connection, type FormatConnection, useConnections } from './store'
 import './style.scss'
 
@@ -72,7 +73,7 @@ export default function Connections () {
     const data: FormatConnection[] = useMemo(() => connections.map(
         c => ({
             id: c.id,
-            host: `${c.metadata.host || c.metadata.destinationIP}:${c.metadata.destinationPort}`,
+            host: `${getConnectionHost(c.metadata)}:${c.metadata.destinationPort}`,
             chains: c.chains.slice().reverse().join(' / '),
             rule: c.rulePayload ? `${c.rule} :: ${c.rulePayload}` : c.rule,
             time: new Date(c.start).getTime(),

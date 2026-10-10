@@ -1,0 +1,104 @@
+name: Clash Dashboard
+
+on:
+  push:
+    branches: [clash-dashboard]
+    paths-ignore:
+      - '**/*.md'
+      - LICENSE
+      - .all-contributorsrc
+  pull_request:
+    branches: [clash-dashboard]
+    paths-ignore:
+      - '**/*.md'
+      - LICENSE
+      - .all-contributorsrc
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clash-dashboard-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build original UI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build UI
+        run: pnpm build
+      - name: Package UI
+        run: python3 scripts/package-ui.py --source-sha "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clash-dashboard-static
+          path: dist/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clash-dashboard-install
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish UI update branch
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/clash-dashboard'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: clash-dashboard-static
+          path: ui-dist
+      - name: Publish static files
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_source=$(git ls-remote --refs origin refs/heads/clash-dashboard | awk '{print $1}')
+          if [[ "$current_source" != "$SOURCE_SHA" ]]; then
+            echo 'A newer UI source commit exists; skipping this publication.'
+            exit 0
+          fi
+          publish_dir="$RUNNER_TEMP/clash-dashboard-publish"
+          if git ls-remote --exit-code --heads origin refs/heads/clash-dashboard-dist >/dev/null; then
+            git fetch --no-tags origin refs/heads/clash-dashboard-dist
+            git worktree add --detach "$publish_dir" FETCH_HEAD
+          else
+            git worktree add --detach "$publish_dir" "$SOURCE_SHA"
+            git -C "$publish_dir" checkout --orphan clash-dashboard-dist
+          fi
+          git -C "$publish_dir" rm -rf --ignore-unmatch .
+          cp -a "$GITHUB_WORKSPACE/ui-dist/." "$publish_dir/"
+          git -C "$publish_dir" add --all
+          if git -C "$publish_dir" diff --cached --quiet; then
+            echo 'The UI update branch already contains this build.'
+            exit 0
+          fi
+          git -C "$publish_dir" -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "Publish Clash Dashboard from $SOURCE_SHA"
+          current_source=$(git ls-remote --refs origin refs/heads/clash-dashboard | awk '{print $1}')
+          if [[ "$current_source" != "$SOURCE_SHA" ]]; then
+            echo 'A newer UI source commit exists; skipping this publication.'
+            exit 0
+          fi
+          git -C "$publish_dir" push origin HEAD:refs/heads/clash-dashboard-dist
