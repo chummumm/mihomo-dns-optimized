@@ -319,14 +319,15 @@ def api_request(port, path="/configs", body=None, method="GET"):
         return json.loads(payload) if payload else None
 
 
-def wait_proxy_connection(api_port, network, source_port, uploaded=0, downloaded=0, missing=False):
+def wait_proxy_connection(api_port, network, source_port, uploaded=0, downloaded=0, missing=False,
+                          destination_port=53):
     deadline = time.monotonic() + 3
     while True:
         entries = [entry for entry in (api_request(api_port, "/connections").get("connections") or [])
                    if entry["metadata"].get("inboundName") in ("DEFAULT-MIXED", "DEFAULT-SOCKS")
                    and entry["metadata"].get("network") == network
                    and int(entry["metadata"].get("sourcePort", 0)) == source_port
-                   and int(entry["metadata"].get("destinationPort", 0)) == 53]
+                   and int(entry["metadata"].get("destinationPort", 0)) == destination_port]
         if missing and not entries:
             return None
         if not missing and len(entries) == 1 and entries[0]["upload"] >= uploaded and entries[0]["download"] >= downloaded:
@@ -751,6 +752,149 @@ def check_native_dns_pools(config, api_port, upstream_a, upstream_b):
     return direct_count
 
 
+def check_redir_host_filter(api_port, proxy_port, upstream_a, upstream_b):
+    # The two names have different documentation IPs, so this checks the basic
+    # domain blacklist without imposing a shared-IP exclusion policy.
+    blocked, allowed = "blocked.mapping.test", "allowed.mapping.test"
+    blocked_ip, allowed_ip = "192.0.2.101", "192.0.2.102"
+    dns_port, target_port = unused_port(), 18080
+    with local_plain_dns(blocked_ip) as (blocked_port, blocked_records, blocked_lock), \
+            local_plain_dns(allowed_ip) as (allowed_port, allowed_records, allowed_lock), \
+            socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+        udp.bind(("127.0.0.1", 0))
+        udp.settimeout(3)
+
+        def apply(patterns, sniff=False):
+            # A standalone rule list keeps the earlier port-53 fixture's IP
+            # rules from hiding whether the inferred domain actually matched.
+            mapping_config = f"""mode: rule
+log-level: debug
+external-controller: 127.0.0.1:{api_port}
+mixed-port: {proxy_port}
+allow-lan: false
+bind-address: 127.0.0.1
+find-process-mode: off
+ipv6: false
+dns-rule-routing: false
+dns:
+  enable: true
+  listen: 127.0.0.1:{dns_port}
+  enhanced-mode: redir-host
+  redir-host-filter: {json.dumps(patterns)}
+  use-hosts: false
+  use-system-hosts: false
+  respect-rules: false
+  default-nameserver: [127.0.0.1:{blocked_port}]
+  nameserver: [127.0.0.1:{blocked_port}]
+  nameserver-policy:
+    '{blocked}': [127.0.0.1:{blocked_port}]
+    '{allowed}': [127.0.0.1:{allowed_port}]
+  speed-check-mode: [none]
+  prefetch-domain: false
+  serve-expired: false
+sniffer:
+  enable: {str(sniff).lower()}
+  parse-pure-ip: true
+  force-dns-mapping: true
+  override-destination: false
+  sniff:
+    HTTP:
+      ports: [{target_port}]
+proxies:
+  - name: A
+    type: socks5
+    server: 127.0.0.1
+    port: {upstream_a.server_address[1]}
+  - name: B
+    type: socks5
+    server: 127.0.0.1
+    port: {upstream_b.server_address[1]}
+rules:
+  - DOMAIN,{blocked},B
+  - DOMAIN,{allowed},B
+  - MATCH,A
+"""
+            api_request(api_port, "/configs", {"payload": mapping_config}, "PUT")
+            assert api_request(api_port)["dns-rule-routing"] is False
+
+        def exchange(name, answer, transaction):
+            query = question(name, transaction)
+            udp.sendto(query, ("127.0.0.1", dns_port))
+            check_answer(udp.recvfrom(65535)[0], query, answer)
+
+        def seen():
+            with blocked_lock:
+                assert all(name == blocked for name, _ in blocked_records), blocked_records
+                blocked_count = len(blocked_records)
+            with allowed_lock:
+                assert all(name == allowed for name, _ in allowed_records), allowed_records
+                allowed_count = len(allowed_records)
+            return blocked_count, allowed_count
+
+        def probe(label, destination, outbound, host="", sniff_host="", payload=None):
+            if payload is None:
+                payload = ("redir-host-filter:" + label).encode("ascii")
+            upstream = upstream_b if outbound == "B" else upstream_a
+            with upstream.record_lock:
+                before = len(upstream.tcp_streams)
+            conn, reply, _ = socks_request(proxy_port, (destination, target_port))
+            with conn:
+                assert reply == 0, (label, reply)
+                conn.sendall(payload)
+                assert read_exact(conn, len(payload)) == payload, (label, "payload changed")
+                entry = wait_proxy_connection(api_port, "tcp", conn.getsockname()[1],
+                                               len(payload), len(payload), destination_port=target_port)
+                metadata = entry["metadata"]
+                assert entry["chains"] == [outbound], (label, entry)
+                assert (metadata.get("host") or "") == host, (label, metadata)
+                assert (metadata.get("sniffHost") or "") == sniff_host, (label, metadata)
+                if destination in (blocked_ip, allowed_ip):
+                    assert metadata["destinationIP"] == destination, (label, metadata)
+                if outbound == "B":
+                    assert entry["rule"] == "Domain" and entry["rulePayload"] == (sniff_host or host), (label, entry)
+                else:
+                    assert entry["rule"] == "Match", (label, entry)
+                with upstream.record_lock:
+                    streams = [(target, b"".join(parts)) for target, parts in upstream.tcp_streams[before:]]
+                target = (host or destination, target_port)
+                assert (target, payload) in streams, (label, target, streams)
+
+        apply([])
+        exchange(blocked, blocked_ip, 701)
+        exchange(allowed, allowed_ip, 702)
+        assert seen() == (1, 1), seen()
+        probe("warm-blocked", blocked_ip, "B", host=blocked)
+        probe("warm-allowed", allowed_ip, "B", host=allowed)
+
+        # No new DNS queries occur between adding the blacklist and these
+        # connections: the results must come from the inherited mapping state.
+        apply([blocked.upper() + "."])
+        probe("reload-blocked", blocked_ip, "A")
+        probe("reload-allowed", allowed_ip, "B", host=allowed)
+        assert seen() == (1, 1), seen()
+        exchange(blocked, blocked_ip, 703)
+        exchange(blocked, blocked_ip, 704)
+        assert seen() == (2, 1), ("DNS answer cache was not retained between queries", seen())
+        probe("filtered-cold-and-warm-dns", blocked_ip, "A")
+        probe("explicit-domain", blocked, "B", host=blocked)
+
+        apply([blocked], sniff=True)
+        http_payload = f"GET /mapping-filter HTTP/1.1\r\nHost: {blocked}\r\nConnection: keep-alive\r\n\r\n".encode("ascii")
+        probe("http-sniff", blocked_ip, "B", sniff_host=blocked, payload=http_payload)
+        assert seen() == (2, 1), ("ordinary proxy/sniffing unexpectedly queried DNS", seen())
+
+        apply([])
+        probe("removed-filter-before-dns", blocked_ip, "A")
+        probe("allowed-still-inherited", allowed_ip, "B", host=allowed)
+        exchange(blocked, blocked_ip, 705)
+        probe("removed-filter-after-dns", blocked_ip, "B", host=blocked)
+        assert seen() == (3, 1), seen()
+        exchange_count = sum(seen())
+    print("PASS redir-host filter: real config reload removes old blocked mappings and keeps allowed mappings; cold/warm DNS answers remain valid and cached; removing the filter restores mapping after a new query")
+    print("PASS redir-host filter routing: pure IP follows MATCH, explicit SOCKS domain and HTTP sniffHost still match domain rules; override-destination=false preserves the IP and exact echoed HTTP payload")
+    return exchange_count
+
+
 def run(binary):
     records, record_lock = [], threading.Lock()
     upstream_a = MockSOCKS("198.51.100.11", records, record_lock)
@@ -1061,10 +1205,11 @@ rules:
                     print("PASS native DNS switch reloads leave ordinary forwarding unchanged; unsafe scalar PATCH rejected atomically")
                     check_builtin_dns(config, api_port, upstream_a, upstream_b)
                     native_direct_count = check_native_dns_pools(config, api_port, upstream_a, upstream_b)
+                    mapping_exchange_count = check_redir_host_filter(api_port, mixed_port, upstream_a, upstream_b)
                     with record_lock:
                         assert all(target[1] == 53 and target[0] in (resolver[0], resolver_v6[0], resolver_b[0])
                                    for _, _, target, _ in records)
-                        exchange_count = len(records) + native_direct_count
+                        exchange_count = len(records) + native_direct_count + mapping_exchange_count
                     print(f"PASS actual binary end-to-end: {exchange_count} DNS exchanges plus ordinary TCP/UDP forwarding")
                 except BaseException:
                     log.flush()

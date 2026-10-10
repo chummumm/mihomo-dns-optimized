@@ -13,6 +13,7 @@ dns:
   enable: true
   listen: 127.0.0.1:1053
   enhanced-mode: redir-host
+  redir-host-filter: []
   ipv6: true
   use-hosts: true
   use-system-hosts: true

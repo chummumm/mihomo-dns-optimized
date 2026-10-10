@@ -188,19 +188,38 @@ func (c *LruCache[K, V]) setWithExpire(key K, value V, expires time.Time) {
 
 // CloneTo clone and overwrite elements to another LruCache
 func (c *LruCache[K, V]) CloneTo(n *LruCache[K, V]) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.CloneToFiltered(n, nil)
+}
 
+// CloneToFiltered replaces n with a snapshot of the entries accepted by keep.
+// A nil keep accepts all entries. Entry metadata is copied independently, while
+// values are shallow copies; expiration times and LRU order are preserved.
+// keep runs under the source lock and must not call methods on the source.
+func (c *LruCache[K, V]) CloneToFiltered(n *LruCache[K, V], keep func(K, V) bool) {
+	if c == n && keep == nil {
+		return
+	}
+
+	order := list.New[*entry[K, V]]()
+	var entries map[K]*list.Element[*entry[K, V]]
+	func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		entries = make(map[K]*list.Element[*entry[K, V]], len(c.cache))
+		for e := c.lru.Front(); e != nil; e = e.Next() {
+			elm := *e.Value
+			if keep != nil && !keep(elm.key, elm.value) {
+				continue
+			}
+			entries[elm.key] = order.PushBack(&elm)
+		}
+	}()
+
+	// Publish after releasing the source lock, so opposite-direction copies
+	// cannot deadlock and old writers cannot mutate the copied entry metadata.
 	n.mu.Lock()
 	defer n.mu.Unlock()
-
-	n.lru = list.New[*entry[K, V]]()
-	n.cache = make(map[K]*list.Element[*entry[K, V]])
-
-	for e := c.lru.Front(); e != nil; e = e.Next() {
-		elm := e.Value
-		n.cache[elm.key] = n.lru.PushBack(elm)
-	}
+	n.lru, n.cache = order, entries
 }
 
 func (c *LruCache[K, V]) get(key K) *entry[K, V] {
