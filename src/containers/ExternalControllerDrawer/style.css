@@ -1,0 +1,41 @@
+.external-controller-modal {
+    width: 460px;
+}
+
+.external-controller {
+    display: grid;
+    gap: var(--sp-4);
+}
+
+.external-controller-fields {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 96px;
+    gap: var(--sp-3);
+}
+
+.external-controller-field {
+    display: grid;
+    gap: 6px;
+    color: var(--text-2);
+    font-size: var(--t-xs);
+    font-weight: 560;
+}
+
+.external-controller-secret {
+    grid-column: 1 / -1;
+}
+
+.external-controller-extra {
+    display: flex;
+    gap: var(--sp-1);
+}
+
+@media (max-width: 768px) {
+    .external-controller-modal {
+        width: 100%;
+    }
+
+    .external-controller .alert {
+        display: none;
+    }
+}

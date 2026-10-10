@@ -1,0 +1,134 @@
+.button {
+    --btn-bg: var(--panel);
+    --btn-fg: var(--text);
+    --btn-border: var(--hair-2);
+    --btn-hover: var(--sunken);
+
+    position: relative;
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: var(--ctl-h);
+    padding: 0 12px;
+    border: 1px solid var(--btn-border);
+    border-radius: var(--r-ctl);
+    background: var(--btn-bg);
+    color: var(--btn-fg);
+    font-size: var(--t-sm);
+    font-weight: 520;
+    line-height: 1;
+    white-space: nowrap;
+    user-select: none;
+    transition:
+        background-color var(--dur-1) var(--ease-out),
+        border-color var(--dur-1) var(--ease-out),
+        color var(--dur-1) var(--ease-out),
+        transform var(--dur-1) var(--ease-out);
+}
+
+.button:hover:not(:disabled) {
+    background: var(--btn-hover);
+}
+
+.button:active:not(:disabled) {
+    transform: translateY(1px) scale(0.98);
+}
+
+.button:disabled,
+.button.button-disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+/* Busy is not unavailable: the control stays legible while its icon works. */
+.button.button-loading:disabled {
+    opacity: 0.85;
+    cursor: progress;
+}
+
+.button-sm {
+    height: var(--ctl-h-sm);
+    padding: 0 10px;
+    font-size: var(--t-xs);
+}
+
+.button-icon-only {
+    width: var(--ctl-h);
+    padding: 0;
+}
+
+.button-sm.button-icon-only {
+    width: var(--ctl-h-sm);
+}
+
+.button-primary {
+    --btn-bg: var(--ink);
+    --btn-fg: var(--on-ink);
+    --btn-border: var(--ink);
+    --btn-hover: var(--ink-hover);
+}
+
+.button-danger {
+    --btn-bg: var(--bad);
+    --btn-fg: #fff;
+    --btn-border: var(--bad);
+    --btn-hover: color-mix(in srgb, var(--bad) 86%, #000);
+}
+
+.button-success {
+    --btn-bg: var(--good);
+    --btn-fg: #fff;
+    --btn-border: var(--good);
+    --btn-hover: color-mix(in srgb, var(--good) 86%, #000);
+}
+
+.button-warning {
+    --btn-bg: var(--warn);
+    --btn-fg: #fff;
+    --btn-border: var(--warn);
+    --btn-hover: color-mix(in srgb, var(--warn) 86%, #000);
+}
+
+@media (prefers-color-scheme: dark) {
+    .button-danger,
+    .button-success,
+    .button-warning {
+        --btn-fg: #0a0d12;
+        --btn-hover: color-mix(in srgb, var(--btn-bg) 86%, #fff);
+    }
+}
+
+.button-ghost {
+    --btn-bg: transparent;
+    --btn-fg: var(--text-2);
+    --btn-border: transparent;
+    --btn-hover: var(--sunken);
+}
+
+.button-ghost:hover:not(:disabled) {
+    color: var(--text);
+}
+
+.button[aria-pressed='true'] {
+    --btn-bg: var(--ink);
+    --btn-fg: var(--on-ink);
+    --btn-border: var(--ink);
+    --btn-hover: var(--ink-hover);
+}
+
+.button-spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: var(--r-round);
+    animation: spin 700ms linear infinite;
+}
+
+.button-label {
+    overflow: hidden;
+    line-height: 1.35;
+    text-overflow: ellipsis;
+}

@@ -1,9 +1,9 @@
 import { useReactTable, getSortedRowModel, getCoreRowModel, flexRender, createColumnHelper } from '@tanstack/react-table'
 import classnames from 'classnames'
-import { useMemo, useLayoutEffect, useRef, useState, useEffect } from 'react'
+import { Fragment, useMemo, useLayoutEffect, useRef, useState, useEffect } from 'react'
 import AutoSizer from 'react-virtualized-auto-sizer'
 
-import { Header, Checkbox, Modal, Icon, Drawer, Card, Button } from '@components'
+import { Header, Checkbox, Modal, Icon, Drawer, Card, Button, LineBullet, useLineColor } from '@components'
 import { formatDateTime, fromNow } from '@lib/date'
 import { basePath, formatTraffic } from '@lib/helper'
 import { useObject, useVisible } from '@lib/hook'
@@ -14,9 +14,9 @@ import { Devices } from './Devices'
 import { ConnectionInfo } from './Info'
 import { VirtualConnectionTable } from './VirtualTable'
 import { formatConnection } from './helper'
-import { ALL_CONNECTIONS } from './source'
+import { ALL_CONNECTIONS, INTERNAL_CONNECTIONS } from './source'
 import { type Connection, type FormatConnection, useConnections } from './store'
-import './style.scss'
+import './style.css'
 
 const Columns = {
     Host: 'host',
@@ -55,6 +55,7 @@ export default function Connections () {
     const t = useMemo(() => translation('Connections').t, [translation])
     const connStreamReader = useConnectionStreamReader()
     const client = useClient()
+    const color = useLineColor()
     const cardRef = useRef<HTMLDivElement>(null)
 
     // total
@@ -80,8 +81,19 @@ export default function Connections () {
         () => [
             columnHelper.accessor(Columns.Host, { minSize: 260, size: 260, header: t(`columns.${Columns.Host}`) }),
             columnHelper.accessor(Columns.Network, { minSize: 80, size: 80, header: t(`columns.${Columns.Network}`) }),
-            columnHelper.accessor(Columns.Type, { minSize: 100, size: 100, header: t(`columns.${Columns.Type}`) }),
-            columnHelper.accessor(Columns.Chains, { minSize: 200, size: 200, header: t(`columns.${Columns.Chains}`) }),
+            columnHelper.accessor(Columns.Type, { minSize: 100, size: 100, header: t(`columns.${Columns.Type}`), cell: cell => <span className={classnames('connections-type', { dns: cell.getValue() === 'DNS' })}>{cell.getValue()}</span> }),
+            columnHelper.accessor(Columns.Chains, {
+                minSize: 200,
+                size: 200,
+                header: t(`columns.${Columns.Chains}`),
+                // One mark per hop, like interchange marks on a route: groups take their line bullet, nodes a small dot.
+                // The separators stay in the text (visually hidden) so the cell text is the exact chain string.
+                cell: cell => <span className="connections-route" title={cell.getValue()}>{cell.getValue().split(' / ').map((hop, index) => <Fragment key={index}>
+                    {index > 0 && <span className="sr-only">{' / '}</span>}
+                    {color(hop) === 'var(--idle)' ? <span className="connections-hop-dot" aria-hidden="true" /> : <LineBullet name={hop} />}
+                    <span className="connections-hop">{hop}</span>
+                </Fragment>)}</span>,
+            }),
             columnHelper.accessor(Columns.Rule, { minSize: 140, size: 140, header: t(`columns.${Columns.Rule}`) }),
             columnHelper.accessor(Columns.Process, { minSize: 100, size: 100, header: t(`columns.${Columns.Process}`), cell: cell => cell.getValue() ? basePath(cell.getValue()!) : '-' }),
             columnHelper.accessor(
@@ -99,7 +111,10 @@ export default function Connections () {
                             ? speedA.upload - speedB.upload
                             : speedA.download - speedB.download
                     },
-                    cell: cell => formatSpeed(cell.getValue()[0], cell.getValue()[1]),
+                    cell: cell => {
+                        const text = formatSpeed(cell.getValue()[0], cell.getValue()[1])
+                        return <span className={classnames('connections-speed', { idle: text === '-' })}>{text}</span>
+                    },
                 },
             ),
             columnHelper.accessor(Columns.Upload, { minSize: 100, size: 100, header: t(`columns.${Columns.Upload}`), cell: cell => formatTraffic(cell.getValue()) }),
@@ -116,7 +131,7 @@ export default function Connections () {
                 },
             ),
         ],
-        [lang, t],
+        [color, lang, t],
     )
 
     useLayoutEffect(() => {
@@ -141,6 +156,10 @@ export default function Connections () {
     useEffect(() => {
         setDevice(ALL_CONNECTIONS)
     }, [connStreamReader])
+
+    useLayoutEffect(() => {
+        if (device !== ALL_CONNECTIONS && !connectionsBySource.has(device)) setDevice(ALL_CONNECTIONS)
+    }, [connectionsBySource, device])
 
     const instance = useReactTable({
         data,
@@ -188,11 +207,14 @@ export default function Connections () {
                 })}
                 style={{ width: header.getSize() }}
                 key={id}>
-                <div onClick={column.getToggleSortingHandler()}>
+                <div className="connections-th-label" onClick={column.getToggleSortingHandler()}>
                     { flexRender(header.column.columnDef.header, header.getContext()) }
                     {
                         column.getIsSorted() !== false
-                            ? column.getIsSorted() === 'desc' ? ' ↓' : ' ↑'
+                            ? <span className="connections-sort">
+                                <span className="sr-only">{column.getIsSorted() === 'desc' ? ' ↓' : ' ↑'}</span>
+                                <Icon type={column.getIsSorted() === 'desc' ? 'arrow-down' : 'arrow-up'} size={11} />
+                            </span>
                             : null
                     }
                 </div>
@@ -208,21 +230,42 @@ export default function Connections () {
 
     const rows = instance.getRowModel().rows
 
+    // Escape closes the detail panel.
+    useEffect(() => {
+        if (!drawerState.visible) return
+        function keydown (event: KeyboardEvent) {
+            if (event.key === 'Escape') setDrawerState('visible', false)
+        }
+        document.addEventListener('keydown', keydown)
+        return () => document.removeEventListener('keydown', keydown)
+    }, [drawerState.visible, setDrawerState])
+
+    const totals = (
+        <span className="connections-traffic" title={t('total.text')}>
+            <span className="connections-traffic-item" title={t('total.upload')}>
+                <Icon type="arrow-up" size={12} className="connections-flow" replay={traffic.uploadTotal} />
+                <span className="reading">{formatTraffic(traffic.uploadTotal)}</span>
+            </span>
+            <span className="connections-traffic-item" title={t('total.download')}>
+                <Icon type="arrow-down" size={12} className="connections-flow" replay={traffic.downloadTotal} />
+                <span className="reading">{formatTraffic(traffic.downloadTotal)}</span>
+            </span>
+        </span>
+    )
+
     return (
-        <div className="connections-page page !h-full">
-            <Header title={t('title')}>
-                <span className="connections-filter connections-traffic flex-1 cursor-default">
-                    {`(${t('total.text')}: ${t('total.upload')} ${formatTraffic(traffic.uploadTotal)} ${t('total.download')} ${formatTraffic(traffic.downloadTotal)})`}
-                </span>
-                <Checkbox className="connections-filter" checked={save} onChange={toggleSave}>{t('keepClosed')}</Checkbox>
-                <Icon className="connections-filter dangerous" onClick={show} type="close-all" size={20} />
+        <div className="connections-page page">
+            <Header title={t('title')} meta={totals}>
+                <Checkbox className="connections-keep" checked={save} onChange={toggleSave}>{t('keepClosed')}</Checkbox>
+                <Button className="connections-close-all" icon="close-all" onClick={show}>{t('closeAll.action')}</Button>
             </Header>
-            {save && <div className="connections-history-note">
-                <span>{t('historyLimit')}: {historyLimit}. {t('retainedOnly')}{discarded > 0 && ' ' + t('historyDiscarded') + ': ' + discarded}</span>
-                <Button className="ml-3 text-xs" onClick={clearHistory}>{t('clearHistory')}</Button>
+            {save && <div className="connections-history-note" role="status">
+                <Icon type="info" size={14} className="connections-history-icon" />
+                <span>{t('historyLimit')}: <span className="reading">{historyLimit}</span>. {t('retainedOnly')}{discarded > 0 && ' ' + t('historyDiscarded') + ': ' + discarded}</span>
+                <Button type="ghost" size="sm" icon="trash" onClick={clearHistory}>{t('clearHistory')}</Button>
             </div>}
-            <Devices devices={devices} total={connections.length} selected={device} selectedMissing={!connectionsBySource.has(device)} onChange={setDevice} />
-            <Card ref={cardRef} className="connections-card relative">
+            <Devices devices={devices} total={connections.length} internalCount={connectionsBySource.get(INTERNAL_CONNECTIONS)?.length ?? 0} selected={device} onChange={setDevice} />
+            <Card ref={cardRef} className="connections-card">
                 <div className="connections-viewport">
                     <AutoSizer>
                         {({ height, width }) => <VirtualConnectionTable
@@ -232,20 +275,26 @@ export default function Connections () {
                             height={height}
                             totalWidth={instance.getTotalSize()}
                             centeredColumns={shouldCenter}
+                            selectedID={drawerState.visible ? drawerState.selectedID : ''}
                             onSelect={id => setDrawerState({ visible: true, selectedID: id })} />}
                     </AutoSizer>
-                    {data.length === 0 && <div className="connections-empty" role="status">{t('empty')}</div>}
+                    {data.length === 0 && <div className="connections-empty" role="status">
+                        <Icon type="nav-connections" size={28} />
+                        <span>{t('empty')}</span>
+                    </div>}
                 </div>
             </Card>
-            <Modal title={t('closeAll.title')} show={visible} onClose={hide} onOk={handleCloseConnections}>{t('closeAll.content')}</Modal>
-            <Drawer containerRef={cardRef} bodyClassName="flex flex-col" visible={drawerState.visible} width={450}>
-                <div className="h-8 flex items-center justify-between">
-                    <span className="pl-3 font-bold">{t('info.title')}</span>
-                    <Icon type="close" size={16} className="cursor-pointer" onClick={() => setDrawerState('visible', false)} />
+            <Modal title={t('closeAll.title')} show={visible} okType="danger" okText={t('closeAll.action')} onClose={hide} onOk={handleCloseConnections}>{t('closeAll.content')}</Modal>
+            <Drawer containerRef={cardRef} bodyClassName="connections-drawer" visible={drawerState.visible} width={440} label={t('info.title')}>
+                <div className="connections-drawer-head">
+                    <span className="connections-drawer-title">{t('info.title')}</span>
+                    <button type="button" className="connections-drawer-close" aria-label={t('info.closePanel')} onClick={() => setDrawerState('visible', false)}>
+                        <Icon type="close" size={16} />
+                    </button>
                 </div>
-                <ConnectionInfo className="connections-info mt-3 px-4" connection={drawerState.connection} />
-                <div className="mt-3 flex justify-end pr-3">
-                    <Button type="danger" disabled={drawerState.connection.completed} onClick={() => handleConnectionClosed()}>{ t('info.closeConnection') }</Button>
+                <ConnectionInfo className="connections-info" connection={drawerState.connection} />
+                <div className="connections-drawer-foot">
+                    <Button type="danger" icon="prohibit" disabled={drawerState.connection.completed} onClick={() => handleConnectionClosed()}>{ t('info.closeConnection') }</Button>
                 </div>
             </Drawer>
         </div>

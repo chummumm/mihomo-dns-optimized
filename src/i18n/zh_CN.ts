@@ -154,26 +154,39 @@ const CN = {
         },
         versionString: '当前 ClashX 已是最新版本：{{version}}',
         checkUpdate: '检查更新',
+        sections: {
+            system: '系统',
+            proxy: '代理',
+            controller: '控制器',
+            probe: '测速',
+        },
         externalControllerSetting: {
             title: '编辑外部控制设置',
             note: '请注意，修改该配置项并不会修改你的 Clash 配置文件，请确认修改后的外部控制地址和 Clash 配置文件内的地址一致，否则会导致 Dashboard 无法连接。',
             host: 'Host',
             port: '端口',
             secret: '密钥',
-            addText: '添 加',
-            deleteText: '删 除',
+            addText: '添加',
+            deleteText: '删除',
             deleteErrorText: '没有找到该 Host',
         },
     },
     Logs: {
         title: '日志',
         levelLabel: '日志等级',
+        empty: '等待新的日志…',
     },
     Rules: {
         title: '规则',
         providerTitle: '规则集',
         providerUpdateTime: '最后更新于',
         ruleCount: '规则条数',
+        update: '更新',
+        columns: {
+            type: '类型',
+            payload: '内容',
+            proxy: '策略',
+        },
     },
     Connections: {
         title: '连接',
@@ -191,6 +204,7 @@ const CN = {
         closeAll: {
             title: '警告',
             content: '将会关闭所有连接',
+            action: '全部断开',
         },
         filter: {
             all: '全部',
@@ -231,6 +245,7 @@ const CN = {
             opening: '连接中',
             closed: '已关闭',
             closeConnection: '关闭连接',
+            closePanel: '关闭详情',
         },
     },
     Proxies: {
@@ -252,15 +267,23 @@ const CN = {
         },
         groupTitle: '策略组',
         providerTitle: '代理集',
+        nodesTitle: '节点',
         providerUpdateTime: '最后更新于',
         expandText: '展开',
         collapseText: '收起',
         speedTestText: '测速',
         breakConnectionsText: '切换时打断包含策略组的连接',
+        healthCheck: '健康检查',
+        update: '更新',
+        sort: {
+            asc: '延迟从低到高',
+            desc: '延迟从高到低',
+            none: '原始顺序',
+        },
     },
     Modal: {
-        ok: '确 定',
-        cancel: '取 消',
+        ok: '确定',
+        cancel: '取消',
     },
 } as const
 

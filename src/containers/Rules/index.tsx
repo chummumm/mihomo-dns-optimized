@@ -2,11 +2,11 @@ import AutoSizer from 'react-virtualized-auto-sizer'
 import { FixedSizeList as List } from 'react-window'
 import useSWR from 'swr'
 
-import { Header, Card } from '@components'
+import { Header, Card, LineBullet } from '@components'
 import { useI18n, useRule, useRuleProviders } from '@stores'
 
 import { Provider } from './Provider'
-import './style.scss'
+import './style.css'
 
 function RuleProviders () {
     const { providers } = useRuleProviders()
@@ -16,16 +16,16 @@ function RuleProviders () {
     return <>
         {
             providers.length !== 0 &&
-            <div className="flex flex-col">
-                <Header title={t('providerTitle')} />
-                <Card className="mt-4 rounded p-0 shadow-primary divide-y">
+            <section className="rules-section">
+                <Header level={2} title={t('providerTitle')} meta={<span className="reading">{providers.length}</span>} />
+                <Card className="rule-providers">
                     {
                         providers.map(p => (
                             <Provider key={p.name} provider={p} />
                         ))
                     }
                 </Card>
-            </div>
+            </section>
         }
     </>
 }
@@ -41,34 +41,42 @@ export default function Rules () {
         const rule = rules[index]
         return (
             <li className="rule-item" style={style}>
-                <div className="flex py-1">
-                    <div className="rule-type w-40 text-center">{ rule.type }</div>
-                    <div className="payload flex-1 text-center">{ rule.payload }</div>
-                    <div className="rule-proxy w-40 text-center">{ rule.proxy }</div>
-                </div>
+                <span className="rule-index">{ index + 1 }</span>
+                <span className="rule-type"><span className="rule-type-tag">{ rule.type }</span></span>
+                <span className="payload" title={rule.payload}>{ rule.payload || '*' }</span>
+                <span className="rule-proxy" title={rule.proxy}><LineBullet name={rule.proxy} />{ rule.proxy }</span>
             </li>
         )
     }
 
     return (
-        <div className="page">
+        <div className="page rules-page">
+            <Header title={t('title')} meta={<span className="reading">{rules.length}</span>} />
             <RuleProviders />
-            <Header className="not-first:mt-7.5" title={t('title')} />
-            <Card className="mt-2.5 flex flex-1 flex-col p-0 md:mt-4 focus:outline-none">
-                <AutoSizer className="min-h-120">
-                    {
-                        ({ height, width }) => (
-                            <List
-                                height={height ?? 0}
-                                width={width ?? 0}
-                                itemCount={rules.length}
-                                itemSize={50}
-                            >
-                                { renderRuleItem }
-                            </List>
-                        )
-                    }
-                </AutoSizer>
+            <Card className="rules-card">
+                <div className="rule-head" aria-hidden="true">
+                    <span className="rule-index">#</span>
+                    <span className="rule-type">{t('columns.type')}</span>
+                    <span className="payload">{t('columns.payload')}</span>
+                    <span className="rule-proxy">{t('columns.proxy')}</span>
+                </div>
+                <div className="rules-list">
+                    <AutoSizer>
+                        {
+                            ({ height, width }) => (
+                                <List
+                                    height={height ?? 0}
+                                    width={width ?? 0}
+                                    itemCount={rules.length}
+                                    itemSize={40}
+                                    innerElementType="ul"
+                                >
+                                    { renderRuleItem }
+                                </List>
+                            )
+                        }
+                    </AutoSizer>
+                </div>
             </Card>
         </div>
     )

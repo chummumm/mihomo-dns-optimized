@@ -1,0 +1,44 @@
+.button-select {
+    position: relative;
+    display: inline-flex;
+    flex-shrink: 0;
+    max-width: 100%;
+    padding: 2px;
+    border: 1px solid var(--hair);
+    border-radius: var(--r-ctl);
+    background: var(--sunken);
+    isolation: isolate;
+}
+
+.button-select-indicator {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: 4px;
+    background: var(--ink);
+}
+
+.button-select-label {
+    position: relative;
+    z-index: 1;
+}
+
+.button-select-options {
+    position: relative;
+    height: 26px;
+    padding: 0 12px;
+    border-radius: 4px;
+    color: var(--text-2);
+    font-size: var(--t-sm);
+    font-weight: 520;
+    white-space: nowrap;
+    transition: color var(--dur-2) var(--ease-out);
+}
+
+.button-select-options:hover:not(.actived) {
+    color: var(--text);
+}
+
+.button-select-options.actived {
+    color: var(--on-ink);
+}

@@ -16,6 +16,6 @@ export function DNSStatus ({ error, loading, updatedAt, refresh }: StatusProps) 
         <span className={error ? 'dns-error' : 'dns-muted'} role="status">
             {error ? t(`errors.${error}`) : updatedAt ? `${t('updated')}: ${formatDNSTime(updatedAt)}` : t('loading')}
         </span>
-        <Button disabled={loading} onClick={refresh}>{t('refresh')}</Button>
+        <Button type="ghost" size="sm" icon="update" loading={loading} disabled={loading} onClick={refresh}>{t('refresh')}</Button>
     </div>
 }

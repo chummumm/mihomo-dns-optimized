@@ -1,0 +1,625 @@
+.connections-page {
+    height: 100%;
+    min-height: 0;
+    padding-bottom: var(--sp-6);
+}
+
+.connections-traffic {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-3);
+    color: var(--text-2);
+    font-size: var(--t-sm);
+}
+
+.connections-traffic-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.connections-traffic-item .icon {
+    overflow: hidden;
+}
+
+.connections-traffic-item .icon {
+    color: var(--text-3);
+}
+
+/* Each time a total moves, its arrow travels once in the direction of the traffic. */
+@media (prefers-reduced-motion: no-preference) {
+    .connections-flow.icon-arrow-up > .icon-replay {
+        animation: flow-up 700ms var(--ease-out) backwards;
+    }
+
+    .connections-flow.icon-arrow-down > .icon-replay {
+        animation: flow-down 700ms var(--ease-out) backwards;
+    }
+
+    .connections-sort .icon > svg,
+    .connections-empty .icon > svg {
+        animation: icon-pop var(--dur-icon) var(--ease-icon) backwards;
+    }
+
+    .connections-sort .icon > .icon-replay {
+        animation-name: icon-turn-over;
+    }
+}
+
+@keyframes flow-up {
+    0% {
+        opacity: 1;
+        transform: none;
+    }
+
+    45% {
+        opacity: 0;
+        transform: translateY(-6px);
+    }
+
+    46% {
+        opacity: 0;
+        transform: translateY(6px);
+    }
+
+    100% {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+@keyframes flow-down {
+    0% {
+        opacity: 1;
+        transform: none;
+    }
+
+    45% {
+        opacity: 0;
+        transform: translateY(6px);
+    }
+
+    46% {
+        opacity: 0;
+        transform: translateY(-6px);
+    }
+
+    100% {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+.connections-keep {
+    margin-right: var(--sp-2);
+}
+
+.connections-close-all {
+    --btn-fg: var(--bad);
+}
+
+.connections-close-all:hover:not(:disabled) {
+    --btn-hover: var(--bad-bg);
+    --btn-border: var(--bad);
+}
+
+.connections-history-note {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px var(--sp-2);
+    margin: 0 0 var(--sp-3);
+    padding: 6px 6px 6px 12px;
+    border-radius: var(--r-ctl);
+    background: var(--sunken);
+    color: var(--text-2);
+    font-size: var(--t-xs);
+    animation: fade-up var(--dur-2) var(--ease-out);
+}
+
+.connections-history-icon {
+    color: var(--text-3);
+}
+
+.connections-history-note > span {
+    flex: 1;
+    min-width: 0;
+}
+
+/* Table */
+.connections-card {
+    position: relative;
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.connections-viewport {
+    position: relative;
+    flex: 1;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+}
+
+.connections-scroll {
+    overflow-anchor: none;
+}
+
+.connections-header {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    display: flex;
+    height: 30px;
+    border-bottom: 1px solid var(--hair);
+    background: var(--sunken);
+    white-space: nowrap;
+    /* react-window disables pointer events on the inner list while it scrolls; headers stay clickable. */
+    pointer-events: auto;
+}
+
+.connections-th {
+    position: relative;
+    display: inline-block;
+    flex-shrink: 0;
+    height: 30px;
+    background: var(--sunken);
+    color: var(--text-3);
+    font-size: var(--t-xs);
+    font-weight: 560;
+    letter-spacing: 0.01em;
+    line-height: 29px;
+    text-align: center;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.connections-th.fixed {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    text-align: left;
+}
+
+.connections-th-label {
+    height: 100%;
+    padding: 0 10px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+    transition: color var(--dur-1) var(--ease-out);
+}
+
+.connections-th.fixed .connections-th-label {
+    padding-left: 16px;
+}
+
+.connections-th-label:hover {
+    color: var(--text);
+}
+
+.connections-sort {
+    display: inline-flex;
+    margin-left: 4px;
+    color: var(--text);
+    vertical-align: -1px;
+}
+
+.connections-resizer {
+    position: absolute;
+    top: 7px;
+    right: -6px;
+    bottom: 7px;
+    z-index: 4;
+    width: 12px;
+    opacity: 0;
+    touch-action: none;
+    cursor: col-resize;
+    transition: opacity var(--dur-2) var(--ease-out);
+}
+
+.connections-resizer::before {
+    content: '';
+    position: absolute;
+    left: 5px;
+    width: 2px;
+    height: 100%;
+    border-radius: 1px;
+    background: var(--hair-2);
+}
+
+.connections-header:hover .connections-resizer,
+.connections-th.resizing .connections-resizer {
+    opacity: 1;
+}
+
+.connections-th.resizing .connections-resizer::before {
+    background: var(--ink);
+}
+
+.connections-row {
+    display: flex;
+    border-bottom: 1px solid var(--hair);
+    background: var(--panel);
+    white-space: nowrap;
+    cursor: default;
+    user-select: none;
+}
+
+.connections-block {
+    display: inline-block;
+    flex-shrink: 0;
+    height: 35px;
+    padding: 0 10px;
+    overflow: hidden;
+    background: inherit;
+    color: var(--text);
+    font-size: var(--t-sm);
+    line-height: 35px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.connections-block.text-center {
+    text-align: center;
+}
+
+.connections-block.fixed {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    padding-left: 16px;
+    font-weight: 520;
+}
+
+.connections-scroll.horizontally-scrolled .fixed {
+    box-shadow: 6px 0 8px -6px rgb(20 30 47 / 22%);
+}
+
+.connections-row:hover {
+    background: var(--row-hover);
+}
+
+.connections-row.selected {
+    background: var(--row-selected);
+}
+
+.connections-block.completed {
+    color: var(--text-3);
+}
+
+.connections-row.completed .connections-block.fixed::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    margin-right: 8px;
+    border: 1.5px solid var(--idle);
+    border-radius: var(--r-round);
+    vertical-align: 1px;
+}
+
+.connections-type {
+    font-family: var(--font-mono);
+    font-size: var(--t-xs);
+}
+
+.connections-type.dns {
+    padding: 2px 6px;
+    border-radius: var(--r-chip);
+    background: var(--sunken);
+    color: var(--text-2);
+}
+
+/* Group hops shrink first so the final hop, the node, keeps its name. */
+.connections-route {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    height: 100%;
+    white-space: nowrap;
+}
+
+.connections-hop {
+    flex: 0 4 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.connections-hop:last-child {
+    flex: 0 1 auto;
+}
+
+.connections-route .line-bullet {
+    width: 9px;
+    height: 9px;
+    margin: 0 5px 0 0;
+    border-width: 2.5px;
+    vertical-align: 0;
+}
+
+.connections-hop + .line-bullet,
+.connections-hop + .connections-hop-dot,
+.connections-hop + .sr-only + .line-bullet,
+.connections-hop + .sr-only + .connections-hop-dot {
+    margin-left: 8px;
+}
+
+.connections-hop-dot {
+    display: inline-block;
+    flex-shrink: 0;
+    width: 5px;
+    height: 5px;
+    margin-right: 5px;
+    border-radius: var(--r-round);
+    background: var(--idle);
+    vertical-align: 2px;
+}
+
+.connections-speed {
+    font-family: var(--font-mono);
+    font-size: var(--t-xs);
+    font-variant-numeric: tabular-nums;
+}
+
+.connections-speed.idle {
+    color: var(--text-3);
+}
+
+.connections-block:nth-child(n + 6) {
+    font-variant-numeric: tabular-nums;
+}
+
+.connections-empty {
+    position: absolute;
+    inset: 30px 0 0;
+    display: grid;
+    place-content: center;
+    justify-items: center;
+    gap: var(--sp-2);
+    color: var(--text-3);
+    font-size: var(--t-sm);
+    pointer-events: none;
+}
+
+/* Detail drawer */
+.connections-drawer {
+    background: var(--panel);
+}
+
+.connections-drawer-head {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: space-between;
+    height: 48px;
+    padding: 0 8px 0 20px;
+    border-bottom: 1px solid var(--hair);
+}
+
+.connections-drawer-title {
+    font-size: var(--t-md);
+    font-weight: 640;
+}
+
+.connections-drawer-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: var(--r-ctl);
+    color: var(--text-2);
+}
+
+.connections-drawer-close:hover {
+    background: var(--sunken);
+    color: var(--text);
+}
+
+.connections-info {
+    flex: 1;
+    min-height: 0;
+    padding: var(--sp-4) var(--sp-5);
+    overflow-y: auto;
+}
+
+.connections-drawer-foot {
+    display: flex;
+    flex-shrink: 0;
+    justify-content: flex-end;
+    padding: var(--sp-3) var(--sp-5);
+    border-top: 1px solid var(--hair);
+}
+
+.connection-status {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    margin-bottom: var(--sp-4);
+}
+
+.connection-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 22px;
+    padding: 0 8px;
+    border-radius: var(--r-chip);
+    font-size: var(--t-xs);
+    font-weight: 600;
+}
+
+.connection-state::before {
+    content: '';
+    width: 6px;
+    height: 6px;
+    border-radius: var(--r-round);
+    background: currentColor;
+}
+
+.connection-state.is-open {
+    background: var(--good-bg);
+    color: var(--good);
+}
+
+.connection-state.is-open::before {
+    animation: live-pulse 1.6s var(--ease-out) infinite;
+}
+
+.connection-state.is-closed {
+    background: var(--sunken);
+    color: var(--text-3);
+}
+
+.connection-network {
+    color: var(--text-3);
+    font-size: var(--t-xs);
+    text-transform: uppercase;
+}
+
+/* The journey: a vertical route through each hop */
+.journey {
+    position: relative;
+    display: grid;
+    gap: 0;
+    margin-bottom: var(--sp-5);
+}
+
+/* Segment from each stop down to the next; the routed part takes the group's line colour. */
+.journey-stop:not(:last-child)::before {
+    content: '';
+    position: absolute;
+    top: 17px;
+    bottom: -17px;
+    left: 5px;
+    width: 2px;
+    background: var(--idle);
+}
+
+.journey-stop.is-routed:not(:last-child)::before {
+    left: 4.5px;
+    width: 3px;
+    background: var(--line);
+}
+
+.journey-stop {
+    position: relative;
+    display: grid;
+    grid-template-columns: 12px 72px minmax(0, 1fr);
+    gap: 12px;
+    align-items: start;
+    padding: 7px 0;
+    line-height: 20px;
+}
+
+.journey-dot {
+    position: relative;
+    z-index: 1;
+    width: 12px;
+    height: 12px;
+    border: 2.5px solid var(--text-3);
+    border-radius: var(--r-round);
+    background: var(--panel);
+    align-self: start;
+    margin-top: 4px;
+}
+
+.journey-dot.line-bullet {
+    width: 12px;
+    height: 12px;
+    border-width: 3px;
+    border-color: var(--line);
+}
+
+.journey-origin .journey-dot,
+.journey-end .journey-dot {
+    border-color: var(--ink);
+    background: var(--ink);
+}
+
+.journey-end .journey-dot {
+    background: var(--signal);
+}
+
+.journey-label {
+    color: var(--text-3);
+    font-size: var(--t-xs);
+}
+
+.journey-value {
+    min-width: 0;
+    color: var(--text);
+    font-size: var(--t-sm);
+    overflow-wrap: anywhere;
+}
+
+.journey-strong {
+    font-weight: 600;
+}
+
+.connection-facts {
+    display: grid;
+    gap: 2px;
+    padding-top: var(--sp-3);
+    border-top: 1px solid var(--hair);
+}
+
+.connection-facts > div:not(.connection-facts-pair),
+.connection-facts-pair > div {
+    display: grid;
+    grid-template-columns: 84px minmax(0, 1fr);
+    gap: 12px;
+    padding: 6px 0;
+    font-size: var(--t-sm);
+}
+
+.connection-facts-pair {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+.connection-facts dt {
+    color: var(--text-3);
+    font-size: var(--t-xs);
+    line-height: 20px;
+}
+
+.connection-facts dd {
+    min-width: 0;
+    color: var(--text);
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 768px) {
+    .connections-page {
+        padding-bottom: var(--sp-3);
+    }
+
+    .connections-traffic {
+        font-size: var(--t-xs);
+    }
+
+    .connections-page .header-actions {
+        width: 100%;
+    }
+
+    .connections-close-all {
+        margin-left: auto;
+    }
+
+    .connections-info {
+        padding: var(--sp-3) var(--sp-4);
+    }
+
+    .connection-facts-pair {
+        grid-template-columns: 1fr;
+        gap: 0;
+    }
+}

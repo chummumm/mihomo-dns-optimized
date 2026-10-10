@@ -1,13 +1,15 @@
+import { motion } from 'motion/react'
 import { useMemo } from 'react'
 
-import { Card, Header, Icon, Checkbox } from '@components'
+import { Button, Card, Header, Checkbox, springs } from '@components'
 import EE from '@lib/event'
 import { useRound } from '@lib/hook'
 import type * as API from '@lib/request'
 import { useI18n, useConfig, useProxy, useProxyProviders, useGeneral } from '@stores'
 
+import { useTestsRunning } from './activity'
 import { Proxy, Group, Provider } from './components'
-import './style.scss'
+import './style.css'
 
 enum sortType {
     None,
@@ -20,6 +22,12 @@ const sortMap = {
     [sortType.Asc]: 'sort-ascending',
     [sortType.Desc]: 'sort-descending',
 }
+
+const sortLabel = {
+    [sortType.None]: 'sort.none',
+    [sortType.Asc]: 'sort.asc',
+    [sortType.Desc]: 'sort.desc',
+} as const
 
 export function compareDesc (a: API.Proxy, b: API.Proxy) {
     const lastDelayA = (a.history.length > 0) ? a.history.slice(-1)[0].delay : 0
@@ -44,17 +52,17 @@ function ProxyGroups () {
     return <>
         {
             list.length !== 0 &&
-            <div className="flex flex-col">
-                <Header title={t('groupTitle')}>
+            <section className="proxy-section">
+                <Header level={2} title={t('groupTitle')} meta={<span className="reading">{list.length}</span>}>
                     <Checkbox
-                        className="cursor-pointer text-sm text-primary-600 text-shadow-primary"
+                        className="proxy-break-connections"
                         checked={config.breakConnections}
                         onChange={value => setConfig('breakConnections', value)}>
                         {t('breakConnectionsText')}
                     </Checkbox>
                 </Header>
-                <Card className="my-2.5 p-0 md:my-4">
-                    <ul className="list-none divide-y divide-gray-300">
+                <Card className="proxy-groups">
+                    <ul className="proxy-group-list">
                         {
                             list.map(p => (
                                 <li key={p.name}>
@@ -64,7 +72,7 @@ function ProxyGroups () {
                         }
                     </ul>
                 </Card>
-            </div>
+            </section>
         }
     </>
 }
@@ -77,18 +85,18 @@ function ProxyProviders () {
     return <>
         {
             providers.length !== 0 &&
-            <div className="flex flex-col">
-                <Header title={t('providerTitle')} />
-                <ul className="list-none">
+            <section className="proxy-section">
+                <Header level={2} title={t('providerTitle')} meta={<span className="reading">{providers.length}</span>} />
+                <ul className="proxy-provider-list">
                     {
                         providers.map(p => (
-                            <li className="my-2.5 md:my-4" key={p.name}>
+                            <li key={p.name}>
                                 <Provider provider={p} />
                             </li>
                         ))
                     }
                 </ul>
-            </div>
+            </section>
         }
     </>
 }
@@ -97,10 +105,6 @@ function Proxies () {
     const { proxies } = useProxy()
     const { translation: useTranslation } = useI18n()
     const { t } = useTranslation('Proxies')
-
-    function handleNotitySpeedTest () {
-        EE.notifySpeedTest()
-    }
 
     const { current: sort, next } = useRound(
         [sortType.Asc, sortType.Desc, sortType.None],
@@ -120,29 +124,39 @@ function Proxies () {
     return <>
         {
             sortedProxies.length !== 0 &&
-            <div className="flex flex-col">
-                <Header title={t('title')}>
-                    <Icon className="ml-3" type={sortMap[sort]} onClick={handleSort} size={20} />
-                    <Icon className="ml-3" type="speed" size={20} />
-                    <span className="proxies-speed-test" onClick={handleNotitySpeedTest}>{t('speedTestText')}</span>
+            <section className="proxy-section">
+                <Header level={2} title={t('nodesTitle')} meta={<span className="reading">{sortedProxies.length}</span>}>
+                    <Button type="ghost" size="sm" icon={sortMap[sort]} onClick={handleSort} title={t(sortLabel[sort])}>{t(sortLabel[sort])}</Button>
                 </Header>
                 <ul className="proxies-list">
                     {
                         sortedProxies.map(p => (
-                            <li key={p.name}>
+                            // Re-sorting after a speed test slides tiles to their new places.
+                            <motion.li key={p.name} layout="position" transition={springs.reflow}>
                                 <Proxy config={p} />
-                            </li>
+                            </motion.li>
                         ))
                     }
                 </ul>
-            </div>
+            </section>
         }
     </>
 }
 
 export default function ProxyContainer () {
+    const { translation: useTranslation } = useI18n()
+    const { t } = useTranslation('Proxies')
+    const testing = useTestsRunning()
+
+    function handleNotitySpeedTest () {
+        EE.notifySpeedTest()
+    }
+
     return (
-        <div className="page">
+        <div className="page proxies-page">
+            <Header title={t('title')}>
+                <Button type="primary" icon="speed" loading={testing} onClick={handleNotitySpeedTest}>{t('speedTestText')}</Button>
+            </Header>
             <ProxyGroups />
             <ProxyProviders />
             <Proxies />

@@ -1,0 +1,134 @@
+.select {
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-2);
+    min-width: 0;
+    max-width: 100%;
+    height: var(--ctl-h);
+    padding: 0 8px 0 10px;
+    border: 1px solid var(--hair-2);
+    border-radius: var(--r-ctl);
+    background: var(--panel);
+    color: var(--text);
+    font-size: var(--t-sm);
+    text-align: left;
+    transition: border-color var(--dur-1) var(--ease-out);
+}
+
+.select:hover:not(:disabled) {
+    border-color: var(--text-3);
+}
+
+.select.open {
+    border-color: var(--ink);
+}
+
+.select:disabled {
+    background: var(--sunken);
+    color: var(--text-3);
+    cursor: not-allowed;
+}
+
+.select-value {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.select-caret {
+    color: var(--text-3);
+    transition: transform var(--dur-spring) var(--ease-spring);
+}
+
+.select.open .select-caret {
+    transform: rotate(180deg);
+}
+
+.select-list {
+    position: fixed;
+    z-index: var(--z-popover);
+    max-width: min(320px, calc(100vw - 16px));
+    max-height: 300px;
+    padding: 4px;
+    overflow: auto;
+    border: 1px solid var(--hair);
+    border-radius: var(--r-ctl);
+    background: var(--panel);
+    box-shadow: var(--shadow-pop);
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(-4px) scale(0.98);
+    transform-origin: top left;
+    visibility: hidden;
+    transition:
+        opacity var(--dur-1) var(--ease-out),
+        transform var(--dur-2) var(--ease-out),
+        visibility 0s linear var(--dur-2);
+}
+
+.select-list-show {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+    visibility: visible;
+    transition:
+        opacity var(--dur-1) var(--ease-out),
+        transform var(--dur-2) var(--ease-out);
+}
+
+/* Opening springs in; this must follow the rule above to win. */
+@media (prefers-reduced-motion: no-preference) {
+    .select-list-show {
+        transition:
+            opacity var(--dur-1) var(--ease-out),
+            transform var(--dur-spring) var(--ease-spring);
+    }
+}
+
+.select-list .option {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-3);
+    min-height: 32px;
+    padding: 6px 8px;
+    border-radius: var(--r-chip);
+    color: var(--text);
+    font-size: var(--t-sm);
+    cursor: pointer;
+}
+
+.select-list .option.active {
+    background: var(--sunken);
+}
+
+.select-list .option.selected {
+    font-weight: 600;
+}
+
+.select-list .option.disabled {
+    color: var(--text-3);
+    cursor: not-allowed;
+}
+
+.option-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.option-check {
+    --icon-stroke: 26;
+
+    color: var(--text-2);
+}
+
+/* The chosen option's tick draws itself each time the list opens. */
+.option-check path {
+    stroke-dasharray: 1 2;
+}
+
+.select-list-show .option-check path {
+    animation: icon-draw 320ms var(--ease-out) 90ms backwards;
+}

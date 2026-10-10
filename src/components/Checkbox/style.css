@@ -1,0 +1,83 @@
+.checkbox {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-2);
+    min-height: var(--ctl-h);
+    color: var(--text-2);
+    font-size: var(--t-sm);
+    line-height: 1.3;
+    cursor: pointer;
+    user-select: none;
+}
+
+.checkbox-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.checkbox-box {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border: 1.5px solid var(--hair-2);
+    border-radius: var(--r-chip);
+    background: var(--panel);
+    color: transparent;
+    transition: background-color var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out), transform var(--dur-spring) var(--ease-spring);
+}
+
+.checkbox:hover .checkbox-box {
+    border-color: var(--text-3);
+}
+
+.checkbox.checked .checkbox-box {
+    border-color: var(--ink);
+    background: var(--ink);
+    color: var(--on-ink);
+}
+
+/* The tick is drawn on, then the box gives a small spring as it lands. */
+.checkbox-icon {
+    --icon-stroke: 30;
+}
+
+.checkbox-icon path {
+    stroke-dasharray: 1 2;
+    stroke-dashoffset: 1;
+    transition: stroke-dashoffset var(--dur-1) var(--ease-out);
+}
+
+.checkbox.checked .checkbox-icon path {
+    stroke-dashoffset: 0;
+    transition: stroke-dashoffset 300ms var(--ease-out) 40ms;
+}
+
+.checkbox.checked .checkbox-box {
+    animation: check-land var(--dur-icon) var(--ease-icon);
+}
+
+.checkbox:active .checkbox-box {
+    transform: scale(0.88);
+}
+
+.checkbox.checked {
+    color: var(--text);
+}
+
+.checkbox-input:focus-visible + .checkbox-box {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+}
+
+@keyframes check-land {
+    from {
+        transform: scale(0.82);
+    }
+}

@@ -1,7 +1,6 @@
 import react from '@vitejs/plugin-react'
 import jotaiDebugLabel from 'jotai/babel/plugin-debug-label'
 import jotaiReactRefresh from 'jotai/babel/plugin-react-refresh'
-import UnoCSS from 'unocss/vite'
 import { defineConfig, splitVendorChunkPlugin } from 'vite'
 import { VitePWA } from 'vite-plugin-pwa'
 import tsConfigPath from 'vite-tsconfig-paths'
@@ -14,7 +13,6 @@ export default defineConfig(
                 babel: { plugins: [jotaiDebugLabel, jotaiReactRefresh] },
             }),
             tsConfigPath(),
-            UnoCSS(),
             VitePWA({
                 injectRegister: 'inline',
                 registerType: 'autoUpdate',
@@ -27,6 +25,8 @@ export default defineConfig(
                     start_url: './',
                     short_name: 'Clash Dashboard',
                     name: 'Clash Dashboard',
+                    theme_color: '#141e2f',
+                    background_color: '#f3f6f9',
                 },
             }),
             splitVendorChunkPlugin(),
@@ -35,14 +35,16 @@ export default defineConfig(
             port: 3000,
         },
         base: './',
-        css: {
-            preprocessorOptions: {
-                scss: {
-                    additionalData: '@use "sass:math"; @import "src/styles/variables.scss";',
+        build: {
+            reportCompressedSize: false,
+            rollupOptions: {
+                onwarn (warning, warn) {
+                    // motion ships "use client" markers for server components; they are meaningless in this SPA.
+                    if (warning.code === 'MODULE_LEVEL_DIRECTIVE' && warning.message.includes('use client')) return
+                    warn(warning)
                 },
             },
         },
-        build: { reportCompressedSize: false },
         esbuild: {
             jsxInject: "import React from 'react'",
         },

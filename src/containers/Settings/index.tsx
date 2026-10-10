@@ -10,7 +10,7 @@ import { useObject } from '@lib/hook'
 import { jsBridge } from '@lib/jsBridge'
 import { DEFAULT_PROBE_URL, normalizeProbeURL } from '@lib/probe'
 import { useI18n, useClashXData, useGeneral, useVersion, useClient, useConfig, identityAtom, hostSelectIdxStorageAtom, hostsStorageAtom, useAPIInfo } from '@stores'
-import './style.scss'
+import './style.css'
 
 const languageOptions: ButtonSelectOptions[] = [{ label: '中文', value: 'zh_CN' }, { label: 'English', value: 'en_US' }]
 
@@ -162,144 +162,163 @@ export default function Settings () {
     }, [t, premium])
 
     const controllerOptions = hostsStorage.map(
-        (h, idx) => ({ value: idx, label: <span className="truncate text-right">{h.hostname}:{h.port}</span> }),
+        (h, idx) => ({ value: idx, label: <span className="settings-endpoint">{h.hostname}:{h.port}</span> }),
     )
 
     const controllers = isClashX || controllerFromURL
-        ? <div className="min-w-0 text-right text-sm text-primary-darken">
-            <span className="controller-endpoint break-all">{`${apiInfo.protocol}//${externalControllerHost}:${externalControllerPort}`}</span>
-            {!isClashX && controllerFromURL && <p className="mt-1 text-xs">{t('controllerFromURL')}</p>}
+        ? <div className="settings-controller-fixed">
+            <span className="controller-endpoint">{`${apiInfo.protocol}//${externalControllerHost}:${externalControllerPort}`}</span>
+            {!isClashX && controllerFromURL && <p className="settings-hint">{t('controllerFromURL')}</p>}
         </div>
         : (
             <>
                 <Select
+                    className="settings-controller-select"
+                    ariaLabel={t('labels.externalController')}
                     disabled={hostsStorage.length < 2 && !isClashX}
                     options={controllerOptions}
                     value={hostSelectIdx}
                     onSelect={idx => setHostSelectIdx(idx)}
                 />
-                <span
+                <button
+                    type="button"
                     className={classnames({ 'modify-btn': !isClashX }, 'external-controller')}
                     onClick={() => !isClashX && setIdentity(false)}>
                     {t('labels.edit')}
-                </span>
+                </button>
             </>
         )
 
     return (
-        <div className="page">
+        <div className="page settings-page">
             <Header title={t('title')} />
-            <Card className="settings-card">
-                <div className="flex flex-wrap">
-                    <div className="w-full flex items-center justify-between px-8 py-3 md:w-1/2">
-                        <span className="label font-bold">{t('labels.startAtLogin')}</span>
-                        <Switch disabled={!clashXData?.isClashX} checked={startAtLogin} onChange={handleStartAtLoginChange} />
-                    </div>
-                    <div className="w-full flex items-center justify-between px-8 py-3 md:w-1/2">
-                        <span className="label font-bold">{t('labels.language')}</span>
-                        <ButtonSelect options={languageOptions} value={lang} onSelect={(lang) => changeLanguage(lang as Lang)} />
-                    </div>
-                </div>
-                <div className="flex flex-wrap">
-                    <div className="w-full flex items-center justify-between px-8 py-3 md:w-1/2">
-                        <span className="label font-bold">{t('labels.setAsSystemProxy')}</span>
-                        <Switch
-                            disabled={!isClashX}
-                            checked={systemProxy}
-                            onChange={handleSetSystemProxy}
-                        />
-                    </div>
-                    <div className="w-full flex items-center justify-between px-8 py-3 md:w-1/2">
-                        <span className="label font-bold">{t('labels.allowConnectFromLan')}</span>
-                        <Switch checked={allowLan} onChange={handleAllowLanChange} />
-                    </div>
-                </div>
-            </Card>
 
-            <Card className="settings-card">
-                <div className="flex flex-wrap">
-                    <div className="w-full flex items-center justify-between px-8 py-3 md:w-1/2">
-                        <span className="label font-bold">{t('labels.proxyMode')}</span>
+            <section className="settings-section">
+                <h2 className="settings-section-title">{t('sections.proxy')}</h2>
+                <Card className="settings-card">
+                    <div className="settings-row">
+                        <span className="label">{t('labels.proxyMode')}</span>
                         <ButtonSelect
+                            label={t('labels.proxyMode')}
                             options={proxyModeOptions}
                             value={mode}
                             onSelect={handleProxyModeChange}
                         />
                     </div>
-                    <div className="w-full flex items-center justify-between px-8 py-3 md:w-1/2">
-                        <span className="label font-bold">{t('labels.socks5ProxyPort')}</span>
-                        <Input
-                            className="w-28"
-                            disabled={isClashX}
-                            value={info.socks5ProxyPort}
-                            onChange={socks5ProxyPort => set('socks5ProxyPort', +socks5ProxyPort)}
-                            onBlur={handleSocksPortSave}
-                        />
+                    <div className="settings-row">
+                        <span className="label">{t('labels.allowConnectFromLan')}</span>
+                        <Switch label={t('labels.allowConnectFromLan')} checked={allowLan} onChange={handleAllowLanChange} />
                     </div>
-                </div>
-                <div className="flex flex-wrap">
-                    <div className="w-full flex items-center justify-between px-8 py-3 md:w-1/2">
-                        <span className="label font-bold">{t('labels.httpProxyPort')}</span>
+                    <div className="settings-row">
+                        <label className="label" htmlFor="settings-http-port">{t('labels.httpProxyPort')}</label>
                         <Input
-                            className="w-28"
+                            id="settings-http-port"
+                            className="settings-port"
+                            align="right"
+                            mono
+                            inputMode="numeric"
                             disabled={isClashX}
                             value={info.httpProxyPort}
                             onChange={httpProxyPort => set('httpProxyPort', +httpProxyPort)}
                             onBlur={handleHttpPortSave}
                         />
                     </div>
-                    <div className="w-full flex items-center justify-between px-8 py-3 md:w-1/2">
-                        <span className="label font-bold">{t('labels.mixedProxyPort')}</span>
+                    <div className="settings-row">
+                        <label className="label" htmlFor="settings-socks-port">{t('labels.socks5ProxyPort')}</label>
                         <Input
-                            className="w-28"
+                            id="settings-socks-port"
+                            className="settings-port"
+                            align="right"
+                            mono
+                            inputMode="numeric"
+                            disabled={isClashX}
+                            value={info.socks5ProxyPort}
+                            onChange={socks5ProxyPort => set('socks5ProxyPort', +socks5ProxyPort)}
+                            onBlur={handleSocksPortSave}
+                        />
+                    </div>
+                    <div className="settings-row">
+                        <label className="label" htmlFor="settings-mixed-port">{t('labels.mixedProxyPort')}</label>
+                        <Input
+                            id="settings-mixed-port"
+                            className="settings-port"
+                            align="right"
+                            mono
+                            inputMode="numeric"
                             disabled={isClashX}
                             value={info.mixedProxyPort}
                             onChange={mixedProxyPort => set('mixedProxyPort', +mixedProxyPort)}
                             onBlur={handleMixedPortSave}
                         />
                     </div>
-                </div>
-                <div className="flex flex-wrap">
-                    <div className="w-full flex items-center justify-between px-8 py-3 md:w-1/2">
-                        <span className="label font-bold">{t('labels.externalController')}</span>
-                        <div className="flex items-center space-x-2">
+                </Card>
+            </section>
+
+            <section className="settings-section">
+                <h2 className="settings-section-title">{t('sections.controller')}</h2>
+                <Card className="settings-card">
+                    <div className="settings-row settings-row-wrap">
+                        <span className="label">{t('labels.externalController')}</span>
+                        <div className="settings-controller">
                             { controllers }
                         </div>
                     </div>
-                    <div className="w-full flex items-center justify-between px-8 py-3 md:w-1/2">
-                        <Button disabled={reloading} onClick={handleReloadConfig}>{t(reloading ? 'labels.reloading' : 'labels.reloadConfig')}</Button>
+                    <div className="settings-row settings-row-action">
+                        <Button icon="update" loading={reloading} disabled={reloading} onClick={handleReloadConfig}>{t(reloading ? 'labels.reloading' : 'labels.reloadConfig')}</Button>
                     </div>
-                </div>
-            </Card>
-            <Card className="settings-card">
-                <form className="settings-probe-url" onSubmit={event => { event.preventDefault(); saveProbeURL() }}>
-                    <label className="label font-bold" htmlFor="probe-url">{t('labels.probeURL')}</label>
-                    <input
-                        id="probe-url"
-                        className="input text-left"
-                        value={probeURL}
-                        onChange={event => setProbeURL(event.target.value)}
-                        type="url"
-                        inputMode="url"
-                        spellCheck={false}
-                        autoCapitalize="off"
-                        maxLength={2048}
-                        disabled={isClashX}
-                        aria-describedby="probe-url-hint" />
-                    <div className="flex gap-3">
-                        <button className="button button-primary" type="submit" disabled={isClashX}>{t('labels.save')}</button>
-                        <button className="button button-normal" type="button" disabled={isClashX} onClick={resetProbeURL}>{t('labels.resetProbeURL')}</button>
+                </Card>
+            </section>
+
+            <section className="settings-section">
+                <h2 className="settings-section-title">{t('sections.probe')}</h2>
+                <Card className="settings-card">
+                    <form className="settings-probe-url" onSubmit={event => { event.preventDefault(); saveProbeURL() }}>
+                        <label className="label" htmlFor="probe-url">{t('labels.probeURL')}</label>
+                        <div className="settings-probe-field">
+                            <input
+                                id="probe-url"
+                                className="input mono"
+                                value={probeURL}
+                                onChange={event => setProbeURL(event.target.value)}
+                                type="url"
+                                inputMode="url"
+                                spellCheck={false}
+                                autoCapitalize="off"
+                                maxLength={2048}
+                                disabled={isClashX}
+                                aria-describedby="probe-url-hint" />
+                            <div className="settings-probe-actions">
+                                <button className="button button-primary" type="submit" disabled={isClashX}>{t('labels.save')}</button>
+                                <button className="button button-normal" type="button" disabled={isClashX} onClick={resetProbeURL}>{t('labels.resetProbeURL')}</button>
+                            </div>
+                        </div>
+                        <p id="probe-url-hint" className="settings-hint">{t('probeURLHint')}</p>
+                    </form>
+                </Card>
+            </section>
+
+            <section className="settings-section">
+                <h2 className="settings-section-title">{t('sections.system')}</h2>
+                <Card className="settings-card">
+                    <div className="settings-row">
+                        <span className="label">{t('labels.language')}</span>
+                        <ButtonSelect label={t('labels.language')} options={languageOptions} value={lang} onSelect={(lang) => changeLanguage(lang as Lang)} />
                     </div>
-                    <p id="probe-url-hint" className="text-primary-dark text-xs">{t('probeURLHint')}</p>
-                </form>
-            </Card>
-            {/* <Card className="clash-version hidden">
-                <span className="check-icon">
-                    <Icon type="check" size={20} />
-                </span>
-                <p className="version-info">{t('versionString')}</p>
-                <span className="check-update-btn">{t('checkUpdate')}</span>
-            </Card> */}
+                    <div className="settings-row">
+                        <span className="label">{t('labels.startAtLogin')}</span>
+                        <Switch label={t('labels.startAtLogin')} disabled={!clashXData?.isClashX} checked={startAtLogin} onChange={handleStartAtLoginChange} />
+                    </div>
+                    <div className="settings-row">
+                        <span className="label">{t('labels.setAsSystemProxy')}</span>
+                        <Switch
+                            label={t('labels.setAsSystemProxy')}
+                            disabled={!isClashX}
+                            checked={systemProxy}
+                            onChange={handleSetSystemProxy}
+                        />
+                    </div>
+                </Card>
+            </section>
         </div>
     )
 }

@@ -99,6 +99,23 @@ async function main() {
     }
     const waitCount = count => page.waitForFunction(count => document.querySelector('.connections-devices-item')?.textContent.trim() === 'All (' + count + ')', count)
     const waitRows = count => page.waitForFunction(count => Number(document.querySelector('[role="table"]')?.getAttribute('aria-rowcount')) === count + 1, count)
+    async function assertSourceCounts(label) {
+        const counts = await page.locator('.connections-devices-item .device-count').evaluateAll(items => items.map(item => Number(item.textContent.replace(/[()\s]/g, ''))))
+        assert.equal(counts.slice(1).reduce((sum, count) => sum + count, 0), counts[0], label + ': visible source counts partition the current All count without exiting ghost groups')
+        assert.ok(counts.slice(1).every(count => count > 0), label + ': zero-count source buttons are absent')
+    }
+    async function assertPinnedInternal(total, count, label) {
+        const buttons = page.locator('.connections-source-filters > button')
+        const labels = (await buttons.allTextContents()).map(text => text.trim())
+        assert.equal(labels[0], 'All (' + total + ')', label + ': All stays first')
+        if (count > 0) {
+            assert.equal(labels[1], 'mihomo (' + count + ')', label + ': nonempty mihomo stays second')
+            assert.equal(await page.getByRole('button', { name: 'mihomo (' + count + ')', exact: true }).count(), 1, label + ': mihomo appears exactly once')
+        } else {
+            assert.equal(await page.getByRole('button', { name: /^mihomo \(/ }).count(), 0, label + ': empty mihomo is removed')
+        }
+        await assertSourceCounts(label)
+    }
     const waitTableSize = () => page.waitForFunction(() => {
         const viewport = document.querySelector('.connections-viewport')
         const scroll = document.querySelector('.connections-scroll')
@@ -112,6 +129,7 @@ async function main() {
         if (rate) connections = connections.map(item => ({ ...item, download: item.download + rate(item) }))
         for (const socket of sockets) socket.send(JSON.stringify(snapshot()))
         await page.waitForTimeout(70)
+        await assertSourceCounts('connection snapshot')
     }
     async function position(label) {
         const result = await page.evaluate(label => {
@@ -164,6 +182,7 @@ async function main() {
 
     await waitCount(400); await waitRows(400)
     assert.deepEqual((await position('all_400')).devices, ['All (400)', '192.0.2.101 (200)', '192.0.2.102 (200)'])
+    await assertPinnedInternal(400, 0, 'initial empty internal bucket')
     await page.locator('.connections-devices-item').filter({ hasText: '192.0.2.101' }).click()
     await waitRows(200)
     await page.locator('.connections-devices-item').first().click()
@@ -241,12 +260,12 @@ async function main() {
     await page.locator('.connections-devices-item').filter({ hasText: '192.0.2.101' }).click()
     await waitRows(2)
     await send([connection(20001)])
-    await waitCount(1); await waitRows(0)
-    const emptyDevice = page.getByRole('button', { name: '192.0.2.101 (0)', exact: true })
-    assert.equal(await emptyDevice.getAttribute('aria-pressed'), 'true', 'an empty selected source stays selected')
-    await page.getByText('No connections in this view.', { exact: true }).waitFor()
+    await waitCount(1); await waitRows(1)
+    assert.equal(await page.getByRole('button', { name: /^192\.0\.2\.101 \(/ }).count(), 0, 'a disappeared device is removed without an exit-animation delay')
+    assert.equal(await page.getByRole('button', { name: 'All (1)', exact: true }).getAttribute('aria-pressed'), 'true', 'a removed selected device falls back to All')
     await send(null)
     await waitCount(0); await waitRows(0)
+    await page.getByText('No connections in this view.', { exact: true }).waitFor()
     await send([connection(30000), connection(30001)])
     await waitCount(2)
     await send([connection(30000)])
@@ -335,6 +354,7 @@ async function main() {
     const grouped = [dns, legacyDNS, ordinary53, nativeDNS, internalWork, unknown, unspecified]
     await send(grouped)
     await waitCount(7); await waitRows(7)
+    await assertPinnedInternal(7, 3, 'internal work arrives after existing devices')
     const expectedGroups = [
         ['mihomo', [dns.id, nativeDNS.id, internalWork.id]],
         ['Unknown source', [unknown.id, unspecified.id]],
@@ -351,12 +371,16 @@ async function main() {
     assert.equal(totalGrouped, grouped.length, 'source buckets partition All')
     await page.getByRole('button', { name: 'mihomo (3)', exact: true }).click()
     await send([legacyDNS, ordinary53, unknown, unspecified])
-    await waitCount(4); await waitRows(0)
-    assert.equal(await page.getByRole('button', { name: 'mihomo (0)', exact: true }).getAttribute('aria-pressed'), 'true')
-    await send(grouped)
-    await waitCount(7); await waitRows(3)
-    assert.equal(await page.getByRole('button', { name: 'mihomo (3)', exact: true }).getAttribute('aria-pressed'), 'true', 'new internal work returns to the existing selection')
-    observations.push({ label: 'source_groups', all: 7, mihomo: 3, unknown: 2, devices: 2, transientZeroKeepsSelection: true })
+    await waitCount(4); await waitRows(4)
+    assert.equal(await page.getByRole('button', { name: 'All (4)', exact: true }).getAttribute('aria-pressed'), 'true', 'a removed selected internal source falls back to All')
+    await assertPinnedInternal(4, 0, 'selected internal bucket is removed at zero')
+    await send([...grouped].reverse())
+    await waitCount(7); await waitRows(7)
+    assert.equal(await page.getByRole('button', { name: 'All (7)', exact: true }).getAttribute('aria-pressed'), 'true', 'returning internal work does not change the current All selection')
+    await assertPinnedInternal(7, 3, 'reordered sources restore internal work')
+    await page.getByRole('button', { name: 'mihomo (3)', exact: true }).click()
+    await waitRows(3)
+    observations.push({ label: 'source_groups', all: 7, mihomo: 3, unknown: 2, devices: 2, missingSourceFallsBackToAll: true, mihomoPinnedSecondWhenNonempty: true, zeroGroupsRemoved: true })
 
     await page.setViewportSize({ width: 390, height: 844 })
     await page.getByRole('link', { name: 'Connections', exact: true }).click()
@@ -368,6 +392,7 @@ async function main() {
     })
     await send([...mobileRows, ordinary53])
     await waitCount(201); await waitRows(200)
+    await assertPinnedInternal(201, 200, 'mobile internal bucket')
     await bottom('mobile_mihomo_bottom')
     await send([...mobileRows, ordinary53], () => 200)
     stillBottom(await position('mobile_mihomo_refresh'), 'mobile selected internal bottom')
@@ -389,7 +414,8 @@ async function main() {
     await waitCount(201); await waitRows(200)
     await page.getByText('Clear closed records', { exact: true }).click()
     await waitCount(0); await waitRows(0)
-    assert.equal(await page.getByRole('button', { name: 'mihomo (0)', exact: true }).getAttribute('aria-pressed'), 'true', 'clearing history keeps the selected source')
+    assert.equal(await page.getByRole('button', { name: 'All (0)', exact: true }).getAttribute('aria-pressed'), 'true', 'clearing the selected internal history falls back to All')
+    await assertPinnedInternal(0, 0, 'cleared mobile history')
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, 'mobile page has no horizontal body overflow')
     observations.push({ label: 'mobile_connections', width: 390, internalRows: 200, visibleNavigation: true, boundedDrawer: true, processColumnKept: true })
     assert.deepEqual(pageErrors, [])

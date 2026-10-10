@@ -1,9 +1,10 @@
 import classnames from 'classnames'
 
-import { Icon } from '@components'
 import { noop } from '@lib/helper'
 import { type BaseComponentProps } from '@models/BaseProps'
-import './style.scss'
+
+import { Icon } from '../Icon'
+import './style.css'
 
 interface CheckboxProps extends BaseComponentProps {
     checked: boolean
@@ -11,17 +12,20 @@ interface CheckboxProps extends BaseComponentProps {
 }
 
 export function Checkbox (props: CheckboxProps) {
-    const { className, checked = false, onChange = noop } = props
+    const { className, style, checked = false, onChange = noop } = props
     const classname = classnames('checkbox', { checked }, className)
 
-    function handleClick () {
+    function handleChange () {
         onChange(!checked)
     }
 
     return (
-        <div className={classname} onClick={handleClick}>
-            <Icon className="checkbox-icon" type="check" size={18} />
-            <div>{ props.children }</div>
-        </div>
+        <label className={classname} style={style}>
+            <input className="checkbox-input" type="checkbox" checked={checked} onChange={handleChange} />
+            <span className="checkbox-box" aria-hidden="true">
+                <Icon className="checkbox-icon" type="check" size={12} />
+            </span>
+            <span className="checkbox-label">{ props.children }</span>
+        </label>
     )
 }

@@ -1,0 +1,435 @@
+/* The wayfinding rail: navigation drawn as a line with stations. */
+
+.sidebar {
+    --item-h: 44px;
+    --station-x: 26px;
+
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: var(--z-rail);
+    display: flex;
+    flex-direction: column;
+    width: var(--rail-w);
+    padding: var(--sp-5) var(--sp-3) var(--sp-4);
+    border-right: 1px solid var(--rail-edge);
+    background: var(--rail);
+    color: var(--rail-text);
+    user-select: none;
+}
+
+.sidebar-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 40px;
+    padding-left: 8px;
+    margin-bottom: var(--sp-6);
+}
+
+.sidebar-logo {
+    width: 34px;
+    height: 34px;
+}
+
+.sidebar-name {
+    font-size: var(--t-lg);
+    font-weight: 680;
+    letter-spacing: -0.01em;
+}
+
+.sidebar-route {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+}
+
+/* The line through every station */
+.sidebar-menu {
+    position: relative;
+}
+
+.sidebar-menu::before {
+    content: '';
+    position: absolute;
+    top: calc(var(--item-h) / 2);
+    bottom: calc(var(--item-h) / 2);
+    left: calc(var(--station-x) - 1.5px);
+    width: 3px;
+    border-radius: 2px;
+    background: var(--rail-line);
+}
+
+.sidebar-menu .item {
+    position: relative;
+    height: var(--item-h);
+}
+
+.item-link {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 100%;
+    padding: 0 10px 0 calc(var(--station-x) + 16px);
+    border-radius: var(--r-ctl);
+    color: var(--rail-text-2);
+    font-size: var(--t-md);
+    font-weight: 500;
+    transition: color var(--dur-2) var(--ease-out), background-color var(--dur-2) var(--ease-out);
+}
+
+.item-link:hover {
+    background: var(--rail-hover);
+    color: var(--rail-text);
+}
+
+.item-link.active {
+    color: var(--rail-text);
+    font-weight: 620;
+}
+
+.item-link:focus-visible {
+    outline-color: var(--signal);
+    outline-offset: -2px;
+}
+
+.item-station {
+    position: absolute;
+    top: calc(50% - 5px);
+    left: calc(var(--station-x) - 5px);
+    width: 10px;
+    height: 10px;
+    border: 2px solid var(--rail-line);
+    border-radius: var(--r-round);
+    background: var(--rail);
+    transition: border-color var(--dur-2) var(--ease-out);
+}
+
+.item-link:hover .item-station {
+    border-color: var(--rail-text-2);
+}
+
+.item-icon {
+    opacity: 0.85;
+}
+
+.item-link.active .item-icon {
+    color: var(--signal);
+    opacity: 1;
+}
+
+/*
+ * Each destination has its own small gesture: a pose on hover and an arrival when it becomes
+ * the current page. The arrival runs as the marker glides in, so the two read as one move.
+ */
+.icon-nav-rules > svg {
+    transform-origin: 50% 94%;
+}
+
+.icon-nav-logs > svg {
+    transform-origin: 50% 10%;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .item-link.active .item-icon > svg {
+        animation: nav-arrive var(--dur-icon) var(--ease-icon) 60ms backwards;
+    }
+
+    .item-link.active .icon-nav-proxies > svg {
+        animation-name: nav-arrive-proxies;
+    }
+
+    .item-link.active .icon-nav-logs > svg {
+        animation-name: nav-arrive-logs;
+    }
+
+    .item-link.active .icon-nav-rules > svg {
+        animation: nav-arrive-rules 760ms var(--ease-in-out) 60ms backwards;
+    }
+
+    .item-link.active .icon-nav-connections > svg {
+        animation-name: nav-arrive-connections;
+    }
+
+    .item-link.active .icon-nav-dns > svg {
+        animation: nav-arrive-dns 720ms var(--ease-out) 60ms backwards;
+    }
+
+    .item-link.active .icon-nav-settings > svg {
+        animation-name: nav-arrive-settings;
+    }
+}
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+    .item-link:hover .icon-nav-proxies > svg {
+        transform: translateX(2px);
+    }
+
+    .item-link:hover .icon-nav-logs > svg {
+        transform: translateY(-1px) rotate(-5deg);
+    }
+
+    .item-link:hover .icon-nav-rules > svg {
+        transform: rotate(-9deg);
+    }
+
+    .item-link:hover .icon-nav-connections > svg {
+        transform: rotate(-10deg) scale(1.1);
+    }
+
+    .item-link:hover .icon-nav-dns > svg {
+        transform: rotate(-20deg);
+    }
+
+    .item-link:hover .icon-nav-settings > svg {
+        transform: rotate(60deg);
+    }
+}
+
+@keyframes nav-arrive {
+    from {
+        transform: scale(0.6);
+    }
+}
+
+/* the route draws in from the left */
+@keyframes nav-arrive-proxies {
+    from {
+        opacity: 0.3;
+        transform: translateX(-6px) scale(0.85);
+    }
+}
+
+/* the scroll unrolls from its top edge */
+@keyframes nav-arrive-logs {
+    from {
+        transform: scaleY(0.35);
+    }
+}
+
+/* the signpost swings to rest */
+@keyframes nav-arrive-rules {
+    0% {
+        transform: rotate(-20deg);
+    }
+
+    30% {
+        transform: rotate(12deg);
+    }
+
+    55% {
+        transform: rotate(-6deg);
+    }
+
+    78% {
+        transform: rotate(2deg);
+    }
+
+    100% {
+        transform: none;
+    }
+}
+
+/* the plugs push home */
+@keyframes nav-arrive-connections {
+    from {
+        transform: translate(-3px, 3px) rotate(-24deg) scale(0.75);
+    }
+}
+
+/* the globe turns once */
+@keyframes nav-arrive-dns {
+    from {
+        transform: perspective(60px) rotateY(-180deg);
+    }
+
+    to {
+        transform: perspective(60px) rotateY(0deg);
+    }
+}
+
+/* the gear engages */
+@keyframes nav-arrive-settings {
+    from {
+        transform: rotate(-120deg) scale(0.8);
+    }
+}
+
+/* You are here: slides along the line to the current page */
+.sidebar-marker {
+    position: absolute;
+    top: calc(var(--item-h) / 2 - 9px);
+    left: calc(var(--station-x) - 9px);
+    z-index: 1;
+    width: 18px;
+    height: 18px;
+    border: 4px solid var(--signal);
+    border-radius: var(--r-round);
+    background: var(--rail);
+    box-shadow: 0 0 0 3px var(--rail);
+    pointer-events: none;
+}
+
+.sidebar-marker-mobile {
+    display: none;
+}
+
+.sidebar-version {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--sp-3) 8px 0;
+    border-top: 1px solid var(--rail-line);
+    font-size: var(--t-xs);
+}
+
+.sidebar-version-label {
+    color: var(--rail-text-2);
+}
+
+.sidebar-version-text {
+    color: var(--rail-text);
+    font-family: var(--font-mono);
+    font-size: var(--t-2xs);
+    overflow-wrap: anywhere;
+}
+
+.sidebar-version-premium {
+    align-self: flex-start;
+    margin-top: 4px;
+    padding: 1px 6px;
+    border-radius: var(--r-chip);
+    background: var(--signal);
+    color: #141e2f;
+    font-weight: 600;
+}
+
+/* Compact rail on small laptops and tablets */
+@media (max-width: 1023px) and (min-width: 769px) {
+    .sidebar {
+        --station-x: 26px;
+
+        padding-right: var(--sp-2);
+        padding-left: var(--sp-2);
+    }
+
+    .sidebar-brand {
+        justify-content: center;
+        padding-left: 0;
+    }
+
+    .sidebar-name,
+    .item-label,
+    .sidebar-version {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+    }
+
+    .item-link {
+        padding-left: 36px;
+    }
+}
+
+/* Phones: a bottom bar of stops */
+@media (max-width: 768px) {
+    .sidebar {
+        top: auto;
+        right: 0;
+        width: 100%;
+        height: calc(var(--bar-h) + env(safe-area-inset-bottom));
+        flex-direction: row;
+        padding: 0 4px env(safe-area-inset-bottom);
+        border-top: 1px solid var(--rail-edge);
+        border-right: 0;
+    }
+
+    .sidebar-brand,
+    .sidebar-version,
+    .sidebar-marker {
+        display: none;
+    }
+
+    .sidebar-route {
+        height: 100%;
+    }
+
+    .sidebar-menu {
+        display: flex;
+        height: 100%;
+    }
+
+    /* The line runs across the top of the bar, one station per stop. */
+    .sidebar-menu::before {
+        top: 0;
+        right: calc(50% / var(--count-m));
+        bottom: auto;
+        left: calc(50% / var(--count-m));
+        width: auto;
+        height: 3px;
+    }
+
+    .item-station {
+        top: -3.5px;
+        left: calc(50% - 5px);
+    }
+
+    .sidebar-marker-mobile {
+        position: absolute;
+        top: -7.5px;
+        left: 0;
+        z-index: 1;
+        display: block;
+        width: calc(100% / var(--count-m));
+        height: 18px;
+        pointer-events: none;
+    }
+
+    .sidebar-marker-mobile::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: calc(50% - 9px);
+        width: 18px;
+        height: 18px;
+        border: 4px solid var(--signal);
+        border-radius: var(--r-round);
+        background: var(--rail);
+        box-shadow: 0 0 0 3px var(--rail);
+    }
+
+    .sidebar-menu .item {
+        flex: 1;
+        min-width: 0;
+        height: 100%;
+    }
+
+    .sidebar-menu .item.no-mobile {
+        display: none;
+    }
+
+    .item-link {
+        position: relative;
+        flex-direction: column;
+        justify-content: center;
+        gap: 3px;
+        padding: 6px 2px 0;
+        border-radius: 0;
+        font-size: var(--t-2xs);
+    }
+
+    .item-link:hover {
+        background: transparent;
+    }
+
+    .item-label {
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+}

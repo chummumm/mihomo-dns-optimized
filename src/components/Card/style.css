@@ -1,0 +1,6 @@
+.card {
+    position: relative;
+    border: 1px solid var(--hair);
+    border-radius: var(--r-panel);
+    background: var(--panel);
+}

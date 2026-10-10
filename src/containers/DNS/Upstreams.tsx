@@ -30,20 +30,22 @@ export function DNSUpstreamPage ({ client, instanceID, instanceChanged }: Upstre
 
     const columns = useMemo<Array<ColumnDef<DNSUpstream>>>(() => [
         { accessorKey: 'address', header: t('upstream'), cell: ({ row }) => <span className="dns-upstream-address">{row.original.address || t('unknownUpstream')}</span> },
-        { accessorKey: 'attempts', header: t('attempts'), cell: ({ row }) => formatDNSNumber(row.original.attempts) },
-        { accessorKey: 'successes', header: t('successes'), cell: ({ row }) => formatDNSNumber(row.original.successes) },
-        { accessorKey: 'errors', header: t('errorsLabel'), cell: ({ row }) => formatDNSNumber(row.original.errors) },
-        { accessorKey: 'canceled', header: t('canceled'), cell: ({ row }) => formatDNSNumber(row.original.canceled) },
-        { accessorKey: 'timeouts', header: t('timeouts'), cell: ({ row }) => formatDNSNumber(row.original.timeouts) },
-        { accessorKey: 'rcode_errors', header: t('rcodeErrors'), cell: ({ row }) => formatDNSNumber(row.original.rcode_errors) },
-        { id: 'ratio', header: t('successRatio'), cell: ({ row }) => cacheHitRatio(row.original.successes, row.original.successes + row.original.errors) },
-        { accessorKey: 'elapsed_ms_avg', header: t('averageLatency'), cell: ({ row }) => `${formatDNSNumber(row.original.elapsed_ms_avg, 2)} ms` },
+        { accessorKey: 'attempts', header: t('attempts'), cell: ({ row }) => <span className="dns-num">{formatDNSNumber(row.original.attempts)}</span> },
+        { accessorKey: 'successes', header: t('successes'), cell: ({ row }) => <span className="dns-num">{formatDNSNumber(row.original.successes)}</span> },
+        { accessorKey: 'errors', header: t('errorsLabel'), cell: ({ row }) => <span className={row.original.errors > 0 ? 'dns-num dns-error' : 'dns-num'}>{formatDNSNumber(row.original.errors)}</span> },
+        { accessorKey: 'canceled', header: t('canceled'), cell: ({ row }) => <span className="dns-num">{formatDNSNumber(row.original.canceled)}</span> },
+        { accessorKey: 'timeouts', header: t('timeouts'), cell: ({ row }) => <span className="dns-num">{formatDNSNumber(row.original.timeouts)}</span> },
+        { accessorKey: 'rcode_errors', header: t('rcodeErrors'), cell: ({ row }) => <span className="dns-num">{formatDNSNumber(row.original.rcode_errors)}</span> },
+        { id: 'ratio', header: t('successRatio'), cell: ({ row }) => <span className="dns-num dns-strong">{cacheHitRatio(row.original.successes, row.original.successes + row.original.errors)}</span> },
+        { accessorKey: 'elapsed_ms_avg', header: t('averageLatency'), cell: ({ row }) => <span className="dns-num">{`${formatDNSNumber(row.original.elapsed_ms_avg, 2)} ms`}</span> },
     ], [t])
 
     return <>
         <div className="dns-section-heading"><h2>{t('processScope')}</h2><DNSStatus {...resource} /></div>
-        <p className="dns-muted dns-caption">{t('upstreamScope')}</p>
-        <p className="dns-muted dns-caption">{t('successDefinition')}</p>
+        <div className="dns-captions">
+            <p className="dns-muted dns-caption">{t('upstreamScope')}</p>
+            <p className="dns-muted dns-caption">{t('successDefinition')}</p>
+        </div>
         <Card className="dns-query-card">
             <DNSTable rows={data?.items ?? []} columns={columns} rowID={upstreamID} empty={resource.loading ? t('loading') : t('noUpstreams')} busy={resource.loading} />
         </Card>

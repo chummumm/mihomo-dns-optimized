@@ -1,0 +1,136 @@
+.message-container {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    z-index: var(--z-toast);
+    pointer-events: none;
+}
+
+.message {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    z-index: var(--z-toast);
+    display: flex;
+    align-items: flex-start;
+    gap: var(--sp-3);
+    width: max-content;
+    max-width: min(420px, calc(100vw - 32px));
+    padding: 12px 14px;
+    border: 1px solid var(--hair);
+    border-radius: var(--r-ctl);
+    background: var(--panel);
+    box-shadow: var(--shadow-pop);
+    opacity: 0;
+    pointer-events: auto;
+    transform: translateY(-8px) scale(0.98);
+    transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-3) var(--ease-out);
+}
+
+.message-show {
+    opacity: 1;
+    transform: none;
+    transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-spring) var(--ease-spring);
+}
+
+.message-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+    margin-top: 1px;
+}
+
+.message-content {
+    color: var(--text);
+    font-size: var(--t-sm);
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+.message-info .message-icon { color: var(--link); }
+.message-success .message-icon { color: var(--good); }
+.message-warning .message-icon { color: var(--warn); }
+.message-error .message-icon { color: var(--bad); }
+
+@media (max-width: 768px) {
+    .message {
+        right: 12px;
+        left: 12px;
+        width: auto;
+        max-width: none;
+    }
+}
+
+/* The icon arrives just after the toast and says what kind of news it is. */
+@media (prefers-reduced-motion: no-preference) {
+    .message-show .message-icon svg {
+        animation: icon-pop var(--dur-icon) var(--ease-icon) 80ms backwards;
+    }
+
+    .message-error.message-show .message-icon svg {
+        animation: message-shake 460ms var(--ease-out) 80ms backwards;
+    }
+
+    .message-warning.message-show .message-icon svg {
+        transform-origin: 50% 85%;
+        animation: message-sway 620ms var(--ease-in-out) 80ms backwards;
+    }
+}
+
+@keyframes message-shake {
+    0% {
+        opacity: 0;
+        transform: scale(0.6);
+    }
+
+    25% {
+        opacity: 1;
+        transform: translateX(-3px) scale(1.05);
+    }
+
+    45% {
+        transform: translateX(3px);
+    }
+
+    65% {
+        transform: translateX(-2px);
+    }
+
+    85% {
+        transform: translateX(1px);
+    }
+
+    100% {
+        transform: none;
+    }
+}
+
+@keyframes message-sway {
+    0% {
+        opacity: 0;
+        transform: rotate(-24deg) scale(0.7);
+    }
+
+    30% {
+        opacity: 1;
+        transform: rotate(12deg);
+    }
+
+    55% {
+        transform: rotate(-6deg);
+    }
+
+    80% {
+        transform: rotate(2deg);
+    }
+
+    100% {
+        transform: none;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .message,
+    .message-show {
+        transition: none;
+    }
+}

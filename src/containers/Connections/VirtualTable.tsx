@@ -15,6 +15,7 @@ interface TableProps {
     width: number
     totalWidth: number
     centeredColumns: Set<string>
+    selectedID?: string
     onSelect: (id: string) => void
 }
 
@@ -69,7 +70,7 @@ function ConnectionRow ({ index, style, data }: ListChildComponentProps<TablePro
         <div
             role="row"
             aria-rowindex={index + 2}
-            className="connections-row cursor-default select-none"
+            className={classnames('connections-row', { selected: data.selectedID === row.original.id, completed: row.original.completed })}
             data-connection-id={row.original.id}
             style={{ ...style, top: Number(style.top ?? 0) + HEADER_HEIGHT, width: data.totalWidth }}
             onClick={() => data.onSelect(row.original.id)}>

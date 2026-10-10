@@ -2,17 +2,18 @@ import classnames from 'classnames'
 
 import { type BaseComponentProps } from '@models/BaseProps'
 
-import './style.scss'
+import './style.css'
 
 interface TagProps extends BaseComponentProps {
     color?: string
+    tone?: 'neutral' | 'ink' | 'good' | 'warn' | 'bad'
+    title?: string
 }
 
 export function Tag (props: TagProps) {
-    const { color, className: cn, style: s } = props
-    const className = classnames('tag', cn)
+    const { color, tone = 'neutral', title, className: cn, style: s, children } = props
+    const className = classnames('tag', `tag-${tone}`, cn)
     const style: React.CSSProperties = { color, ...s }
-    const spanProps = { ...props, className, style }
 
-    return <span {...spanProps}>{ props.children }</span>
+    return <span className={className} style={style} title={title}>{ children }</span>
 }

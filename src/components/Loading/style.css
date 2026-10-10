@@ -1,0 +1,36 @@
+.loading {
+    position: absolute;
+    inset: 0;
+    z-index: var(--z-sticky);
+    border-radius: inherit;
+    background: color-mix(in srgb, var(--panel) 55%, transparent);
+    animation: loading-in var(--dur-2) var(--ease-out);
+    cursor: progress;
+}
+
+.loading-track {
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 0;
+    height: 3px;
+    overflow: hidden;
+    border-radius: inherit;
+}
+
+.loading-train {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 38%;
+    height: 100%;
+    border-radius: var(--r-round);
+    background: var(--ink);
+    animation: run 1.1s var(--ease-in-out) infinite;
+}
+
+@keyframes loading-in {
+    from {
+        opacity: 0;
+    }
+}

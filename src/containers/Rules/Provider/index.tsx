@@ -1,11 +1,11 @@
 import classnames from 'classnames'
 
-import { Tag, Icon } from '@components'
+import { Button, Tag } from '@components'
 import { fromNow } from '@lib/date'
 import { useVisible } from '@lib/hook'
 import { type RuleProvider } from '@lib/request'
 import { useClient, useI18n, useRuleProviders } from '@stores'
-import './style.scss'
+import './style.css'
 
 interface ProvidersProps {
     provider: RuleProvider
@@ -26,24 +26,20 @@ export function Provider (props: ProvidersProps) {
         client.updateRuleProvider(provider.name).then(async () => await update()).finally(() => hide())
     }
 
-    const updateClassnames = classnames('rule-provider-icon', { 'rule-provider-loading': visible })
-
     return (
-        <div className="rule-provider">
-            <div className="rule-provider-header">
-                <div className="rule-provider-header-part">
-                    <span className="rule-provider-name">{ provider.name }</span>
-                    <Tag>{ provider.vehicleType }</Tag>
-                    <Tag className="rule-provider-behavior">{ provider.behavior }</Tag>
-                    <span className="rule-provider-update">{ `${t('ruleCount')}: ${provider.ruleCount}` }</span>
-                </div>
-                <div className="rule-provider-header-part">
-                    {
-                        provider.updatedAt &&
-                        <span className="rule-provider-update">{ `${t('providerUpdateTime')}: ${fromNow(new Date(provider.updatedAt), lang)}`}</span>
-                    }
-                    <Icon className={updateClassnames} type="update" size={18} onClick={handleUpdate} />
-                </div>
+        <div className={classnames('rule-provider', { 'is-updating': visible })}>
+            <div className="rule-provider-header-part">
+                <span className="rule-provider-name" title={provider.name}>{ provider.name }</span>
+                <Tag>{ provider.vehicleType }</Tag>
+                <Tag tone="ink">{ provider.behavior }</Tag>
+            </div>
+            <div className="rule-provider-header-part rule-provider-meta">
+                <span className="rule-provider-update">{ t('ruleCount') }: <b className="reading">{ provider.ruleCount }</b></span>
+                {
+                    provider.updatedAt &&
+                    <span className="rule-provider-update">{ `${t('providerUpdateTime')}: ${fromNow(new Date(provider.updatedAt), lang)}`}</span>
+                }
+                <Button type="ghost" size="sm" icon="update" loading={visible} disabled={visible} onClick={handleUpdate}>{t('update')}</Button>
             </div>
         </div>
     )

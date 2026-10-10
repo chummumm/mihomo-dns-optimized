@@ -1,3 +1,4 @@
+import './app.css'
 import classnames from 'classnames'
 import { Route, Navigate, Routes, useLocation, Outlet } from 'react-router-dom'
 
@@ -13,9 +14,6 @@ import SideBar from '@containers/Sidebar'
 import { isClashX } from '@lib/jsBridge'
 import { useLogsStreamReader } from '@stores'
 
-import '../styles/common.scss'
-import '../styles/iconfont.scss'
-
 export default function App () {
     useLogsStreamReader()
 
@@ -23,20 +21,22 @@ export default function App () {
 
     const routes = [
     // { path: '/', name: 'Overview', component: Overview, exact: true },
-        { path: '/proxies', name: 'Proxies', element: <Proxies /> },
-        { path: '/logs', name: 'Logs', element: <Logs /> },
-        { path: '/rules', name: 'Rules', element: <Rules />, noMobile: true },
-        { path: '/connections', name: 'Connections', element: <Connections /> },
-        { path: '/dns', name: 'DNS', element: <DNS /> },
-        { path: '/settings', name: 'Settings', element: <Settings /> },
+        { path: '/proxies', name: 'Proxies', icon: 'nav-proxies', element: <Proxies /> },
+        { path: '/logs', name: 'Logs', icon: 'nav-logs', element: <Logs /> },
+        { path: '/rules', name: 'Rules', icon: 'nav-rules', element: <Rules />, noMobile: true },
+        { path: '/connections', name: 'Connections', icon: 'nav-connections', element: <Connections /> },
+        { path: '/dns', name: 'DNS', icon: 'nav-dns', element: <DNS /> },
+        { path: '/settings', name: 'Settings', icon: 'nav-settings', element: <Settings /> },
     ]
 
     const layout = (
         <div className={classnames('app', { 'not-clashx': !isClashX() })}>
             <SideBar routes={routes} />
-            <div className="page-container">
-                <Outlet />
-            </div>
+            <main className="page-container">
+                <div className="route-view" key={location.pathname}>
+                    <Outlet />
+                </div>
+            </main>
             <ExternalControllerModal />
         </div>
     )

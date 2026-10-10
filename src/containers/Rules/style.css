@@ -1,0 +1,108 @@
+.rules-page {
+    height: 100%;
+    min-height: 0;
+}
+
+.rules-section {
+    margin-bottom: var(--sp-6);
+}
+
+.rule-providers {
+    overflow: hidden;
+}
+
+.rules-card {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 360px;
+    overflow: hidden;
+}
+
+.rules-list {
+    flex: 1;
+    min-height: 0;
+}
+
+.rule-head,
+.rule-item {
+    display: grid;
+    grid-template-columns: 56px 168px minmax(0, 1fr) minmax(140px, 220px);
+    gap: var(--sp-3);
+    align-items: center;
+    padding: 0 var(--sp-4);
+}
+
+.rule-head {
+    height: 34px;
+    border-bottom: 1px solid var(--hair);
+    background: var(--sunken);
+    color: var(--text-3);
+    font-size: var(--t-xs);
+    font-weight: 560;
+}
+
+.rule-item {
+    height: 40px;
+    border-bottom: 1px solid var(--hair);
+    font-size: var(--t-sm);
+    transition: background-color var(--dur-1) var(--ease-out);
+}
+
+.rule-item:hover {
+    background: var(--row-hover);
+}
+
+.rule-index {
+    color: var(--text-3);
+    font-family: var(--font-mono);
+    font-size: var(--t-2xs);
+    font-variant-numeric: tabular-nums;
+}
+
+.rule-type-tag {
+    display: inline-block;
+    max-width: 100%;
+    padding: 2px 6px;
+    overflow: hidden;
+    border-radius: var(--r-chip);
+    background: var(--sunken);
+    color: var(--text-2);
+    font-family: var(--font-mono);
+    font-size: var(--t-2xs);
+    text-overflow: ellipsis;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
+.rule-item .payload {
+    overflow: hidden;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: var(--t-xs);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rule-proxy {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text);
+    white-space: nowrap;
+}
+
+.rule-head .rule-proxy {
+    color: var(--text-3);
+}
+
+@media (max-width: 768px) {
+    .rule-head,
+    .rule-item {
+        grid-template-columns: 40px 120px minmax(0, 1fr) 96px;
+        gap: var(--sp-2);
+        padding: 0 var(--sp-3);
+    }
+}

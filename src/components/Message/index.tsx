@@ -2,15 +2,16 @@ import classnames from 'classnames'
 import { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 
-import { Icon } from '@components'
 import { noop } from '@lib/helper'
-import './style.scss'
+
+import { Icon } from '../Icon'
+import './style.css'
 
 const TYPE_ICON_MAP = {
     info: 'info',
     success: 'check',
     warning: 'info-o',
-    error: 'close',
+    error: 'error',
 }
 
 type NoticeType = 'success' | 'info' | 'warning' | 'error'
@@ -33,7 +34,7 @@ interface MessageProps {
 export function Message (props: MessageProps) {
     const {
         removeComponent = noop,
-        icon = <Icon type="info" size={16} />,
+        icon = <Icon type="info" size={18} />,
         content = '',
         type = 'info',
         duration = 1500,
@@ -88,7 +89,7 @@ export function showMessage (args: ArgsProps) {
         args.onClose?.()
     }
 
-    const icon = <Icon type={TYPE_ICON_MAP[args.type]} size={16}></Icon>
+    const icon = <Icon type={TYPE_ICON_MAP[args.type]} size={18}></Icon>
     const { type, content, duration } = args
     const props: MessageProps = {
         icon,

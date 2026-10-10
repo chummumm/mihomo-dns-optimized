@@ -1,0 +1,52 @@
+.proxy-provider {
+    padding: var(--sp-4);
+    overflow: hidden;
+}
+
+.proxy-provider-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-2) var(--sp-4);
+    margin-bottom: var(--sp-3);
+}
+
+.proxy-provider-title {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    min-width: 0;
+}
+
+.proxy-provider-name {
+    overflow: hidden;
+    color: var(--text);
+    font-size: var(--t-md);
+    font-weight: 620;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.proxy-provider-count {
+    color: var(--text-3);
+    font-size: var(--t-xs);
+}
+
+.proxy-provider-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--sp-1);
+}
+
+.proxy-provider-updated {
+    margin-right: var(--sp-2);
+    color: var(--text-3);
+    font-size: var(--t-xs);
+}
+
+.proxy-provider-list {
+    display: grid;
+    gap: var(--sp-3);
+}

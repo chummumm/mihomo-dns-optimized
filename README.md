@@ -1,6 +1,6 @@
-# Clash Dashboard：DNS 状态与连接显示增强
+# Clash Dashboard：Metro 界面与 DNS 状态
 
-在现有原版 Clash Dashboard 上维护，增加纯内存 DNS 状态展示，并修复连接列表刷新与计数。没有迁移到另一套面板。连接列表、主机名排序和连接详情统一按 `host → sniffHost → destinationIP` 取值；原目标域名优先，旧内核没有 `sniffHost` 时仍正常工作。
+在现有原版 Clash Dashboard 上维护，采用 Metro 风格界面，保留纯内存 DNS 状态展示、连接列表刷新与计数修复。侧栏、代理组、连接详情和移动端使用统一的线路与站点视觉，支持系统深浅色和减少动态效果偏好。连接列表、主机名排序和连接详情统一按 `host → sniffHost → destinationIP` 取值；原目标域名优先，旧内核没有 `sniffHost` 时仍正常工作。
 
 连接展示不会写回连接元数据，不会改变实际连接目标或 DNS 分流。使用 `enhanced-mode: normal` 和 `override-destination: false` 时，已经嗅探到的域名也能显示；未获得任何域名的连接仍显示 IP。
 
@@ -8,7 +8,9 @@
 
 “全部（N）”、`mihomo`、未知来源和各设备 IP 从同一份保留记录计算。每条连接恰好进入一个来源分组，分组数量直接取其筛选结果长度；一次线性聚合建立索引，切换来源无需逐个设备重复扫描或排序整份记录。真实内置 DNS 上游连接归 `mihomo`，包括保留客户端来源 IP 的上游连接；其余 `Inner` 且没有有效客户端 IP 的记录也归 `mihomo`。带有效来源 IP 的客户端逻辑查询仍归对应设备，普通连接缺失来源时归未知来源。
 
-开启“保留关闭连接”时，各组和全部都包含尚未淘汰的关闭记录；关闭历史最多保留 5000 条，活跃连接完整计数。面板收到快照后在同一帧更新，兼容旧内核空快照中的 `connections: null`。选中的分组暂时归零时保留 `0` 项按钮和空态，新连接出现后继续显示该组；切换控制器后恢复到全部。
+`mihomo` 有连接时固定在“全部”后面的第二项，不随设备出现顺序或实时刷新移动。数量为 `0` 的来源分组不显示；当前选中的分组归零后自动回到“全部”。计数直接读取现有来源索引，不额外扫描连接记录。
+
+开启“保留关闭连接”时，各组和全部都包含尚未淘汰的关闭记录；关闭历史最多保留 5000 条，活跃连接完整计数。面板收到快照后在同一帧更新，兼容旧内核空快照中的 `connections: null`。切换控制器后恢复到全部。
 
 长列表使用已有的 `react-window` 按可见区域渲染。刷新时通过连接 ID 保持阅读位置，停在最底部时保持底部；列宽、横向滚动和固定主机名列继续可用。连接 WebSocket 不再额外缓存 200 份完整快照，关闭记录独立维护，避免每次刷新重新判定全部历史的状态。
 
@@ -25,6 +27,12 @@ DNS 连接在列表和详情中统一显示类型 `DNS`，节点链只显示实�
 手动节点测速可在设置页保存 HTTP/HTTPS URL，默认 `https://www.gstatic.com/generate_204`，可一键恢复。`PASS` 等内置策略不参与测速；同一节点卡片已有请求时不重复发起，切换控制器或离页会取消旧请求，旧结果不会写入另一个控制器的同名节点。本地延迟历史最多保留 10 条。ClashX 原生测速和代理集健康检查沿用各自设置。
 
 测速 URL 属于原有浏览器界面偏好设置；DNS 查询和连接记录仍只存在内存。提示消息使用 React 18 根正确卸载，并清理定时器；关闭动画未触发时也会释放消息节点。
+
+## 日志等级
+
+日志页的等级选择器控制面板的日志订阅过滤。`Default` 跟随内核当前全局等级；选择 `Debug`、`Info`、`Warn`、`Error` 或 `Silent` 时使用指定等级。即使本二开内核全局设为 `silent`，仍可在面板选择 `Debug` 查看调试日志。
+
+切换只更新 `/logs?level=...` 的日志订阅，不修改内核全局配置、不重载配置，也不清 DNS 答案缓存、候选缓存、查询历史或统计，不中断现有代理连接。`Silent` 关闭面板日志订阅，不建立无用的静默连接；已显示的记录保留。面板最近日志和后台日志缓冲各最多保留 200 条，仅保存在内存中；浏览器持久化的只有等级等界面偏好。日志自动滚动或下拉列表自身滚动不会关闭正在选择的菜单。
 
 ## DNS 概览、记录和上游
 
@@ -46,7 +54,7 @@ DNS 页由本二开内核的 `/dns/observability` API 提供数据：
 
 ## 安装和更新
 
-面板版本使用纯 `x.y.z` 格式（当前 `0.3.2`），不添加后缀。请搭配本仓库 `v1.19.32-optimized-9` 或后续版本；完整修正需要同步更新内核和面板。
+面板版本使用纯 `x.y.z` 格式（当前 `0.3.3`），不添加后缀。请搭配本仓库 `v1.19.32-optimized-10` 或后续版本，以获得完整的内置 DNS 上游身份修正。
 
 源码维护在本仓库的 [`clash-dashboard`](https://github.com/chummumm/mihomo-dns-optimized/tree/clash-dashboard) 分支。构建后的静态文件维护在 [`clash-dashboard-dist`](https://github.com/chummumm/mihomo-dns-optimized/tree/clash-dashboard-dist) 分支，使用独立 UI 工作流，不创建内核发行版。
 
@@ -79,9 +87,13 @@ python3 scripts/package-ui.py --source-sha "$(git rev-parse HEAD)" --repository 
 
 UI 工作流只处理 `clash-dashboard` 分支的代码变更及指向该分支的 PR。文档修改不触发构建，PR 不发布静态文件。浏览器回归使用本机模拟控制器，不连接生产设备；发布前验证来源计数与筛选、底部刷新、关闭历史上限、滚动位置、DNS API 兼容与内存生命周期，以及移动界面、重载、测速和控制器切换边界。
 
+日志回归另验证全局 `silent` 下的等级选择、鼠标与键盘操作、菜单滚动、200 条内存上限，以及切换等级不会发送配置修改或缓存清理请求。
+
 ## 原项目与许可
 
 基于原版 Dreamacro/clash-dashboard 提交 `9a32d9d163ad233141c384ba365c6ef18c58cb94`，从保留完整历史的 [源码备份](https://github.com/chmod777john/clash-dashboard) 导入。保留原作者署名与 MIT 许可，以下为原项目说明。
+
+界面字体 Overpass / Overpass Mono 使用 SIL OFL，内联 SVG 图标来自 Phosphor Icons，使用 MIT 许可。字体与图标均随静态文件提供，运行时无需请求外部字体或图标服务；对应许可保留在 `public/licenses/`，构建后包含在 `dist/licenses/`。
 
 移动连接入口、开始时间、配置重载与 PASS 不测速等功能参考 OpenClash 使用的 [ayanamist/clash-dashboard `my` 分支](https://github.com/ayanamist/clash-dashboard/tree/5bb32ccb2cc7bbeafb543360af9094a6f2a60b7c)。按本仓库的 React 18、纯内存观测与虚拟滚动实现整合，保留进程信息与双语界面。
 

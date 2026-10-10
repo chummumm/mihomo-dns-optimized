@@ -19,7 +19,7 @@ import type * as API from '@lib/request'
 import { StreamReader } from '@lib/streamer'
 import { type Infer } from '@lib/type'
 import type * as Models from '@models'
-import { type Log } from '@models/Log'
+import { LOG_HISTORY_LIMIT, type Log } from '@models/Log'
 
 import { useAPIInfo, useClient } from './request'
 
@@ -252,7 +252,7 @@ export function useRule () {
     return { rules: data, update }
 }
 
-const logsAtom = atom(new StreamReader<Log>({ bufferLength: 200 }))
+const logsAtom = atom(new StreamReader<Log>({ bufferLength: LOG_HISTORY_LIMIT }))
 
 export function useLogsStreamReader () {
     const apiInfo = useAPIInfo()
@@ -268,12 +268,14 @@ export function useLogsStreamReader () {
     const apiInfoRef = useSyncedRef(apiInfo)
 
     useEffect(() => {
-        if (level) {
-            const apiInfo = apiInfoRef.current
-            const protocol = apiInfo.protocol === 'http:' ? 'ws:' : 'wss:'
-            const logUrl = `${protocol}//${apiInfo.hostname}:${apiInfo.port}/logs?level=${level}&token=${encodeURIComponent(apiInfo.secret)}`
-            item.connect(logUrl)
+        if (!level || level.toLowerCase() === 'silent') {
+            item.connect('')
+            return
         }
+        const apiInfo = apiInfoRef.current
+        const protocol = apiInfo.protocol === 'http:' ? 'ws:' : 'wss:'
+        const logUrl = `${protocol}//${apiInfo.hostname}:${apiInfo.port}/logs?level=${level}&token=${encodeURIComponent(apiInfo.secret)}`
+        item.connect(logUrl)
     }, [apiInfoRef, item, level, previousKey])
 
     return item

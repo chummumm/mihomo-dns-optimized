@@ -1,0 +1,237 @@
+.icon {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    vertical-align: middle;
+    line-height: 1;
+}
+
+.icon > svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+}
+
+.icon-stroke path {
+    stroke-width: var(--icon-stroke, 22);
+}
+
+/*
+ * Icon motion, in three layers that never fight:
+ * 1. hover poses move the <svg> with a transition (pointer devices only);
+ * 2. click gestures animate the <i> wrapper from script (gestures.ts);
+ * 3. replays run a keyframe entrance on a freshly mounted <svg> when the glyph or its reading changes.
+ * Everything is transform or opacity, and nothing moves for people who ask for less motion.
+ */
+
+@media (prefers-reduced-motion: no-preference) {
+    /* 3. Replays */
+    .icon > .icon-replay {
+        animation: icon-swap var(--dur-icon) var(--ease-icon) backwards;
+    }
+
+    .icon-arrow-up > .icon-replay,
+    .icon-arrow-down > .icon-replay {
+        animation-name: icon-turn-over;
+    }
+
+    .icon-sort > .icon-replay,
+    .icon-sort-ascending > .icon-replay,
+    .icon-sort-descending > .icon-replay {
+        animation-name: icon-flip-y;
+    }
+
+    .icon-play > .icon-replay,
+    .icon-pause > .icon-replay {
+        animation-name: icon-morph;
+    }
+
+    /* Busy controls keep their icon and set it working. */
+    .icon-update.is-busy > svg {
+        animation: spin 900ms linear infinite;
+    }
+
+    .icon-healthcheck.is-busy > svg {
+        animation: icon-heartbeat 1100ms var(--ease-out) infinite;
+    }
+
+    .icon-speed.is-busy > svg {
+        animation: icon-charge 900ms var(--ease-in-out) infinite;
+    }
+}
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+    /* 1. Hover poses */
+    .icon > svg {
+        transition: transform var(--dur-icon) var(--ease-icon);
+    }
+
+    :is(button:not(:disabled), a):hover .icon-update > svg {
+        transform: rotate(50deg);
+    }
+
+    :is(button:not(:disabled), a):hover .icon-speed > svg {
+        transform: translateY(-1px) rotate(-9deg) scale(1.1);
+    }
+
+    :is(button:not(:disabled), a):hover .icon-healthcheck > svg,
+    :is(button:not(:disabled), a):hover .icon-play > svg,
+    :is(button:not(:disabled), a):hover .icon-pause > svg,
+    :is(button:not(:disabled), a):hover .icon-sort > svg,
+    :is(button:not(:disabled), a):hover .icon-sort-ascending > svg,
+    :is(button:not(:disabled), a):hover .icon-sort-descending > svg {
+        transform: scale(1.12);
+    }
+
+    .icon-trash > svg {
+        transform-origin: 50% 88%;
+    }
+
+    :is(button:not(:disabled), a):hover .icon-trash > svg {
+        transform: rotate(-11deg);
+    }
+
+    :is(button:not(:disabled), a):hover .icon-plus > svg,
+    :is(button:not(:disabled), a):hover .icon-close > svg {
+        transform: rotate(90deg);
+    }
+
+    :is(button:not(:disabled), a):hover .icon-close-all > svg {
+        transform: rotate(-10deg) scale(1.1);
+    }
+
+    :is(button:not(:disabled), a):hover .icon-prohibit > svg {
+        transform: rotate(-30deg);
+    }
+
+    :is(button:not(:disabled), a):hover .icon-search > svg {
+        transform: rotate(-12deg) scale(1.1);
+    }
+
+    :is(button:not(:disabled), a):hover .icon-caret-left > svg {
+        transform: translateX(-2px);
+    }
+
+    :is(button:not(:disabled), a):hover .icon-caret-right > svg {
+        transform: translateX(2px);
+    }
+}
+
+@keyframes icon-swap {
+    from {
+        opacity: 0;
+        transform: scale(0.4) rotate(-80deg);
+    }
+
+    40% {
+        opacity: 1;
+    }
+
+    to {
+        transform: none;
+    }
+}
+
+@keyframes icon-turn-over {
+    from {
+        opacity: 0.2;
+        transform: rotate(-180deg) scale(0.7);
+    }
+
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+@keyframes icon-flip-y {
+    from {
+        opacity: 0;
+        transform: perspective(80px) rotateX(-90deg);
+    }
+
+    45% {
+        opacity: 1;
+    }
+
+    to {
+        transform: none;
+    }
+}
+
+@keyframes icon-morph {
+    from {
+        opacity: 0;
+        transform: scale(0.5);
+        filter: blur(2px);
+    }
+
+    to {
+        opacity: 1;
+        transform: none;
+        filter: none;
+    }
+}
+
+@keyframes icon-pop {
+    from {
+        opacity: 0;
+        transform: scale(0.5);
+    }
+
+    35% {
+        opacity: 1;
+    }
+
+    to {
+        transform: none;
+    }
+}
+
+@keyframes icon-heartbeat {
+    0%,
+    100% {
+        transform: scale(1);
+    }
+
+    14% {
+        transform: scale(1.2);
+    }
+
+    28% {
+        transform: scale(0.96);
+    }
+
+    42% {
+        transform: scale(1.12);
+    }
+
+    60% {
+        transform: scale(1);
+    }
+}
+
+@keyframes icon-charge {
+    0%,
+    100% {
+        opacity: 1;
+        transform: none;
+    }
+
+    50% {
+        opacity: 0.55;
+        transform: scale(0.88);
+    }
+}
+
+@keyframes icon-draw {
+    from {
+        stroke-dashoffset: 1;
+    }
+
+    to {
+        stroke-dashoffset: 0;
+    }
+}

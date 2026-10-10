@@ -1,0 +1,45 @@
+.proxy-section + .proxy-section {
+    margin-top: var(--sp-8);
+}
+
+.proxy-section > .header-level-2 {
+    margin-top: 0;
+}
+
+.proxy-groups {
+    overflow: hidden;
+}
+
+.proxy-group-list > li + li {
+    border-top: 1px solid var(--hair);
+}
+
+.proxy-break-connections {
+    font-size: var(--t-xs);
+}
+
+.proxy-provider-list {
+    display: grid;
+    gap: var(--sp-3);
+}
+
+.proxies-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(164px, 1fr));
+    gap: var(--sp-2);
+}
+
+.proxies-list > li {
+    min-width: 0;
+}
+
+@media (max-width: 768px) {
+    .proxy-section + .proxy-section {
+        margin-top: var(--sp-6);
+    }
+
+    .proxies-list {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 6px;
+    }
+}

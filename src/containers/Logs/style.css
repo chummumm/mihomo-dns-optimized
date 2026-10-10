@@ -1,0 +1,116 @@
+.logs-page {
+    height: 100%;
+    min-height: 0;
+}
+
+.logs-level-label {
+    color: var(--text-3);
+    font-size: var(--t-xs);
+}
+
+.logs-level-select {
+    min-width: 112px;
+}
+
+.logs-card {
+    position: relative;
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 320px;
+    overflow: hidden;
+}
+
+.logs-panel {
+    display: flex;
+    flex: 1 1 0;
+    flex-direction: column;
+    padding: var(--sp-2) 0;
+    overflow-y: auto;
+    font-family: var(--font-mono);
+    font-size: var(--t-xs);
+    line-height: 1.6;
+}
+
+.log-line {
+    display: grid;
+    grid-template-columns: max-content 58px minmax(0, 1fr);
+    gap: 12px;
+    align-items: baseline;
+    padding: 3px var(--sp-4);
+    color: var(--text-2);
+}
+
+.log-line:hover {
+    background: var(--row-hover);
+}
+
+.log-line:last-child {
+    animation: fade-up var(--dur-2) var(--ease-out);
+}
+
+.log-time {
+    color: var(--text-3);
+    font-variant-numeric: tabular-nums;
+}
+
+.log-level {
+    font-size: 10px;
+    font-weight: 640;
+    letter-spacing: 0.04em;
+}
+
+.log-payload {
+    color: var(--text);
+    overflow-wrap: anywhere;
+}
+
+.log-debug .log-level { color: var(--text-3); }
+.log-info .log-level { color: var(--link); }
+.log-warning .log-level { color: var(--warn); }
+.log-error .log-level { color: var(--bad); }
+
+.log-error {
+    background: color-mix(in srgb, var(--bad-bg) 55%, transparent);
+}
+
+.logs-empty {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-content: center;
+    justify-items: center;
+    gap: var(--sp-3);
+    color: var(--text-3);
+    font-size: var(--t-sm);
+    pointer-events: none;
+}
+
+.logs-empty-pulse {
+    width: 8px;
+    height: 8px;
+    border-radius: var(--r-round);
+    background: var(--good);
+    animation: live-pulse 1.6s var(--ease-out) infinite;
+}
+
+@media (max-width: 768px) {
+    .log-line {
+        grid-template-columns: 50px minmax(0, 1fr);
+        gap: 2px 8px;
+        padding: 6px var(--sp-3);
+    }
+
+    .log-time {
+        grid-column: 1 / -1;
+        font-size: 10px;
+    }
+
+    .log-level {
+        grid-column: 1;
+    }
+
+    .log-payload {
+        grid-column: 2;
+    }
+}

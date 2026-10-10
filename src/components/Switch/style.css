@@ -1,0 +1,49 @@
+.switch {
+    position: relative;
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    width: 40px;
+    height: 24px;
+    padding: 3px;
+    border: 1px solid var(--hair-2);
+    border-radius: var(--r-round);
+    background: var(--sunken);
+    transition: background-color var(--dur-2) var(--ease-out), border-color var(--dur-2) var(--ease-out);
+}
+
+.switch-thumb {
+    width: 16px;
+    height: 16px;
+    border-radius: var(--r-round);
+    background: var(--panel);
+    box-shadow: 0 1px 2px rgb(20 30 47 / 30%);
+    transition: transform var(--dur-spring) var(--ease-spring), width var(--dur-2) var(--ease-out), background-color var(--dur-2) var(--ease-out);
+}
+
+.switch:hover:not(:disabled) {
+    border-color: var(--text-3);
+}
+
+.switch.checked {
+    border-color: var(--switch-on);
+    background: var(--switch-on);
+}
+
+.switch.checked .switch-thumb {
+    background: var(--signal);
+    transform: translateX(16px);
+}
+
+.switch:active:not(:disabled) .switch-thumb {
+    width: 19px;
+}
+
+.switch.checked:active:not(:disabled) .switch-thumb {
+    transform: translateX(13px);
+}
+
+.switch:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}

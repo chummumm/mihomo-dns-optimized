@@ -2,7 +2,7 @@ import classnames from 'classnames'
 import { forwardRef } from 'react'
 
 import { type BaseComponentProps } from '@models/BaseProps'
-import './style.scss'
+import './style.css'
 
 interface CardProps extends BaseComponentProps {
     ref?: React.ForwardedRef<HTMLDivElement>

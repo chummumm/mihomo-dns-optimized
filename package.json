@@ -1,6 +1,6 @@
 {
     "name": "clash-dashboard",
-    "version": "0.3.2",
+    "version": "0.3.3",
     "packageManager": "pnpm@8.15.9",
     "description": "Web port of clash.",
     "keywords": [
@@ -22,7 +22,7 @@
         "build": "vite build",
         "typecheck": "tsc --noEmit",
         "test:unit": "node --test src/containers/Connections/connections.test.cjs src/lib/probe.test.cjs",
-        "test:browser": "node scripts/test-connections.cjs && node scripts/test-dns.cjs && node scripts/test-dashboard-features.cjs",
+        "test:browser": "node scripts/test-connections.cjs && node scripts/test-dns.cjs && node scripts/test-dashboard-features.cjs && node scripts/test-logs.cjs",
         "lint": "pnpm lint:ts",
         "lint:ts": "eslint --ext=jsx,ts,tsx --fix src",
         "contributors:add": "all-contributors add",
@@ -71,6 +71,7 @@
         "immer": "^10.0.2",
         "jotai": "^2.3.1",
         "jotai-immer": "^0.2.0",
+        "motion": "^12.43.0",
         "neverthrow": "^6.0.0",
         "react": "^18.2.0",
         "react-dom": "^18.2.0",

@@ -1,11 +1,12 @@
+import classnames from 'classnames'
 import dayjs from 'dayjs'
 import { useLayoutEffect, useEffect, useRef, useState } from 'react'
 
 import { Select, Card, Header } from '@components'
-import { type Log } from '@models/Log'
-import { useConfig, useGeneral, useI18n, useLogsStreamReader } from '@stores'
+import { LOG_HISTORY_LIMIT, type Log } from '@models/Log'
+import { useConfig, useI18n, useLogsStreamReader } from '@stores'
 
-import './style.scss'
+import './style.css'
 
 const logLevelOptions = [
     { label: 'Default', value: '' },
@@ -16,10 +17,10 @@ const logLevelOptions = [
     { label: 'Silent', value: 'silent' },
 ]
 const logMap = new Map([
-    ['debug', 'text-teal-500'],
-    ['info', 'text-sky-500'],
-    ['warning', 'text-pink-500'],
-    ['error', 'text-rose-500'],
+    ['debug', 'log-debug'],
+    ['info', 'log-info'],
+    ['warning', 'log-warning'],
+    ['error', 'log-error'],
 ])
 
 export default function Logs () {
@@ -28,12 +29,9 @@ export default function Logs () {
     const [logs, setLogs] = useState<Log[]>([])
     const { translation } = useI18n()
     const { data: { logLevel }, set: setConfig } = useConfig()
-    const { general: { logLevel: configLevel } } = useGeneral()
     const { t } = translation('Logs')
     const logsStreamReader = useLogsStreamReader()
     const scrollHeightRef = useRef(listRef.current?.scrollHeight ?? 0)
-
-    const isConfigSilent = configLevel?.toLowerCase() === 'silent'
 
     useLayoutEffect(() => {
         const ul = listRef.current
@@ -45,7 +43,8 @@ export default function Logs () {
 
     useEffect(() => {
         function handleLog (newLogs: Log[]) {
-            logsRef.current = logsRef.current.slice().concat(newLogs.map(d => ({ ...d, time: new Date() })))
+            const incoming = newLogs.slice(-LOG_HISTORY_LIMIT).map(d => ({ ...d, time: new Date() }))
+            logsRef.current = logsRef.current.concat(incoming).slice(-LOG_HISTORY_LIMIT)
             setLogs(logsRef.current)
         }
 
@@ -58,31 +57,36 @@ export default function Logs () {
     }, [logsStreamReader])
 
     return (
-        <div className="page">
-            <Header title={ t('title') } >
-                <span className="mr-2 text-sm text-primary-darken">{t('levelLabel')}:</span>
+        <div className="page logs-page">
+            <Header title={ t('title') } meta={<span className="reading">{logs.length}</span>}>
+                <span className="logs-level-label">{t('levelLabel')}</span>
                 <Select
-                    disabled={isConfigSilent}
+                    className="logs-level-select"
+                    ariaLabel={t('levelLabel')}
                     options={logLevelOptions}
-                    value={isConfigSilent ? 'silent' : logLevel}
+                    value={logLevel}
                     onSelect={level => setConfig(c => { c.logLevel = level })}
                 />
             </Header>
 
-            <Card className="mt-2.5 flex flex-1 flex-col md:mt-4">
+            <Card className="logs-card">
                 <ul className="logs-panel" ref={listRef}>
                     {
                         logs.map(
                             (log, index) => (
-                                <li className="inline-block text-[11px] leading-5" key={index}>
-                                    <span className="mr-2 text-orange-400">[{ dayjs(log.time).format('YYYY-MM-DD HH:mm:ss') }]</span>
-                                    <span className={logMap.get(log.type)}>[{ log.type.toUpperCase() }]</span>
-                                    <span> { log.payload }</span>
+                                <li className={classnames('log-line', logMap.get(log.type))} key={index}>
+                                    <time className="log-time">{ dayjs(log.time).format('YYYY-MM-DD HH:mm:ss') }</time>
+                                    <span className="log-level">{ log.type.toUpperCase() }</span>
+                                    <span className="log-payload">{ log.payload }</span>
                                 </li>
                             ),
                         )
                     }
                 </ul>
+                {logs.length === 0 && <div className="logs-empty" role="status">
+                    <span className="logs-empty-pulse" aria-hidden="true" />
+                    {t('empty')}
+                </div>}
             </Card>
         </div>
     )

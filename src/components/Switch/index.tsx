@@ -1,18 +1,18 @@
 import classnames from 'classnames'
 
-import { Icon } from '@components'
 import { noop } from '@lib/helper'
 import { type BaseComponentProps } from '@models/BaseProps'
-import './style.scss'
+import './style.css'
 
 interface SwitchProps extends BaseComponentProps {
     checked: boolean
     disabled?: boolean
+    label?: string
     onChange?: (checked: boolean) => void
 }
 
 export function Switch (props: SwitchProps) {
-    const { className, checked = false, disabled = false, onChange = noop } = props
+    const { className, checked = false, disabled = false, label, onChange = noop } = props
     const classname = classnames('switch', { checked, disabled }, className)
 
     function handleClick () {
@@ -22,8 +22,16 @@ export function Switch (props: SwitchProps) {
     }
 
     return (
-        <div className={classname} onClick={handleClick}>
-            <Icon className="switch-icon font-bold" type="check" size={20} />
-        </div>
+        <button
+            type="button"
+            role="switch"
+            aria-checked={checked}
+            aria-label={label}
+            disabled={disabled}
+            className={classname}
+            onClick={handleClick}
+        >
+            <span className="switch-thumb" aria-hidden="true" />
+        </button>
     )
 }

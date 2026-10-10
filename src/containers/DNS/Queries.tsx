@@ -1,7 +1,7 @@
 import { type ColumnDef } from '@tanstack/react-table'
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 
-import { Button, Card, Modal } from '@components'
+import { Button, Card, Icon, Modal } from '@components'
 import type { Client } from '@lib/request'
 
 import { DNSStatus } from './Status'
@@ -99,13 +99,13 @@ export function DNSQueriesPage ({ client, instanceID, instanceChanged }: Queries
     }, [resource.data, instanceID, instanceChanged])
 
     const columns = useMemo<Array<ColumnDef<DNSQuery>>>(() => [
-        { accessorKey: 'time', header: t('time'), cell: ({ row }) => <span title={formatDNSTime(row.original.time, true)}>{formatDNSTime(row.original.time)}</span> },
+        { accessorKey: 'time', header: t('time'), cell: ({ row }) => <span className="dns-time" title={formatDNSTime(row.original.time, true)}>{formatDNSTime(row.original.time)}</span> },
         { accessorKey: 'qname', header: t('domain'), cell: ({ row }) => <button className="dns-domain-button" title={row.original.qname} onClick={() => setSelected(row.original)}>{row.original.qname}</button> },
-        { accessorKey: 'qtype', header: t('queryType') },
+        { accessorKey: 'qtype', header: t('queryType'), cell: ({ row }) => <span className="dns-qtype">{row.original.qtype}</span> },
         { accessorKey: 'client', header: t('client'), cell: ({ row }) => row.original.client === 'unknown' ? t('unknown') : row.original.client },
         { accessorKey: 'outcome', header: t('outcomeLabel'), cell: ({ row }) => <span className={`dns-outcome dns-outcome-${row.original.outcome}`}>{t(`outcome.${row.original.outcome}`)}</span> },
         { accessorKey: 'rcode', header: 'RCODE', cell: ({ row }) => row.original.rcode || '—' },
-        { accessorKey: 'elapsed_ms', header: t('latency'), cell: ({ row }) => `${formatDNSNumber(row.original.elapsed_ms, 2)} ms` },
+        { accessorKey: 'elapsed_ms', header: t('latency'), cell: ({ row }) => <span className="dns-num">{`${formatDNSNumber(row.original.elapsed_ms, 2)} ms`}</span> },
     ], [t])
 
     function applyFilters (event: FormEvent) {
@@ -132,20 +132,21 @@ export function DNSQueriesPage ({ client, instanceID, instanceChanged }: Queries
     return <>
         <Card className="dns-section">
             <form className="dns-filters" onSubmit={applyFilters}>
-                <label>{t('domain')}<input className="dns-input" value={draft.qname} maxLength={254} placeholder={t('exactDomain')} onChange={event => setDraft(previous => ({ ...previous, qname: event.target.value }))} /></label>
-                <label>{t('client')}<input className="dns-input" value={draft.client} maxLength={64} placeholder={t('exactClient')} onChange={event => setDraft(previous => ({ ...previous, client: event.target.value }))} /></label>
-                <label>{t('queryType')}<input className="dns-input dns-type-input" value={draft.qtype} maxLength={16} placeholder="A / AAAA" onChange={event => setDraft(previous => ({ ...previous, qtype: event.target.value }))} /></label>
-                <label>{t('outcomeLabel')}<select aria-label={t('outcomeLabel')} className="dns-input" value={draft.outcome} onChange={event => setDraft(previous => ({ ...previous, outcome: event.target.value as DNSOutcome | '' }))}>
+                <label className="dns-field dns-field-wide">{t('domain')}<input className="dns-input" value={draft.qname} maxLength={254} placeholder={t('exactDomain')} spellCheck={false} onChange={event => setDraft(previous => ({ ...previous, qname: event.target.value }))} /></label>
+                <label className="dns-field">{t('client')}<input className="dns-input" value={draft.client} maxLength={64} placeholder={t('exactClient')} spellCheck={false} onChange={event => setDraft(previous => ({ ...previous, client: event.target.value }))} /></label>
+                <label className="dns-field dns-field-narrow">{t('queryType')}<input className="dns-input dns-type-input" value={draft.qtype} maxLength={16} placeholder="A / AAAA" spellCheck={false} onChange={event => setDraft(previous => ({ ...previous, qtype: event.target.value }))} /></label>
+                <label className="dns-field">{t('outcomeLabel')}<select aria-label={t('outcomeLabel')} className="dns-input" value={draft.outcome} onChange={event => setDraft(previous => ({ ...previous, outcome: event.target.value as DNSOutcome | '' }))}>
                     <option value="">{t('all')}</option>
                     {outcomes.map(outcome => <option key={outcome} value={outcome}>{t(`outcome.${outcome}`)}</option>)}
                 </select></label>
-                <div className="dns-filter-actions"><button className="button button-primary" type="submit">{t('apply')}</button><button className="button button-normal" type="button" onClick={resetFilters}>{t('reset')}</button></div>
+                <div className="dns-filter-actions"><button className="button button-primary" type="submit"><Icon type="search" size={15} />{t('apply')}</button><button className="button button-normal" type="button" onClick={resetFilters}>{t('reset')}</button></div>
             </form>
             <p className="dns-muted dns-caption">{t('filterHint')}</p>
         </Card>
         <div className="dns-section-heading">
-            <div className="dns-live-controls">
-                <Button disabled={cursors.length > 1} onClick={() => setLive(value => !value)}>{live ? t('pause') : t('startLive')}</Button>
+            <div className={live && cursors.length === 1 ? 'dns-live-controls is-live' : 'dns-live-controls'}>
+                <Button icon={live ? 'pause' : 'play'} pressed={live} disabled={cursors.length > 1} onClick={() => setLive(value => !value)}>{live ? t('pause') : t('startLive')}</Button>
+                <span className="dns-live-dot" aria-hidden="true" />
                 <span className="dns-muted dns-caption">{cursors.length > 1 ? t('historyPaused') : live ? t('liveHint') : t('pausedHint')}</span>
             </div>
             <DNSStatus {...resource} />
@@ -154,13 +155,13 @@ export function DNSQueriesPage ({ client, instanceID, instanceChanged }: Queries
             <DNSTable rows={data?.items ?? []} columns={columns} rowID={queryID} empty={resource.loading ? t('loading') : t('noMatches')} busy={resource.loading} />
             <div className="dns-pagination">
                 <div className="dns-pagination-info">
-                    <span>{t('page')} {cursors.length} · {data ? formatDNSNumber(data.items.length) : '—'} {t('rows')}</span>
+                    <span>{t('page')} <b className="reading">{cursors.length}</b> · {data ? formatDNSNumber(data.items.length) : '—'} {t('rows')}</span>
                     <label>{t('pageSize')} <select className="dns-input" value={limit} onChange={event => { setLimit(Number(event.target.value) as 50 | 100); setCursors(['']) }}><option value="50">50</option><option value="100">100</option></select></label>
                 </div>
                 <div className="dns-pagination-actions">
-                    <Button disabled={cursors.length === 1 || resource.loading} onClick={() => setCursors([''])}>{t('latest')}</Button>
-                    <Button disabled={cursors.length === 1 || resource.loading} onClick={() => setCursors(previous => previous.slice(0, -1))}>{t('previous')}</Button>
-                    <Button disabled={!data?.has_more || !data.next_cursor || resource.loading} onClick={nextPage}>{t('next')}</Button>
+                    <Button size="sm" disabled={cursors.length === 1 || resource.loading} onClick={() => setCursors([''])}>{t('latest')}</Button>
+                    <Button size="sm" icon="caret-left" disabled={cursors.length === 1 || resource.loading} onClick={() => setCursors(previous => previous.slice(0, -1))}>{t('previous')}</Button>
+                    <Button size="sm" disabled={!data?.has_more || !data.next_cursor || resource.loading} onClick={nextPage}>{t('next')}<Icon type="caret-right" size={14} /></Button>
                 </div>
             </div>
         </Card>

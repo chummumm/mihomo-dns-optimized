@@ -1,0 +1,111 @@
+.proxy-group {
+    display: grid;
+    grid-template-columns: minmax(150px, 220px) minmax(0, 1fr);
+    gap: var(--sp-4);
+    align-items: start;
+    padding: var(--sp-3) var(--sp-4);
+}
+
+.proxy-group-head {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+    padding-top: 7px;
+}
+
+.proxy-group-title {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    min-width: 0;
+}
+
+/* Line badge: the group's name on its own colour, like a route sign */
+.proxy-group-badge {
+    min-width: 0;
+    padding: 3px 8px;
+    overflow: hidden;
+    border-radius: var(--r-chip);
+    background: var(--line);
+    color: var(--on-line);
+    font-size: var(--t-sm);
+    font-weight: 640;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.proxy-group-now {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    color: var(--text-2);
+    font-size: var(--t-xs);
+}
+
+.proxy-group-now-arrow {
+    color: var(--line);
+}
+
+.proxy-group-now-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* A new selection: the arrow steps forward and the name pulls in behind it. */
+@media (prefers-reduced-motion: no-preference) {
+    .proxy-group-now-arrow > .icon-replay {
+        animation: now-step 560ms var(--ease-out) backwards;
+    }
+
+    .proxy-group-now-name.is-new {
+        animation: now-arrive 420ms var(--ease-out) backwards;
+    }
+}
+
+@keyframes now-step {
+    0% {
+        transform: none;
+    }
+
+    35% {
+        transform: translateX(5px);
+    }
+
+    100% {
+        transform: none;
+    }
+}
+
+@keyframes now-arrive {
+    from {
+        opacity: 0;
+        transform: translateX(-8px);
+    }
+}
+
+.proxy-group-now .reading {
+    flex-shrink: 0;
+    font-size: var(--t-2xs);
+    transform-origin: 50% 0;
+    animation: flip-in var(--dur-3) var(--ease-out);
+}
+
+@media (max-width: 768px) {
+    .proxy-group {
+        grid-template-columns: minmax(0, 1fr);
+        gap: var(--sp-2);
+        padding: var(--sp-3);
+    }
+
+    .proxy-group-head {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        padding-top: 0;
+    }
+}

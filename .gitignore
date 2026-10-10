@@ -5,3 +5,7 @@ node_modules/
 src/**/*.jsx
 tests/__coverage__/
 tests/**/*.jsx
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+.impeccable/

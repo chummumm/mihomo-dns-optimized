@@ -1,0 +1,160 @@
+.settings-page {
+    max-width: 920px;
+    margin: 0;
+}
+
+.settings-section + .settings-section {
+    margin-top: var(--sp-6);
+}
+
+.settings-section-title {
+    margin: 0 0 var(--sp-2) 2px;
+    color: var(--text-2);
+    font-size: var(--t-xs);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+
+.settings-card {
+    overflow: hidden;
+}
+
+.settings-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-4);
+    min-height: 56px;
+    padding: 10px var(--sp-5);
+}
+
+.settings-row + .settings-row {
+    border-top: 1px solid var(--hair);
+}
+
+.settings-row-wrap {
+    flex-wrap: wrap;
+}
+
+.settings-row-action {
+    justify-content: flex-end;
+    min-height: 52px;
+    background: var(--sunken);
+}
+
+.settings-card .label {
+    color: var(--text);
+    font-size: var(--t-md);
+    font-weight: 520;
+}
+
+.settings-port {
+    width: 112px;
+}
+
+.settings-controller {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--sp-2);
+    min-width: 0;
+    margin-left: auto;
+}
+
+.settings-controller-select {
+    max-width: 260px;
+}
+
+.settings-endpoint,
+.controller-endpoint {
+    font-family: var(--font-mono);
+    font-size: var(--t-sm);
+}
+
+.settings-controller-fixed {
+    min-width: 0;
+    text-align: right;
+}
+
+.controller-endpoint {
+    color: var(--text);
+    overflow-wrap: anywhere;
+}
+
+.settings-card .external-controller {
+    display: inline-flex;
+    align-items: center;
+    height: var(--ctl-h);
+    padding: 0 10px;
+    border-radius: var(--r-ctl);
+    color: var(--link);
+    font-size: var(--t-sm);
+    font-weight: 560;
+}
+
+.settings-card .external-controller:hover {
+    background: var(--sunken);
+}
+
+.settings-hint {
+    max-width: 72ch;
+    margin-top: 4px;
+    color: var(--text-3);
+    font-size: var(--t-xs);
+    line-height: 1.6;
+}
+
+.settings-probe-url {
+    display: grid;
+    gap: var(--sp-2);
+    padding: var(--sp-4) var(--sp-5);
+}
+
+.settings-probe-field {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+}
+
+.settings-probe-field .input {
+    flex: 1 1 280px;
+    min-width: 0;
+    text-align: left;
+}
+
+.settings-probe-actions {
+    display: flex;
+    gap: var(--sp-2);
+}
+
+@media (max-width: 768px) {
+    .settings-page {
+        max-width: none;
+    }
+
+    .settings-row,
+    .settings-probe-url {
+        padding-right: var(--sp-4);
+        padding-left: var(--sp-4);
+    }
+
+    .settings-card .label {
+        font-size: var(--t-sm);
+    }
+}
+
+@media (max-width: 420px) {
+    .settings-row-wrap .settings-controller {
+        width: 100%;
+        justify-content: flex-start;
+        margin-left: 0;
+    }
+
+    .settings-controller-fixed {
+        text-align: left;
+    }
+
+    .settings-probe-field .input {
+        flex-basis: 100%;
+    }
+}

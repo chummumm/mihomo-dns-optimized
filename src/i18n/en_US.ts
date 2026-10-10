@@ -121,7 +121,7 @@ const EN = {
         title: 'Settings',
         labels: {
             startAtLogin: 'Start at login',
-            language: 'language',
+            language: 'Language',
             setAsSystemProxy: 'Set as system proxy',
             allowConnectFromLan: 'Allow connect from Lan',
             proxyMode: 'Mode',
@@ -154,6 +154,12 @@ const EN = {
         },
         versionString: 'Current ClashX is the latest version：{{version}}',
         checkUpdate: 'Check Update',
+        sections: {
+            system: 'System',
+            proxy: 'Proxy',
+            controller: 'Controller',
+            probe: 'Speed test',
+        },
         externalControllerSetting: {
             title: 'External Controller',
             note: 'Please note that modifying this configuration will only configure Dashboard. Will not modify your Clash configuration file. Please make sure that the external controller address matches the address in the Clash configuration file, otherwise, Dashboard will not be able to connect to Clash.',
@@ -168,12 +174,19 @@ const EN = {
     Logs: {
         title: 'Logs',
         levelLabel: 'Log level',
+        empty: 'Waiting for log entries…',
     },
     Rules: {
         title: 'Rules',
         providerTitle: 'Providers',
         providerUpdateTime: 'Last updated at',
         ruleCount: 'Rule count',
+        update: 'Update',
+        columns: {
+            type: 'Type',
+            payload: 'Payload',
+            proxy: 'Policy',
+        },
     },
     Connections: {
         title: 'Connections',
@@ -191,6 +204,7 @@ const EN = {
         closeAll: {
             title: 'Warning',
             content: 'This would close all connections',
+            action: 'Close all',
         },
         filter: {
             all: 'All',
@@ -231,6 +245,7 @@ const EN = {
             opening: 'Open',
             closed: 'Closed',
             closeConnection: 'Close',
+            closePanel: 'Close details',
         },
     },
     Proxies: {
@@ -252,11 +267,19 @@ const EN = {
         },
         groupTitle: 'Policy Group',
         providerTitle: 'Providers',
+        nodesTitle: 'Nodes',
         providerUpdateTime: 'Last updated at',
         expandText: 'Expand',
         collapseText: 'Collapse',
         speedTestText: 'Speed Test',
         breakConnectionsText: 'Close connections which include the group',
+        healthCheck: 'Health check',
+        update: 'Update',
+        sort: {
+            asc: 'Fastest first',
+            desc: 'Slowest first',
+            none: 'Original order',
+        },
     },
     Modal: {
         ok: 'Ok',

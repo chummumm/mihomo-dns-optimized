@@ -227,6 +227,10 @@ async function main() {
     await page.getByRole('status').getByText('Configuration reloaded', { exact: true }).waitFor()
     await waitMessageRemoved()
     await page.setViewportSize({ width: 320, height: 740 })
+    await page.waitForFunction(() => {
+        const rect = document.getElementById('probe-url')?.getBoundingClientRect()
+        return rect && rect.x >= 0 && rect.x + rect.width <= window.innerWidth
+    })
     const inputRect = await probe.boundingBox()
     assert.ok(inputRect.x >= 0 && inputRect.x + inputRect.width <= 320, 'URL form fits a small phone')
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, 'settings has no mobile body overflow')
@@ -235,7 +239,7 @@ async function main() {
     await page.getByRole('textbox', { name: '测速 URL', exact: true }).waitFor()
     assert.deepEqual(pageErrors, [])
     assert.deepEqual(reactWarnings, [])
-    assert.ok(externalRequests.every(request => request.type === 'font' && request.url === 'http://at.alicdn.com/t/font_841708_ok9czskbhel.ttf'), 'no fixture or speed-test URL is contacted directly by the browser')
+    assert.deepEqual(externalRequests, [], 'fonts and icons are local; fixture and speed-test URLs are not contacted directly by the browser')
     console.log(JSON.stringify({ passed: true, browser: browser.version(), delayRequests, reloadCount: reloadRequests.length, controllerSwitchCancelsOldProbe: true, reloadMatchesDisplayedURLController: true, messageRootsAfterClose: 0, mobileWidth: 320, localeSwitch: true, pageErrors, reactWarnings }, null, 2))
 }
 

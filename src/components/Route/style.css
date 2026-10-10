@@ -1,0 +1,10 @@
+.line-bullet {
+    display: inline-block;
+    flex-shrink: 0;
+    width: 10px;
+    height: 10px;
+    border: 2.5px solid var(--line);
+    border-radius: var(--r-round);
+    background: var(--panel);
+    vertical-align: -1px;
+}

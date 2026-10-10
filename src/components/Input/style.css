@@ -1,0 +1,43 @@
+.input {
+    display: inline-block;
+    width: 100%;
+    min-width: 0;
+    height: var(--ctl-h);
+    padding: 0 10px;
+    border: 1px solid var(--hair-2);
+    border-radius: var(--r-ctl);
+    background: var(--panel);
+    color: var(--text);
+    font-size: var(--t-sm);
+    transition: border-color var(--dur-1) var(--ease-out), box-shadow var(--dur-1) var(--ease-out);
+}
+
+.input::placeholder {
+    color: var(--text-3);
+    opacity: 1;
+}
+
+.input:hover:not(:disabled) {
+    border-color: var(--text-3);
+}
+
+.input:focus,
+.input:focus-visible {
+    border-color: var(--ink);
+    outline: none;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ink) 16%, transparent);
+}
+
+.input:disabled {
+    background: var(--sunken);
+    color: var(--text-3);
+    cursor: not-allowed;
+}
+
+.input-align-left { text-align: left; }
+.input-align-center { text-align: center; }
+.input-align-right { text-align: right; }
+
+.input.mono {
+    font-variant-numeric: tabular-nums;
+}

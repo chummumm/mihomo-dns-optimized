@@ -1,0 +1,210 @@
+/*
+ * Clash Dashboard design tokens.
+ * World: metro wayfinding. An ink rail carries navigation, each policy group
+ * owns a line colour, and status colours are reserved for latency and health.
+ * Light and dark follow the operating system.
+ */
+
+/*
+ * Overpass descends from Highway Gothic, the lettering of road and transit
+ * signage; its mono cut sets readings (IPs, ports, latency). Self-hosted Latin
+ * subsets, SIL OFL 1.1 (src/assets/fonts/OFL-Overpass.txt). CJK text falls back
+ * to the system face.
+ */
+@font-face {
+    font-family: 'Overpass';
+    src: url('../assets/fonts/Overpass-Variable.woff') format('woff');
+    /* Balance the tall ascender so caps sit centred in fixed-height controls. */
+    ascent-override: 92%;
+    descent-override: 32%;
+    line-gap-override: 0%;
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: 'Overpass Mono';
+    src: url('../assets/fonts/OverpassMono-Variable.woff') format('woff');
+    /* Balance the tall ascender so caps sit centred in fixed-height controls. */
+    ascent-override: 92%;
+    descent-override: 32%;
+    line-gap-override: 0%;
+    font-weight: 300 700;
+    font-style: normal;
+    font-display: swap;
+}
+
+:root {
+    color-scheme: light dark;
+
+    --font-sans: 'Overpass', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', 'Segoe UI', sans-serif;
+    --font-mono: 'Overpass Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, 'PingFang SC', 'Microsoft YaHei', monospace;
+
+    /* Type: fixed rem steps, ratio about 1.15 to 1.2 */
+    --t-2xs: 0.6875rem;
+    --t-xs: 0.75rem;
+    --t-sm: 0.8125rem;
+    --t-md: 0.875rem;
+    --t-lg: 1rem;
+    --t-xl: 1.25rem;
+    --t-2xl: 1.5rem;
+
+    --sp-1: 4px;
+    --sp-2: 8px;
+    --sp-3: 12px;
+    --sp-4: 16px;
+    --sp-5: 20px;
+    --sp-6: 24px;
+    --sp-8: 32px;
+    --sp-10: 40px;
+
+    /* Shape rule: chips 4px, controls 6px, panels 10px; only stations, markers and switches are round. */
+    --r-chip: 4px;
+    --r-ctl: 6px;
+    --r-panel: 10px;
+    --r-round: 999px;
+
+    --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+    --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+    --dur-1: 120ms;
+    --dur-2: 180ms;
+    --dur-3: 260ms;
+    --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+    --dur-spring: 380ms;
+    --ease-icon: cubic-bezier(0.22, 1, 0.36, 1);
+    --dur-icon: 420ms;
+
+    --rail-w: 184px;
+    --bar-h: 60px;
+    --ctl-h: 32px;
+    --ctl-h-sm: 28px;
+
+    --z-sticky: 10;
+    --z-rail: 20;
+    --z-drawer: 30;
+    --z-popover: 40;
+    --z-modal: 50;
+    --z-toast: 60;
+
+    /* The wayfinding rail */
+    --rail: #141e2f;
+    --rail-hover: #1f2a3d;
+    --rail-text: #f3f5f8;
+    --rail-text-2: #a3abb8;
+    --rail-line: #3c485b;
+    --rail-edge: transparent;
+    --signal: #f8cc2f;
+    --switch-on: #141e2f;
+
+    /* Ground and surfaces */
+    --ground: #f3f6f9;
+    --panel: #fcfdff;
+    --sunken: #edf0f4;
+    --hair: #dce0e5;
+    --hair-2: #ccd2d7;
+    --row-hover: #f0f4f7;
+    --row-selected: #e1eaf7;
+
+    --text: #192029;
+    --text-2: #4c535e;
+    --text-3: #656c76;
+
+    /* Ink: wayfinding panels. Primary actions and selection read as signs. */
+    --ink: #172232;
+    --ink-hover: #283345;
+    --on-ink: #fcfdff;
+    --focus: #172232;
+    --link: #1c62b6;
+
+    /* Service status: only for latency, health and results */
+    --good: #21763c;
+    --good-bg: #dcf7e1;
+    --warn: #9a5a00;
+    --warn-bg: #ffedcf;
+    --bad: #c22826;
+    --bad-bg: #ffe6e3;
+    --idle: #8a919b;
+
+    /* Line colours for policy groups */
+    --line-0: #1c62b6;
+    --line-1: #c25500;
+    --line-2: #7945ab;
+    --line-3: #007974;
+    --line-4: #ae2c77;
+    --line-5: #647520;
+    --line-6: #4849a9;
+    --line-7: #8a542d;
+    --line-8: #127d9d;
+    --on-line: #ffffff;
+    --line-system: #172232;
+
+    --shadow-pop: 0 1px 2px rgb(20 30 47 / 8%), 0 12px 32px -8px rgb(20 30 47 / 22%);
+    --shadow-drawer: -12px 0 32px -16px rgb(20 30 47 / 28%);
+    --scrim: rgb(13 17 22 / 34%);
+}
+
+/* A gently damped spring (about 2% settle) for CSS-driven motion; Motion drives the rest. */
+@supports (transition-timing-function: linear(0, 1)) {
+    :root {
+        --ease-spring: linear(0, 0.031, 0.105, 0.205, 0.317, 0.429, 0.537, 0.634, 0.72, 0.793, 0.854, 0.902, 0.94, 0.969, 0.99, 1.005, 1.014, 1.02, 1.022, 1.023, 1.022, 1.02, 1.018, 1.015, 1.013, 1.01, 1.008, 1.006, 1.004, 1.003, 1);
+        --dur-spring: 560ms;
+        /* A slightly livelier spring (about 6% overshoot) for icons, which are small enough to carry it. */
+        --ease-icon: linear(0, 0.055, 0.187, 0.352, 0.521, 0.675, 0.804, 0.904, 0.976, 1.023, 1.05, 1.062, 1.063, 1.057, 1.047, 1.036, 1.026, 1.017, 1.01, 1.004, 1, 0.998, 0.996, 0.996, 0.997, 0.998, 0.999, 1);
+        --dur-icon: 560ms;
+    }
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --rail: #121b2a;
+        --rail-hover: #1b2638;
+        --rail-text: #eef1f5;
+        --rail-text-2: #a3adbd;
+        --rail-line: #33405a;
+        --rail-edge: transparent;
+        --switch-on: #3a4a68;
+
+        --ground: #0d1116;
+        --panel: #14191f;
+        --sunken: #0a0d12;
+        --hair: #252930;
+        --hair-2: #333840;
+        --row-hover: #1a1e25;
+        --row-selected: #1b2737;
+
+        --text: #e9ebef;
+        --text-2: #b3b8bf;
+        --text-3: #9399a1;
+
+        --ink: #d3d8de;
+        --ink-hover: #e9ebef;
+        --on-ink: #0d1116;
+        --focus: #f8cc2f;
+        --link: #67aaed;
+
+        --good: #6fc884;
+        --good-bg: #1a3520;
+        --warn: #ebb25f;
+        --warn-bg: #3f2c10;
+        --bad: #f47b74;
+        --bad-bg: #47211e;
+        --idle: #737a84;
+
+        --line-0: #4386de;
+        --line-1: #ec7b38;
+        --line-2: #9d69d2;
+        --line-3: #3d9e98;
+        --line-4: #d8559b;
+        --line-5: #879947;
+        --line-6: #7a80dc;
+        --line-7: #b07750;
+        --line-8: #45a2c3;
+        --on-line: #0a0d12;
+        --line-system: #d3d8de;
+
+        --shadow-pop: 0 1px 2px rgb(0 0 0 / 40%), 0 16px 40px -10px rgb(0 0 0 / 60%);
+        --shadow-drawer: -16px 0 40px -18px rgb(0 0 0 / 70%);
+        --scrim: rgb(3 5 8 / 55%);
+    }
+}

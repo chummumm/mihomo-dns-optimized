@@ -1,0 +1,33 @@
+.drawer-layer {
+    position: absolute;
+    inset: 0;
+    z-index: var(--z-drawer);
+    overflow: hidden;
+    border-radius: inherit;
+    pointer-events: none;
+}
+
+.drawer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    border-width: 0 0 0 1px;
+    border-radius: 0;
+    box-shadow: var(--shadow-drawer);
+    pointer-events: auto;
+}
+
+/* Before Motion's first frame the closed drawer is already off-canvas. */
+.drawer.translate-x-full {
+    visibility: hidden;
+}
+
+.drawer-inner {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+}

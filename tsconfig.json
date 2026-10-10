@@ -34,7 +34,6 @@
     },
     "include": [
         "src",
-        "vite.config.ts",
-        "uno.config.ts"
+        "vite.config.ts"
     ]
 }

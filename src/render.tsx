@@ -1,21 +1,24 @@
+import './styles/tokens.css'
+import './styles/base.css'
+import { MotionConfig } from 'motion/react'
 import { Suspense, StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { HashRouter } from 'react-router-dom'
 
-import { Loading } from '@components'
+import { Loading, springs } from '@components'
 import App from '@containers/App'
-import '@unocss/reset/tailwind.css'
-import 'uno.css'
 
 export default function renderApp () {
     const rootEl = document.getElementById('root')
     const AppInstance = (
         <StrictMode>
-            <HashRouter>
-                <Suspense fallback={<Loading visible />}>
-                    <App />
-                </Suspense>
-            </HashRouter>
+            <MotionConfig reducedMotion="user" transition={springs.snap}>
+                <HashRouter>
+                    <Suspense fallback={<Loading visible />}>
+                        <App />
+                    </Suspense>
+                </HashRouter>
+            </MotionConfig>
         </StrictMode>
     )
 

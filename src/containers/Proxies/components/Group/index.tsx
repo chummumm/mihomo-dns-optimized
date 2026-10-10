@@ -1,11 +1,12 @@
+import classnames from 'classnames'
 import { useAtom } from 'jotai'
-import { useMemo } from 'react'
+import { useMemo, useRef } from 'react'
 
-import { Tags, Tag } from '@components'
+import { Tags, Tag, Icon, useLineColor, delayStatus } from '@components'
 import { type Group as IGroup } from '@lib/request'
 import { useProxy, useConfig, proxyMapping, useClient } from '@stores'
 
-import './style.scss'
+import './style.css'
 
 interface GroupProps {
     config: IGroup
@@ -16,7 +17,12 @@ export function Group (props: GroupProps) {
     const [proxyMap] = useAtom(proxyMapping)
     const { data: Config } = useConfig()
     const client = useClient()
+    const color = useLineColor()
     const { config } = props
+
+    // UI only: once the selection moves after mount, the summary animates its change.
+    const nowSeen = useRef({ name: config.now, moved: false })
+    if (nowSeen.current.name !== config.now) nowSeen.current = { name: config.now, moved: true }
 
     async function handleChangeProxySelected (name: string) {
         await client.changeProxySelected(props.config.name, name)
@@ -47,23 +53,46 @@ export function Group (props: GroupProps) {
         return set
     }, [config.all, proxyMap])
 
+    // Latest reading per station, read from the same mapping as errSet.
+    const readings = useMemo(() => {
+        const map = new Map<string, number>()
+        for (const proxy of config.all) {
+            const history = proxyMap.get(proxy)?.history
+            if (history?.length) map.set(proxy, history.slice(-1)[0].delay)
+        }
+        return map
+    }, [config.all, proxyMap])
+
+    const line = color(config.name)
+    const nowDelay = config.now ? readings.get(config.now) ?? 0 : 0
+    const nowFailed = config.now ? errSet.has(config.now) : false
+    const nowStatus = nowFailed ? 'bad' : delayStatus(nowDelay)
+
     const canClick = config.type === 'Selector'
     return (
-        <div className="proxy-group">
-            <div className="mt-4 h-10 w-full flex items-center justify-between md:mt-0 md:h-15 md:w-auto">
-                <span className="overflow-ellipsis h-6 w-35 overflow-hidden whitespace-nowrap px-5 md:w-30">{ config.name }</span>
-                <Tag className="mr-5 md:mr-0">{ config.type }</Tag>
+        <div className="proxy-group" style={{ '--line': line } as React.CSSProperties}>
+            <div className="proxy-group-head">
+                <div className="proxy-group-title">
+                    <span className="proxy-group-badge" title={config.name}>{ config.name }</span>
+                    <Tag>{ config.type }</Tag>
+                </div>
+                {config.now && <div className="proxy-group-now" title={config.now}>
+                    <Icon type="arrow-right" size={12} className="proxy-group-now-arrow" replay={config.now} />
+                    <span className={classnames('proxy-group-now-name', { 'is-new': nowSeen.current.moved })} key={config.now}>{config.now}</span>
+                    {nowDelay > 0 && !nowFailed && <span className={classnames('reading', `status-${nowStatus}`)} key={nowDelay}>{nowDelay}ms</span>}
+                </div>}
             </div>
-            <div className="flex-1 py-2 md:py-4">
-                <Tags
-                    className="ml-5 md:ml-8"
-                    data={config.all}
-                    onClick={handleChangeProxySelected}
-                    errSet={errSet}
-                    select={config.now}
-                    canClick={canClick}
-                    rowHeight={30} />
-            </div>
+            <Tags
+                id={config.name}
+                className="proxy-group-stations"
+                data={config.all}
+                onClick={handleChangeProxySelected}
+                errSet={errSet}
+                readings={readings}
+                line={line}
+                select={config.now}
+                canClick={canClick}
+                rowHeight={40} />
         </div>
     )
 }

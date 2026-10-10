@@ -1,0 +1,40 @@
+.tag {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    height: 20px;
+    padding: 0 6px;
+    border: 1px solid var(--hair-2);
+    border-radius: var(--r-chip);
+    background: var(--panel);
+    color: var(--text-2);
+    font-size: var(--t-2xs);
+    font-weight: 560;
+    letter-spacing: 0.01em;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+.tag-ink {
+    border-color: var(--ink);
+    background: var(--ink);
+    color: var(--on-ink);
+}
+
+.tag-good {
+    border-color: transparent;
+    background: var(--good-bg);
+    color: var(--good);
+}
+
+.tag-warn {
+    border-color: transparent;
+    background: var(--warn-bg);
+    color: var(--warn);
+}
+
+.tag-bad {
+    border-color: transparent;
+    background: var(--bad-bg);
+    color: var(--bad);
+}
