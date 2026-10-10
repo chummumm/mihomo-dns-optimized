@@ -10,7 +10,7 @@ import (
 )
 
 // AnswerPolicy contains optional native-answer adjustments. Infrastructure
-// resolvers and forwarded inbound DNS do not inherit these business settings.
+// resolvers and ordinary proxy traffic do not inherit these business settings.
 // Zero values retain the original answer and its authoritative lifetimes.
 type AnswerPolicy struct {
 	ForceNoCNAME bool

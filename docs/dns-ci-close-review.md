@@ -1,5 +1,7 @@
 # DNS cancellation / CI review (2026-10-09)
 
+This is a historical review of the implementation at the time. Automatic port-53 classification on ordinary proxy inbounds has since been removed. References below to forwarded port-53 DNS describe that earlier implementation; the shared native DNS transport and its cancellation protections remain. Current ingress behavior is documented in [the usage guide](dns-proxy.md).
+
 This review follows the first failed run of `37907490063` on `9b0b58f7317e7440e8fa8d2b7d4e634af062f63d`. A successful retry was not accepted as a root-cause fix. The changes are confined to fork DNS paths and their tests; ordinary TFO, proxy routing and upstream cache algorithms are unchanged.
 
 ## Findings

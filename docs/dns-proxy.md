@@ -2,7 +2,7 @@
 
 开启顶层 `dns-rule-routing: true` 后，Mihomo 的内置 DNS 先用 Question 中的域名匹配已有 `rules` / `rule-providers`，取得一次实际出站，再选择 DNS 上游池。无需 SmartDNS，也无需维护另一份 DNS 域名规则。
 
-原生上游支持配置的 UDP / TCP 任意端口、DoT、DoH、DoH 的 HTTP/3 和 DoQ。**IP 测速与双栈优选只用于实际 DIRECT / Compatible，代理路径不做本地 IP 探测。** 外部客户端经过代理入站发送的 DNS 使用另一条分类路径，其范围仍限于明文 TCP / UDP 53。
+原生上游支持配置的 UDP / TCP 任意端口、DoT、DoH、DoH 的 HTTP/3 和 DoQ。**IP 测速与双栈优选只用于实际 DIRECT / Compatible，代理路径不做本地 IP 探测。** 普通代理入站不再自动识别和接管目标 53 的 DNS 报文；需要按查询域名分流时，使用内置 DNS 监听或显式 DNS 劫持。
 
 ```yaml
 mode: rule
@@ -19,7 +19,42 @@ dns:
 
 以上均为文档保留地址，使用前须替换成可达的 DNS 服务器。建议把国内解析器放入 `direct-nameserver`，海外解析器放入 `nameserver`；程序根据实际出站类型选池，不根据这些地址推测国家或地区。完整示例见 [dns-proxy.example.yaml](dns-proxy.example.yaml)，其中保留原 mixed 入口，并显式开启可选的 IP 测速、预取和过期回答设置。
 
-开关默认 `false`。本功能使用真实 DNS 回答；同时启用内置 FakeIP 会被配置校验拒绝，内置 DNS 应使用 `redir-host`。
+开关默认 `false`。本功能使用真实 DNS 回答；同时启用内置 FakeIP 会被配置校验拒绝，内置 DNS 可使用 `normal` 或 `redir-host`。
+
+## enhanced-mode 与域名嗅探
+
+`dns.enhanced-mode` 控制 DNS 回答与域名映射方式，不是顶层 Rule / Global / Direct 的分流模式，也不是 DNS 缓存开关。
+
+| 模式 | 行为 |
+| --- | --- |
+| `normal` | 返回真实 DNS 回答，不建立真实 IP 到历史查询域名的反查映射 |
+| `redir-host` | 返回真实 DNS 回答，并维护真实 IP 到域名的映射，供缺少目标域名的连接辅助匹配 |
+| `fake-ip` | 分配虚拟地址并在连接时恢复域名；当前不能与已启用内置 DNS 的 `dns-rule-routing` 同时使用 |
+
+`normal` 仍保留正常解析、正向回答缓存、QNAME 选池和按配置启用的 DIRECT 测速等优化。SOCKS / HTTP 代理握手已经提供目标域名时，域名规则照常匹配。TUN / TProxy / redir 等入口只提供真实 IP 时，若没有成功嗅探到域名，就需依靠 IP、来源、进程、入站或兜底规则。真实 IP 映射可能因多个域名共用同一 IP 而产生歧义，不能将历史映射视为该连接真实请求域名的保证。
+
+HTTP / TLS 嗅探可以配置覆盖全部目标端口，无需修改协议默认值。下面是搭配 `normal` 使用的可选配置片段；按需并入已有配置，不必替换其他 DNS 和嗅探设置：
+
+```yaml
+dns:
+  enhanced-mode: normal
+
+sniffer:
+  enable: true
+  parse-pure-ip: true
+  override-destination: false
+  sniff:
+    TLS:
+      ports: ["1-65535"]
+      override-destination: false
+    HTTP:
+      ports: ["1-65535"]
+      override-destination: false
+```
+
+`parse-pure-ip` 允许对缺少域名的连接嗅探；`normal` 下不需要为历史映射设置 `force-dns-mapping`。`override-destination: false` 让本次嗅探结果辅助路由，不主动把实际目的地址改成嗅探出的域名；它不是关闭历史 DNS 映射的开关。协议级设置优先于全局设置，合并配置时，已有 HTTP / TLS 子项中的 `override-destination: true` 也须删除或改成 `false`。
+
+全端口表示在符合嗅探条件的 TCP 连接上识别 HTTP Host / TLS ClientHello 中可见的服务器名，不主动扫描端口，也不解密 TLS 应用数据。已有明确域名的代理请求不会仅因端口范围扩大就被强制再次嗅探。没有可见域名、ECH 隐藏真实名称、非 HTTP / TLS 或嗅探失败的连接，不能保证恢复域名。范围扩大后，某些等待服务端先发数据的协议可能多出首包等待；可按需要缩小端口或配置跳过地址。QUIC 属于独立的 UDP 嗅探设置，不由这两个 TCP 端口范围开启。
 
 ## 内置 DNS 如何选择上游
 
@@ -49,16 +84,16 @@ dns:
 
 TLS 的服务器名、证书校验和 HTTP 协议仍由对应客户端处理；QNAME 选路不会自动关闭证书校验，也不会把业务域名当成解析器的 TLS 名称或拨号目标。实际需要 UDP 的传输仍要求选中的节点支持 UDP；可根据节点能力选择 TCP、DoT 或普通 DoH。
 
-## 两条入口的目的地址不同
+## 内置 DNS 与普通代理转发
 
 | 入口 | DNS 服务器由谁指定 |
 | --- | --- |
 | 裸 DNS 发给 `dns.listen`，或被 TUN DNS 劫持 | Mihomo 按上面的规则结果选择 direct / main 池 |
-| 客户端经 mixed / SOCKS / HTTP / 透明代理请求某个解析器的 TCP / UDP 53 | 保留客户端指定的原解析器，只按 QNAME 选择出口；不改投内置 DNS 池 |
+| 客户端经 mixed / SOCKS / HTTP / 透明代理请求某个解析器的 TCP / UDP 53，且未配置显式 DNS 劫持 | 按原普通连接规则转发，不检查 DNS Question，不执行逐查询 QNAME 分流或改投内置 DNS 池 |
 
-公共入站仍只识别目标端口 **53** 上的普通明文 DNS。非 53、DoH / DoT / DoQ 和首份负载未识别为普通 DNS 的连接继续原有流程，不会因此被丢弃或解密。mixed 本身是代理协议入口；裸 DNS 应发到 `dns.listen`。
+目标端口 53 不再触发专用 DNS 首帧识别、逐包 / 逐帧选路或专用连接限额。普通 DNS、DoH / DoT / DoQ 与其他流量按普通代理流程处理。mixed 本身是代理协议入口；裸 DNS 应发到 `dns.listen`。
 
-UDP 每个数据报独立选路；TCP 每个 DNS 长度帧独立选路。确认 TCP 为 DNS 后，后续畸形帧结束该连接，不改成任意字节透传。已接管连接在下一帧检查模式和开关变化，不再适用时结束连接。
+显式配置的 TUN DNS 劫持仍把请求交给内置解析器；普通 SOCKS / HTTP 请求在代理握手中直接提供目标域名时，也仍按该连接的域名匹配业务规则。这两种能力不依赖已删除的端口 53 自动识别。
 
 ## 原规则顺序与优先级
 
@@ -76,7 +111,7 @@ UDP 每个数据报独立选路；TCP 每个 DNS 长度帧独立选路。确认 
 
 ### SRC-IP 看见哪个客户端
 
-`SRC-IP-CIDR`、`SRC-IP-SUFFIX` 等匹配 **Mihomo 实际收到的来源**，不会从 QNAME 推测访问者。客户端直接访问 `dns.listen` 时使用该连接或数据报的来源；TUN DNS 劫持传递其保留的客户端元数据；代理入口解包后使用入口取得的来源。
+`SRC-IP-CIDR`、`SRC-IP-SUFFIX` 等匹配 **Mihomo 实际收到的来源**，不会从 QNAME 推测访问者。客户端直接访问 `dns.listen` 时使用该连接或数据报的来源；TUN DNS 劫持传递其保留的客户端元数据。普通代理连接的内部解析只使用调用方实际传入的元数据，不从过境 DNS 报文提取域名或来源。
 
 如果路由器、SmartDNS、dnsmasq 或其他转发器重新发起查询，Mihomo 通常只看见转发器的 IP 和来源端口，PROCESS 也通常属于转发器。NAT 抹去的来源、未传入的原应用信息不会被这个开关恢复。需要按每台设备分流首次 DNS 查询时，应让查询带着真实客户端来源到达 Mihomo。进程识别仍受平台、权限和原有设置影响。
 
@@ -170,7 +205,7 @@ DO / CD 查询以及 AD、RRSIG、SIG、TSIG 等受保护回答不做这类改�
 
 ## 缓存、预取与过期回答
 
-自动路由先于缓存，REJECT / DROP 不会被旧成功答案绕过。缓存和并发合并按池、实际叶子、组、来源、子规则、固定出站及查询内容隔离；来源端口也参与，因此不同 socket 的命中率可能低于只按域名缓存。
+自动路由先于缓存，REJECT / DROP 不会被旧成功答案绕过。正式应答缓存保留查询内容、来源 IP、进程、认证、入站、子规则、实际出口及上游池等作用域；选路成功且所选上游全部属于自动范围时，可跨临时源端口复用。在途合并仍按源端口隔离，并区分缓存世代及前台 / 后台任务。
 
 | 设置 | 默认值与行为 |
 | --- | --- |
@@ -212,17 +247,17 @@ payload:
 
 `+.` 匹配域名本身及其子域名，不扩大到父域。将这条 REJECT 放到需要优先拦截的位置；自动 DNS 在缓存前返回 REFUSED，有域名信息的业务连接也受同一规则约束。无需再复制成 `nameserver-policy`。固定入站出口和非 Rule 模式的优先级仍保留。
 
-## SmartDNS 兼容接法
+## SmartDNS 旧接法迁移
 
-现有 SmartDNS 可以继续监听 6053 / 6553，通过 mixed / SOCKS / HTTP 将普通上游 TCP / UDP 53 发给 Mihomo；见 [旧接入模板](smartdns-dns-proxy.conf)。它属于“保留原解析器地址”的过境路径，不是本页主方案的内置 DNS 选池。6053 / 6553 本身不会被当作远端 53 自动改投。
+现有 SmartDNS 可以继续监听 6053 / 6553，通过 mixed / SOCKS / HTTP 访问上游解析器；见 [普通代理转发模板](smartdns-dns-proxy.conf)。当前这只是普通代理转发，Mihomo 按解析器连接目标和原规则选择出口，不再根据每个 DNS Question 的域名选路，也不会使用内置 DNS 的候选缓存或测速。
 
-SmartDNS 命中自己的缓存时没有新请求进入 Mihomo，其缓存由 SmartDNS 管理。若改用本页的内置 DNS 方案，客户端直接使用 `dns.listen`，不需要保留这层转发器。
+需要继续复用业务域名规则选择 DNS 上游和出口时，迁移到本页的内置 DNS 方案，让客户端直接使用 `dns.listen`；或者让保留的转发器把查询发到该监听，此时 Mihomo 看到的来源是转发器。SmartDNS 命中自己的缓存时没有新请求进入 Mihomo，其缓存由 SmartDNS 管理。
 
 ## 报文、面板与重载
 
-普通 A、AAAA、HTTPS / SVCB、TXT、MX、合法 EDNS 和未知合法记录类型均可按 QNAME 选路，不验证 DNSSEC 签名。自动分类使用单问题 QUERY，校验完整报文、记录计数、OPT、响应来源、ID 和 Question。多问题、动态更新、区域传送等不作为普通查询接管；内置自动 resolver 对不支持的查询明确报错。
+内置 DNS 的普通 A、AAAA、HTTPS / SVCB、TXT、MX、合法 EDNS 和未知合法记录类型均可按 QNAME 选路，不验证 DNSSEC 签名。自动解析使用单问题 QUERY，校验完整报文、记录计数、OPT、响应来源、ID 和 Question。内置自动 resolver 对多问题、动态更新、区域传送等不支持的查询明确报错。
 
-TCP 支持 65535 字节消息、拆分长度前缀和缓冲中的连续帧，当前逐条交换。外部 UDP 截断回答原样返回，由客户端决定重试；内置 UDP→TCP 重试保持同一计划。外部分类器有最多 128 个已识别候选 TCP 会话、256 个并发交换的上限，探测 / 单次交换上限 5 秒，已接管 TCP 空闲读取上限 60 秒；这些限制不作用于普通非 53 业务。
+内置 UDP→TCP 截断重试保持同一计划。已删除的普通入站分类器不再设置 DNS 首帧等待、专用 TCP 会话上限或外部 DNS 交换上限；原生解析器自己的有界工作额度仍保留，见[性能说明](dns-performance.md)。
 
 原生加密及非 53 上游使用按实际出口隔离的协议客户端。每个配置上游的连接池最多保留 **64 个作用域**；这不是 64 条 socket 的承诺。键包含叶子与组的身份、出口约束和路由世代，**不包含 QNAME 或来源端口**，因此同一出口的不同查询可以复用 HTTP/2、HTTP/3、DoQ 等连接。切换叶子不会复用旧叶子的连接；只回收空闲作用域，全部在用时等待空位或超时。重载会取消和关闭旧池。普通 53 路径继续使用原来的逐交换传输。
 
@@ -230,7 +265,7 @@ TCP 支持 65535 字节消息、拆分长度前缀和缓冲中的连续帧，当
 
 面板将共享原生传输分成两层：逻辑查询显示本次 QNAME、来源、入站、命中规则与策略链，计数展示 DNS 负载；底层长连接标记 `DNS-TRANSPORT`，显示真实解析器和实际端口，不用首个业务域名冒充后续查询。真实线路字节由底层统计一次，逻辑计数不再叠加到全局流量。
 
-关闭一条这样的逻辑查询会中断该交换，不关闭同一 HTTP/2 或 QUIC 连接上的其他查询，也不触发该查询的自动重试或后台刷新。正常完成后逻辑记录离开活动列表，共享传输可以继续存在。公共过境 DNS 保持原有逐交换展示，流量不重复统计。普通 SSH 的反向映射或嗅探显示不在本功能修改范围内。
+关闭一条这样的逻辑查询会中断该交换，不关闭同一 HTTP/2 或 QUIC 连接上的其他查询，也不触发该查询的自动重试或后台刷新。正常完成后逻辑记录离开活动列表，共享传输可以继续存在。经普通代理转发的 DNS 显示为普通连接，不再生成逐查询 QNAME 记录。普通 SSH 的反向映射或嗅探显示不在本功能修改范围内。
 
 更改 `dns-rule-routing` 应重新加载完整配置。`GET /configs` 返回生效值，`PATCH /configs` 不接受该字段；可通过原 `PUT /configs` 完整重载。省略开关等同于关闭。旧 `dns-proxy-port` 应删除，不再新增专用 DNS listener。
 

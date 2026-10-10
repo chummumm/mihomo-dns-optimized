@@ -1,6 +1,6 @@
 # 从 SmartDNS 迁入原生 DNS
 
-本项目复用 Mihomo 的 `rules` / `rule-providers` 决定业务域名出口。迁移后客户端直接使用 `dns.listen`，不再需要由 SmartDNS 的不同监听端口区分国内 / 海外查询。原 mixed / SOCKS / HTTP 等入站仍可使用；外部明文 53 DNS 分类也保留。
+本项目复用 Mihomo 的 `rules` / `rule-providers` 决定业务域名出口。迁移后客户端直接使用 `dns.listen`，不再需要由 SmartDNS 的不同监听端口区分国内 / 海外查询。原 mixed / SOCKS / HTTP 等入站仍可用于普通代理转发，但已取消外部明文 53 DNS 的自动识别与逐查询 QNAME 分流。
 
 以下是配置能力的对照，不表示 SmartDNS 所有实现细节或 UI 插件都被复制。
 
@@ -88,6 +88,8 @@ payload:
 ## 运维设置
 
 SmartDNS 的两个监听、SOCKS 回送端口和进程用户不需要照搬。原生方案使用已有 Mihomo 服务、`dns.listen`、API 和面板；SmartDNS 的 `smartdns_ui.so`、UI 账户、历史查询数据库、日志轮转参数不作为 Mihomo DNS 配置字段迁移。
+
+旧的“SmartDNS 经 SOCKS / HTTP 查询外部解析器”接法只按解析器连接目标和普通代理规则转发，不再读取 DNS Question，也不使用内置 DNS 的缓存或 IP 优选。需要保留 SmartDNS 作为前置缓存时，可以将它的上游改为 Mihomo 的 `dns.listen`；此时 Mihomo 看到的来源是 SmartDNS。需要按原设备来源分流时，应让客户端直接访问 Mihomo DNS，或使用保留客户端元数据的显式 TUN DNS 劫持。
 
 新安装包只包含通用起始配置，不包含个人节点或屏蔽清单。安装位置、配置保留及手动启停说明见[安装包文档](releases.md)。改用原生 DNS 前先执行 `mihomo -t`，确认标准 53 端口由计划中的服务监听，并让客户端使用该地址。
 

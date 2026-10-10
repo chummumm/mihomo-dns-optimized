@@ -6,7 +6,7 @@ mixed-port: 7890
 allow-lan: false
 
 # 默认 false。开启后内置 DNS 先按已有 rules 选实际出站，再选 DNS 池。
-# 公共入站的普通 TCP/UDP 53 仍只选出口，保留请求指定的原解析器。
+# 普通代理入站不自动接管 TCP/UDP 53；裸 DNS 使用下面的 listen。
 dns-rule-routing: true
 
 dns:

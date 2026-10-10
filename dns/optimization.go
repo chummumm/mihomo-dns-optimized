@@ -26,8 +26,8 @@ func speedCheckAcceptResponse(ctx context.Context, response *D.Msg) bool {
 }
 
 // Only ordinary DIRECT query exchanges are eligible for destination-IP
-// optimization. Explicit transports retain their own behavior and forwarded
-// inbound DNS never enters this resolver path. The resolver uses the same gate
+// optimization. Explicit transports retain their own behavior and ordinary
+// proxy traffic never enters this resolver path. The resolver uses the same gate
 // when deciding whether raw-answer filtering is delegated to the checker.
 func (r *Resolver) speedCheckEligible(ctx context.Context, clients []dnsClient, query *D.Msg) bool {
 	route := queryRoute(ctx)

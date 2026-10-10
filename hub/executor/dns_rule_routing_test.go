@@ -14,7 +14,7 @@ import (
 	D "github.com/miekg/dns"
 )
 
-func TestDNSRuleRoutingParsingDoesNotToggleLiveClassifier(t *testing.T) {
+func TestDNSRuleRoutingParsingDoesNotToggleLivePolicy(t *testing.T) {
 	previous := tunnel.DNSRuleRoutingEnabled()
 	defer tunnel.SetDNSRuleRouting(previous)
 	tunnel.SetDNSRuleRouting(false)
@@ -22,7 +22,7 @@ func TestDNSRuleRoutingParsingDoesNotToggleLiveClassifier(t *testing.T) {
 		t.Fatal(err)
 	}
 	if tunnel.DNSRuleRoutingEnabled() {
-		t.Fatal("merely parsing a candidate config enabled its classifier")
+		t.Fatal("merely parsing a candidate config enabled DNS rule routing")
 	}
 }
 
@@ -112,7 +112,7 @@ func TestDNSRuleRoutingBootstrapWithoutLocalDNSService(t *testing.T) {
 			}
 			if enabled {
 				if resolver.ProxyServerHostResolver == nil || !resolver.ProxyServerHostResolver.Invalid() {
-					t.Fatal("external classifier has no independent bootstrap while local DNS is off")
+					t.Fatal("proxy-host resolution has no independent bootstrap while local DNS is off")
 				}
 			} else if resolver.ProxyServerHostResolver != nil {
 				t.Fatal("feature-off behavior changed for disabled DNS")

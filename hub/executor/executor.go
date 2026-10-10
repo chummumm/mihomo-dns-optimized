@@ -112,7 +112,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	updateHosts(cfg.Hosts)
 	updateGeneral(cfg.General, true)
 	// Do not change this in temporaryUpdateGeneral while merely parsing a
-	// candidate config: resolver policy and the classifier change together.
+	// candidate config: the DNS routing flag and resolver policy change together.
 	tunnel.SetDNSRuleRouting(cfg.General.DNSRuleRouting)
 	if cfg.General.DNSRuleRouting {
 		log.Infoln("DNS rule routing enabled; nameserver-policy and domain fallback policies are inactive")
@@ -275,9 +275,8 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 		resolver.ProxyServerHostResolver = nil
 		resolver.DirectHostResolver = nil
 		if c.DNSRuleRouting {
-			// External DNS classification also works without the local DNS
-			// service. Keep an independent infrastructure resolver so resolver
-			// and proxy hostnames cannot fall back into the system/business DNS.
+			// Keep proxy-host bootstrap independent of business DNS, including
+			// when the local DNS service is disabled.
 			r := dns.NewResolver(dns.Config{
 				Default:           c.DefaultNameserver,
 				ProxyServer:       c.ProxyServerNameserver,

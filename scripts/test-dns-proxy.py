@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Exercise the actual binary against two local SOCKS5 DNS outbounds.
+"""Exercise ordinary proxy forwarding and native DNS routing in the binary.
 
 No external DNS, network service, Python dependency, or privileged port is used.
-The reserved resolver addresses must arrive unchanged at the selected outbound.
+Proxy traffic, including DNS on port 53, must retain its target and payload.
+Only queries sent to the built-in DNS listener receive per-question DNS routing.
 """
 
 import argparse
@@ -21,6 +22,10 @@ import threading
 import time
 import urllib.request
 import urllib.error
+
+
+RAW_TCP_TARGET = ("203.0.113.55", 53)
+SERVER_GREETING = b"ordinary-server-first-on-port-53\r\n"
 
 
 def read_exact(conn, size):
@@ -124,6 +129,8 @@ class MockSOCKS(socketserver.ThreadingTCPServer):
         self.answer, self.records, self.record_lock = answer, records, lock
         self.connections = 0
         self.raw_records = []
+        self.wire_records = []
+        self.tcp_streams = []
         self.held_queries = {}
         super().__init__(("127.0.0.1", 0), MockHandler)
 
@@ -157,6 +164,8 @@ class MockSOCKS(socketserver.ThreadingTCPServer):
         return make_answer(wire, self.answer)
 
     def respond_or_echo(self, wire, target, network):
+        with self.record_lock:
+            self.wire_records.append((target, network, wire))
         ordinary = False
         if target[1] == 53 and len(wire) >= 17:
             _, flags, questions, answers, authority, additional = struct.unpack("!6H", wire[:12])
@@ -189,15 +198,24 @@ class MockHandler(socketserver.BaseRequestHandler):
             assert version == 5 and reserved == 0
             target = read_address(conn)
             if command == 1:
+                stream = (target, [])
+                with self.server.record_lock:
+                    self.server.tcp_streams.append(stream)
                 conn.sendall(b"\x05\x00\x00" + encode_address("127.0.0.1", 0))
+                if target == RAW_TCP_TARGET:
+                    conn.sendall(SERVER_GREETING)
                 while True:
-                    if target[1] == 53:
+                    if target[1] == 53 and target != RAW_TCP_TARGET:
                         wire = read_frame(conn)
+                        with self.server.record_lock:
+                            stream[1].append(wire)
                         conn.sendall(frame(self.server.respond_or_echo(wire, target, "tcp")))
                     else:
                         wire = conn.recv(65535)
                         if not wire:
                             return
+                        with self.server.record_lock:
+                            stream[1].append(wire)
                         conn.sendall(self.server.respond_or_echo(wire, target, "tcp"))
             elif command == 3:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
@@ -301,37 +319,33 @@ def api_request(port, path="/configs", body=None, method="GET"):
         return json.loads(payload) if payload else None
 
 
-def wait_dns_connections(api_port, host=None, minimum_upload_total=None):
-    deadline = time.monotonic() + 2
+def wait_proxy_connection(api_port, network, source_port, uploaded=0, downloaded=0, missing=False):
+    deadline = time.monotonic() + 3
     while True:
-        snapshot = api_request(api_port, "/connections")
-        entries = [entry for entry in snapshot.get("connections") or []
+        entries = [entry for entry in (api_request(api_port, "/connections").get("connections") or [])
                    if entry["metadata"].get("inboundName") in ("DEFAULT-MIXED", "DEFAULT-SOCKS")
-                   and int(entry["metadata"].get("destinationPort", 0)) == 53
-                   and entry["metadata"].get("host")]
-        if host is None and not entries:
-            return snapshot, None
-        if host is not None:
-            matching = [entry for entry in entries
-                        if entry["metadata"].get("host") == host and entry["upload"] > 0]
-            if len(matching) == 1 and (minimum_upload_total is None or snapshot["uploadTotal"] >= minimum_upload_total):
-                return snapshot, matching[0]
+                   and entry["metadata"].get("network") == network
+                   and int(entry["metadata"].get("sourcePort", 0)) == source_port
+                   and int(entry["metadata"].get("destinationPort", 0)) == 53]
+        if missing and not entries:
+            return None
+        if not missing and len(entries) == 1 and entries[0]["upload"] >= uploaded and entries[0]["download"] >= downloaded:
+            return entries[0]
         if time.monotonic() >= deadline:
-            raise AssertionError(f"unexpected dashboard connections for {host!r}: {entries}")
+            raise AssertionError(f"unexpected {network} proxy connections for source port {source_port}: {entries}")
         time.sleep(0.01)
 
 
-def check_dashboard_connections(dns_port, api_port, resolver, upstream):
-    # Hold only the mock resolver's replies so the standard activity snapshot
-    # can deterministically observe these otherwise very short DNS exchanges.
+def check_dashboard_connections(proxy_port, api_port, resolver, upstream):
+    # Ordinary proxy connections describe the resolver destination, not an
+    # inferred QNAME. They persist across requests and use the normal API close.
     for network in ("tcp", "udp"):
         for close_from_dashboard in (False, True):
             host = "cancel.example" if close_from_dashboard else "visible.example"
             query = question(host.upper(), 201 if network == "tcp" else 202)
-            before, _ = wait_dns_connections(api_port)
             with upstream.hold(host, network) as release, contextlib.ExitStack() as stack:
                 if network == "tcp":
-                    client, reply, _ = socks_request(dns_port, resolver)
+                    client, reply, _ = socks_request(proxy_port, resolver)
                     stack.enter_context(client)
                     assert reply == 0
                     client.sendall(frame(query))
@@ -340,53 +354,45 @@ def check_dashboard_connections(dns_port, api_port, resolver, upstream):
                     client.bind(("127.0.0.1", 0))
                     client.settimeout(3)
                     client.sendto(b"\x00\x00\x00" + encode_address(*resolver) + query,
-                                  ("127.0.0.1", dns_port))
-
-                # The upstream API snapshots global totals before encoding the
-                # live tracker counters. Wait for both views of the write;
-                # keep the exact equality assertions below to catch overcount.
+                                  ("127.0.0.1", proxy_port))
+                source_port = client.getsockname()[1]
                 uploaded = len(query) + (2 if network == "tcp" else 0)
-                during, entry = wait_dns_connections(api_port, host, before["uploadTotal"] + uploaded)
+                entry = wait_proxy_connection(api_port, network, source_port, uploaded)
                 metadata = entry["metadata"]
-                assert metadata["network"] == network and metadata["type"] == "Socks5"
+                assert metadata["type"] == "Socks5" and not metadata.get("host"), metadata
                 assert metadata["sourceIP"] == "127.0.0.1"
-                assert int(metadata["sourcePort"]) == client.getsockname()[1]
                 assert metadata["destinationIP"] == resolver[0]
-                assert int(metadata["destinationPort"]) == 53
-                assert int(metadata["inboundPort"]) == dns_port
-                assert entry["rule"] == "Domain" and entry["rulePayload"] == host
-                assert entry["chains"] == ["B", "Chosen", "DNSOuter"], entry["chains"]
-                assert len(entry["providerChains"]) == len(entry["chains"])
+                assert int(metadata["inboundPort"]) == proxy_port
+                assert entry["rule"] == "IPCIDR" and entry["rulePayload"] == resolver[0] + "/32"
+                assert entry["chains"] == ["A"], entry["chains"]
                 assert entry["upload"] == uploaded and entry["download"] == 0
-                assert during["uploadTotal"] - before["uploadTotal"] == uploaded, (network, host, before["uploadTotal"], during["uploadTotal"], uploaded)
 
-                if close_from_dashboard:
-                    api_request(api_port, f"/connections/{entry['id']}", method="DELETE")
-                    if network == "tcp":
-                        client.settimeout(1)
-                        assert client.recv(1) == b"", "dashboard close did not interrupt TCP DNS"
-                    else:
-                        client.settimeout(0.2)
-                        try:
-                            client.recvfrom(65535)
-                            raise AssertionError("closed UDP DNS query still returned a response")
-                        except socket.timeout:
-                            pass
-                    after, _ = wait_dns_connections(api_port)
-                    assert after["downloadTotal"] == before["downloadTotal"]
-                    release.set()
-                else:
+                if not close_from_dashboard:
                     release.set()
                     if network == "tcp":
                         response = read_frame(client)
                     else:
-                        _, response = decode_packet(client.recvfrom(65535)[0])
+                        target, response = decode_packet(client.recvfrom(65535)[0])
+                        assert target == resolver
                     check_answer(response, query, upstream.answer)
-                    after, _ = wait_dns_connections(api_port)
                     downloaded = len(response) + (2 if network == "tcp" else 0)
-                    assert after["downloadTotal"] - before["downloadTotal"] == downloaded
-                assert after["uploadTotal"] - before["uploadTotal"] == uploaded
-    print("PASS dashboard connections: TCP/UDP QNAME, resolver, source, rule and nested group chains; exact traffic totals; completion cleanup and API close")
+                    after = wait_proxy_connection(api_port, network, source_port, uploaded, downloaded)
+                    assert after["id"] == entry["id"], "DNS reply replaced the ordinary connection"
+                    assert after["upload"] == uploaded and after["download"] == downloaded
+
+                api_request(api_port, f"/connections/{entry['id']}", method="DELETE")
+                wait_proxy_connection(api_port, network, source_port, missing=True)
+                release.set()
+                if network == "tcp":
+                    assert client.recv(1) == b"", "dashboard close did not interrupt TCP forwarding"
+                elif close_from_dashboard:
+                    client.settimeout(0.2)
+                    try:
+                        client.recvfrom(65535)
+                        raise AssertionError("closed UDP connection still returned a response")
+                    except socket.timeout:
+                        pass
+    print("PASS ordinary dashboard: resolver IP, no QNAME, destination rule, persistent TCP/UDP trackers, exact connection traffic and API close")
 
 
 def check_reply_compatibility(dns_port, resolver, expected_answer):
@@ -421,35 +427,32 @@ def check_reply_compatibility(dns_port, resolver, expected_answer):
             check(response, query, name, rcode)
         query = question("retry.example", 220)
         udp.sendto(b"\x00\x00\x00" + encode_address(*resolver) + query, relay)
-        target, response = decode_packet(udp.recvfrom(65535)[0])
-        assert target == resolver
-        check_answer(response, query, expected_answer)
-    print("PASS response compatibility: TCP/UDP header-only DNS errors, unchanged TC, UDP ignores wrong ID/question before the matching reply")
+        answer = make_answer(query, expected_answer)
+        wrong_id = struct.pack("!H", 221) + answer[2:]
+        wrong_question = make_answer(question("mismatch.example", 220), expected_answer)
+        for expected in (wrong_id, wrong_question, answer):
+            target, response = decode_packet(udp.recvfrom(65535)[0])
+            assert target == resolver and response == expected, "ordinary UDP relay filtered or rewrote a datagram"
+    print("PASS response forwarding: unchanged TCP/UDP DNS errors and TC; UDP passes every response without transaction/question filtering")
 
 
-def check_rule_control_actions(dns_port, resolver, expected_answer):
+def check_rule_control_actions(dns_port, expected_answer):
     # These are real parsed groups, including the upstream round-robin strategy.
     # PASS must not advance its cursor; neither control action needs UDP support.
     queries = [question(name, 230 + index) for index, name in enumerate(
         ("pass-control.example", "pass-control.example", "sub-control.example", "sub-control.example")
     )]
-    conn, reply, _ = socks_request(dns_port, resolver)
-    with conn:
-        assert reply == 0
+    with connect(dns_port) as conn:
         for query in queries:
             conn.sendall(frame(query))
             check_answer(read_frame(conn), query, expected_answer)
-    conn, reply, relay = socks_request(dns_port, ("0.0.0.0", 53), command=3)
-    with conn, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
-        assert reply == 0
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
         udp.bind(("127.0.0.1", 0))
         udp.settimeout(3)
         for query in queries:
-            udp.sendto(b"\x00\x00\x00" + encode_address(*resolver) + query, relay)
-            target, response = decode_packet(udp.recvfrom(65535)[0])
-            assert target == resolver
-            check_answer(response, query, expected_answer)
-    print("PASS rule controls: real round-robin PASS cursor unchanged; TCP/UDP PASS and SUB-RULE PASS-RULE continue past UDP-disabled control groups")
+            udp.sendto(query, ("127.0.0.1", dns_port))
+            check_answer(udp.recvfrom(65535)[0], query, expected_answer)
+    print("PASS native rule controls: real round-robin PASS cursor unchanged; TCP/UDP PASS and SUB-RULE PASS-RULE continue past UDP-disabled control groups")
 
 
 def check_builtin_dns(config, api_port, upstream_a, upstream_b):
@@ -501,6 +504,9 @@ def check_builtin_dns(config, api_port, upstream_a, upstream_b):
             query = question(name, 511 + index)
             check_answer(exchange(query), query, answer)
 
+        query = question("retry.example", 519)
+        check_answer(exchange(query), query, upstream_a.answer)
+
         # Keep the same source socket so this is a real cache-key collision if
         # the selected leaf is missing from the resolver's route scope.
         for index, upstream in enumerate((upstream_a, upstream_b, upstream_b)):
@@ -541,6 +547,7 @@ def check_builtin_dns(config, api_port, upstream_a, upstream_b):
             gate.set()
             check_answer(udp.recvfrom(65535)[0], query, upstream_b.answer)
     print("PASS built-in DNS TCP/UDP: QNAME routing, real IN/SRC/transport metadata, disabled nameserver-policy, selector-aware cache/ID, REJECT/DROP and dashboard")
+    check_rule_control_actions(dns_port, upstream_b.answer)
 
 
 @contextlib.contextmanager
@@ -590,9 +597,8 @@ def local_plain_dns(answer):
 
 
 def check_native_dns_pools(config, api_port, upstream_a, upstream_b):
-    # Native transports know their question even on a configured high port;
-    # the external classifier's port-53 restriction does not apply here. Real
-    # speed probes have separate Go tests, not this reserved-address fixture.
+    # Native transports route their own questions on any configured port.
+    # Real speed probes have separate Go tests, not this reserved-address fixture.
     direct_answer = "198.51.100.33"
     dns_port = unused_port()
     with local_plain_dns(direct_answer) as (direct_port, direct_records, direct_lock):
@@ -754,6 +760,7 @@ def run(binary):
     mixed_port, api_port, fixed_port, scoped_port = [unused_port() for _ in range(4)]
     resolver = ("203.0.113.53", 53)
     resolver_v6 = ("2001:db8::53", 53)
+    resolver_b = ("203.0.113.54", 53)
     process_name = pathlib.Path(os.readlink('/proc/self/exe')).name
     config = f"""mode: rule
 log-level: debug
@@ -816,7 +823,9 @@ sub-rules:
   ScopedRules:
     - MATCH,B
 rules:
-  # These rules must NOT use the resolver IP as the queried website IP.
+  # Proxy connections use the resolver IP; native DNS must not mistake it
+  # for the queried website IP when matching these same rules.
+  - IP-CIDR,203.0.113.54/32,B,no-resolve
   - IP-CIDR,203.0.113.53/32,A,no-resolve
   - IP-CIDR6,2001:db8::53/128,A,no-resolve
   - NOT,((IP-CIDR,10.0.0.0/8)),A
@@ -884,147 +893,136 @@ rules:
                     assert general["mixed-port"] == mixed_port
 
                     q1, q2 = question("first.example", 101), question("second.example", 102)
-                    conn, status = http_request(mixed_port, resolver, frame(q1))
+                    blocked, dropped = question("blocked.example", 104), question("drop.example", 105)
+                    chosen = question("selector.example", 103)
+                    stream_queries = [q1, q2, blocked, dropped, chosen, chosen]
+                    invalid_queries = malformed_queries(q1)
+                    conn, status = http_request(mixed_port, resolver, frame(q1) + frame(q2))
                     with conn:
                         assert status == 200
-                        check_answer(read_frame(conn), q1, upstream_a.answer)
-                        conn.sendall(frame(q2))
-                        check_answer(read_frame(conn), q2, upstream_b.answer)
-                        chosen = question("selector.example", 103)
-                        conn.sendall(frame(chosen))
-                        check_answer(read_frame(conn), chosen, upstream_a.answer)
+                        for query in (q1, q2, blocked, dropped, chosen):
+                            if query not in (q1, q2):
+                                conn.sendall(frame(query))
+                            assert read_frame(conn) == make_answer(query, upstream_a.answer)
                         api_request(api_port, "/proxies/Chosen", {"name": "B"}, "PUT")
                         conn.sendall(frame(chosen))
-                        check_answer(read_frame(conn), chosen, upstream_b.answer)
-                    print("PASS HTTP CONNECT on original mixed: pipelined first frame, per-query routes and live selector change")
+                        assert read_frame(conn) == make_answer(chosen, upstream_a.answer)
+                        # Valid DNS followed by malformed/opaque frames remains
+                        # one ordinary stream. No per-query parser may close it.
+                        conn.sendall(b"".join(frame(wire) for wire in invalid_queries + [q2]))
+                        for wire in invalid_queries:
+                            assert read_frame(conn) == wire
+                        assert read_frame(conn) == make_answer(q2, upstream_a.answer)
+                    with record_lock:
+                        assert (resolver, stream_queries + invalid_queries + [q2]) in upstream_a.tcp_streams
+                    print("PASS HTTP CONNECT: pipelined first frames, exact bytes and one upstream stream; QNAME routes/REJECT/DROP/selector changes cannot intercept port 53")
 
                     conn, reply, _ = socks_request(mixed_port, resolver_v6)
                     with conn:
                         assert reply == 0
-                        for query, expected in ((q1, upstream_a.answer), (q2, upstream_b.answer)):
+                        for query in (q1, q2, blocked, dropped):
                             conn.sendall(frame(query))
-                            check_answer(read_frame(conn), query, expected)
+                            assert read_frame(conn) == make_answer(query, upstream_a.answer)
                     for use_4a, target in ((False, resolver), (True, resolver), (True, resolver_v6)):
                         conn, reply = socks4_request(mixed_port, target, use_4a)
                         with conn:
                             assert reply == 90
-                            for query, expected in ((q1, upstream_a.answer), (q2, upstream_b.answer)):
+                            for query in (q1, q2, blocked):
                                 conn.sendall(frame(query))
-                                check_answer(read_frame(conn), query, expected)
-                    tcp_query(mixed_port, q2, upstream_b.answer, ("resolver.bootstrap.test", 53))
-                    print("PASS SOCKS4/4a/5 TCP: persistent per-query routes, IPv4/IPv6 and independently bootstrapped resolver hostname")
+                                assert read_frame(conn) == make_answer(query, upstream_a.answer)
+                    tcp_query(mixed_port, q2, upstream_a.answer, ("resolver.bootstrap.test", 53))
+                    tcp_query(mixed_port, q1, upstream_b.answer, resolver_b)
+                    print("PASS SOCKS4/4a/5 TCP: destination routing, persistent streams, IPv4/IPv6 and configured resolver hosts mapping")
 
-                    for name in ("inbound.example", "source.example", "transport.example"):
-                        tcp_query(mixed_port, question(name), upstream_b.answer)
-                    process_query = question("process.example")
-                    conn, reply, _ = socks_request(mixed_port, resolver)
-                    with conn:
-                        assert reply == 0
-                        conn.sendall(frame(process_query))
-                        process_response = read_frame(conn)
-                    if process_response[-4:] == ipaddress.ip_address(upstream_b.answer).packed:
-                        check_answer(process_response, process_query, upstream_b.answer)
-                        print("PASS original PROCESS-NAME lookup: real client process matched")
-                    else:
-                        # Some hosted containers deny NETLINK_SOCK_DIAG. Keep
-                        # the upstream fallback semantics; do not hide any
-                        # other lookup failure or accept an arbitrary route.
-                        log.flush()
-                        diagnostic = (config_dir / "mihomo.log").read_text()
-                        assert "[Process] find process error for process.example: socket: operation not permitted" in diagnostic, diagnostic
-                        check_answer(process_response, process_query, upstream_a.answer)
-                        print("SKIP native process identification: environment denies diagnostic socket; upstream no-process fallback verified (rule metadata is covered by Go tests)")
+                    for name in ("inbound.example", "source.example", "transport.example", "process.example"):
+                        tcp_query(mixed_port, question(name), upstream_a.answer)
                     tcp_query(fixed_port, q1, upstream_b.answer)
                     tcp_query(scoped_port, q1, upstream_b.answer)
-                    print("PASS original metadata/rules: IN-NAME, source, TCP/53, fixed outbound and inbound sub-rule")
+                    print("PASS normal metadata rules: DNS payload names cannot replace the destination; fixed outbound and inbound sub-rule remain effective")
 
                     conn, reply, relay = socks_request(mixed_port, ("0.0.0.0", 53), command=3)
                     with conn, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
                         assert reply == 0
                         udp.bind(("127.0.0.1", 0))
                         udp.settimeout(3)
-                        for query, expected, target in ((q1, upstream_a.answer, resolver),
-                                                        (q2, upstream_b.answer, resolver),
-                                                        (q2, upstream_b.answer, resolver_v6)):
+                        for query, answer, target in ((q1, upstream_a.answer, resolver),
+                                                       (q2, upstream_a.answer, resolver),
+                                                       (blocked, upstream_a.answer, resolver),
+                                                       (dropped, upstream_a.answer, resolver),
+                                                       (q2, upstream_a.answer, resolver_v6),
+                                                       (q1, upstream_b.answer, resolver_b)):
                             udp.sendto(b"\x00\x00\x00" + encode_address(*target) + query, relay)
                             target_back, response = decode_packet(udp.recvfrom(65535)[0])
-                            assert target_back == target
-                            check_answer(response, query, expected)
-                        blocked = question("blocked.example")
-                        udp.sendto(b"\x00\x00\x00" + encode_address(*resolver) + blocked, relay)
-                        _, response = decode_packet(udp.recvfrom(65535)[0])
-                        assert response[3] & 15 == 5
-                        udp.settimeout(0.25)
-                        udp.sendto(b"\x00\x00\x00" + encode_address(*resolver) + question("drop.example"), relay)
-                        try:
-                            udp.recvfrom(65535)
-                            raise AssertionError("REJECT-DROP produced a response")
-                        except socket.timeout:
-                            pass
-                    print("PASS SOCKS5 UDP association: independent queries, IPv4/IPv6, REFUSED and silent REJECT-DROP")
+                            assert target_back == target and response == make_answer(query, answer)
+                        for wire in invalid_queries:
+                            udp.sendto(b"\x00\x00\x00" + encode_address(*resolver) + wire, relay)
+                            target_back, response = decode_packet(udp.recvfrom(65535)[0])
+                            assert target_back == resolver and response == wire
+                    with record_lock:
+                        for wire in (q1, q2, blocked, dropped, *invalid_queries):
+                            assert (resolver, "udp", wire) in upstream_a.wire_records
+                        assert (resolver_b, "udp", q1) in upstream_b.wire_records
+                    print("PASS SOCKS5 UDP association: resolver destination chooses the outbound; QNAME REJECT/DROP ignored, malformed datagrams unchanged")
 
                     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
                         udp.bind(("127.0.0.1", 0))
                         udp.settimeout(3)
-                        for query, expected, target in ((q1, upstream_a.answer, resolver),
-                                                        (q2, upstream_b.answer, resolver_v6)):
+                        for query, answer, target in ((q2, upstream_a.answer, resolver),
+                                                       (blocked, upstream_a.answer, resolver_v6),
+                                                       (q1, upstream_b.answer, resolver_b)):
                             udp.sendto(b"\x00\x00\x00" + encode_address(*target) + query, ("127.0.0.1", mixed_port))
                             packet, source = udp.recvfrom(65535)
                             target_back, response = decode_packet(packet)
                             assert source[1] == mixed_port and target_back == target
-                            check_answer(response, query, expected)
-                        # The same public port remains a normal UDP proxy.
+                            assert response == make_answer(query, answer)
                         raw = b"ordinary-udp-payload"
                         target = (resolver[0], 443)
                         udp.sendto(b"\x00\x00\x00" + encode_address(*target) + raw, ("127.0.0.1", mixed_port))
                         target_back, response = decode_packet(udp.recvfrom(65535)[0])
                         assert target_back == target and response == raw
-                    print("PASS fixed mixed UDP: query routing and unchanged non-53 forwarding")
+                    print("PASS fixed mixed UDP: unchanged destination-based DNS and non-53 forwarding")
 
-                    # Normal mixed protocols keep their original non-DNS use.
                     raw = b"ordinary-tcp-payload"
                     for protocol in ("http", "socks5", "socks4", "socks4a"):
-                        target = (resolver[0], 443)
-                        if protocol == "http":
-                            conn, reply = http_request(mixed_port, target)
-                            assert reply == 200
-                        elif protocol == "socks5":
-                            conn, reply, _ = socks_request(mixed_port, target)
-                            assert reply == 0
-                        else:
-                            conn, reply = socks4_request(mixed_port, target, protocol == "socks4a")
-                            assert reply == 90
-                        with conn:
-                            conn.sendall(raw)
-                            assert read_exact(conn, len(raw)) == raw
-                        # A non-DNS first frame on 53 must be replayed exactly.
-                        conn, reply, _ = socks_request(mixed_port, resolver)
-                        invalid = malformed_queries(q1)[0 if protocol == "http" else 1]
-                        with conn:
-                            assert reply == 0
-                            conn.sendall(frame(invalid))
-                            assert read_frame(conn) == invalid
-                    print("PASS ordinary traffic: all mixed TCP protocols keep non-53 access; non-DNS first frame on 53 replays byte-for-byte")
+                        for target in ((resolver[0], 443), RAW_TCP_TARGET):
+                            if protocol == "http":
+                                conn, reply = http_request(mixed_port, target)
+                                assert reply == 200
+                            elif protocol == "socks5":
+                                conn, reply, _ = socks_request(mixed_port, target)
+                                assert reply == 0
+                            else:
+                                conn, reply = socks4_request(mixed_port, target, protocol == "socks4a")
+                                assert reply == 90
+                            with conn:
+                                if target == RAW_TCP_TARGET:
+                                    # The server speaks before any client bytes.
+                                    # A DNS classifier would wait for a first frame.
+                                    assert read_exact(conn, len(SERVER_GREETING)) == SERVER_GREETING
+                                conn.sendall(raw)
+                                assert read_exact(conn, len(raw)) == raw
+                    print("PASS all mixed TCP protocols: unchanged non-53 access and server-first arbitrary byte streams on port 53")
 
                     check_reply_compatibility(mixed_port, resolver, upstream_a.answer)
-                    check_rule_control_actions(mixed_port, resolver, upstream_b.answer)
-                    check_dashboard_connections(mixed_port, api_port, resolver, upstream_b)
+                    api_request(api_port, "/connections", method="DELETE")
+                    check_dashboard_connections(mixed_port, api_port, resolver, upstream_a)
 
-                    # GLOBAL bypasses QNAME, and changing mode also ends a
-                    # previously classified persistent connection on next query.
+                    # An ordinary TCP tunnel retains its chosen outbound when
+                    # the mode changes; only new connections use the new mode.
                     held, reply, _ = socks_request(mixed_port, resolver)
                     assert reply == 0
                     held.sendall(frame(q2))
-                    check_answer(read_frame(held), q2, upstream_b.answer)
+                    check_answer(read_frame(held), q2, upstream_a.answer)
+                    api_request(api_port, "/proxies/GLOBAL", {"name": "B"}, "PUT")
                     api_request(api_port, body={"mode": "global"}, method="PATCH")
                     with held:
                         held.sendall(frame(q2))
-                        assert held.recv(1) == b"", "old DNS connection ignored Global mode"
-                    tcp_query(mixed_port, q2, upstream_a.answer)
+                        check_answer(read_frame(held), q2, upstream_a.answer)
+                    tcp_query(mixed_port, q2, upstream_b.answer)
                     tcp_query(fixed_port, q1, upstream_b.answer)
                     api_request(api_port, body={"mode": "rule"}, method="PATCH")
-                    tcp_query(mixed_port, q2, upstream_b.answer)
-                    print("PASS Global mode bypass, fixed outbound precedence and existing DNS TCP mode transition")
+                    tcp_query(mixed_port, q2, upstream_a.answer)
+                    print("PASS ordinary mode transition: existing TCP stream retained; new Global/Rule connections and fixed outbounds follow normal routing")
 
                     # A scalar PATCH cannot leave resolver policy half changed.
                     try:
@@ -1041,12 +1039,12 @@ rules:
                     tcp_query(mixed_port, q2, upstream_a.answer)
                     api_request(api_port, "/configs", {"payload": config}, "PUT")
                     assert api_request(api_port)["dns-rule-routing"] is True
-                    tcp_query(mixed_port, q2, upstream_b.answer)
-                    print("PASS full reload toggles classifier while retaining the existing mixed port; unsafe scalar PATCH rejected atomically")
+                    tcp_query(mixed_port, q2, upstream_a.answer)
+                    print("PASS native DNS switch reloads leave ordinary forwarding unchanged; unsafe scalar PATCH rejected atomically")
                     check_builtin_dns(config, api_port, upstream_a, upstream_b)
                     native_direct_count = check_native_dns_pools(config, api_port, upstream_a, upstream_b)
                     with record_lock:
-                        assert all(target[1] == 53 and target[0] in (resolver[0], resolver_v6[0])
+                        assert all(target[1] == 53 and target[0] in (resolver[0], resolver_v6[0], resolver_b[0])
                                    for _, _, target, _ in records)
                         exchange_count = len(records) + native_direct_count
                     print(f"PASS actual binary end-to-end: {exchange_count} DNS exchanges plus ordinary TCP/UDP forwarding")

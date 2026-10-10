@@ -455,9 +455,6 @@ func handleUDPConn(packet C.PacketAdapter) {
 		return
 	}
 	fixMetadata(metadata) // fix some metadata not set via metadata.SetRemoteAddr or metadata.SetRemoteAddress
-	if tryHandleDNSUDP(packet) {
-		return
-	}
 
 	if err := preHandleMetadata(metadata.Clone()); err != nil { // precheck without modify metadata
 		packet.Drop()
@@ -544,9 +541,6 @@ func handleTCPConn(connCtx C.ConnContext) {
 		return
 	}
 	fixMetadata(metadata) // fix some metadata not set via metadata.SetRemoteAddr or metadata.SetRemoteAddress
-	if tryHandleDNSTCP(connCtx) {
-		return
-	}
 
 	preHandleFailed := false
 	if err := preHandleMetadata(metadata); err != nil {
