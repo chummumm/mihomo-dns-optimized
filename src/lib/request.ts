@@ -1,5 +1,7 @@
 import axios, { type AxiosInstance } from 'axios'
 
+import type { DNSObservability, DNSQueries, DNSQueryParams, DNSStats, DNSUpstreams } from '@containers/DNS/types'
+
 export interface Config {
     port: number
     'socks-port': number
@@ -74,7 +76,7 @@ export interface Group {
 export interface Snapshot {
     uploadTotal: number
     downloadTotal: number
-    connections: Connections[]
+    connections: Connections[] | null
 }
 
 export interface Connections {
@@ -184,5 +186,31 @@ export class Client {
 
     async changeProxySelected (name: string, select: string) {
         return await this.axiosClient.put<void>(`proxies/${encodeURIComponent(name)}`, { name: select })
+    }
+
+    private async getDNS<T> (path: string, signal: AbortSignal, params?: DNSQueryParams) {
+        return await this.axiosClient.get<T>(`dns/observability${path}`, {
+            signal,
+            // The API sends Cache-Control: no-store. A unique URL also avoids
+            // reusing an older cached response without extra CORS headers.
+            params: { ...params, _ts: Date.now() },
+            timeout: 10000,
+        })
+    }
+
+    async getDNSObservability (signal: AbortSignal) {
+        return await this.getDNS<DNSObservability>('', signal)
+    }
+
+    async getDNSQueries (params: DNSQueryParams, signal: AbortSignal) {
+        return await this.getDNS<DNSQueries>('/queries', signal, params)
+    }
+
+    async getDNSStats (signal: AbortSignal) {
+        return await this.getDNS<DNSStats>('/stats', signal)
+    }
+
+    async getDNSUpstreams (signal: AbortSignal) {
+        return await this.getDNS<DNSUpstreams>('/upstreams', signal)
     }
 }

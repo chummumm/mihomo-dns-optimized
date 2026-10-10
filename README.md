@@ -1,8 +1,34 @@
-# Clash Dashboard：Mihomo 嗅探域名显示兼容版
+# Clash Dashboard：DNS 状态与连接显示增强
 
-保留原版 Clash Dashboard 的界面，补齐 Mihomo 的 `sniffHost` 显示支持。连接列表、主机名排序和连接详情统一按 `host → sniffHost → destinationIP` 取值；原目标域名优先，旧内核没有 `sniffHost` 时仍正常工作。
+在现有原版 Clash Dashboard 上维护，增加纯内存 DNS 状态展示，并修复连接列表刷新与计数。没有迁移到另一套面板。连接列表、主机名排序和连接详情统一按 `host → sniffHost → destinationIP` 取值；原目标域名优先，旧内核没有 `sniffHost` 时仍正常工作。
 
 修改只影响显示，不会写回连接元数据，不会改变实际连接目标或 DNS 分流。使用 `enhanced-mode: normal` 和 `override-destination: false` 时，已经嗅探到的域名也能显示；未获得任何域名的连接仍显示 IP。
+
+## 连接列表
+
+“全部（N）”和各 IP 数字从同一份保留记录计算。开启“保留关闭连接”时，两者都包含尚未淘汰的关闭记录；关闭历史最多保留 5000 条，活跃连接完整计数。面板收到快照后在同一帧更新，兼容旧内核空快照中的 `connections: null`，所选设备消失后恢复显示全部。
+
+长列表使用已有的 `react-window` 按可见区域渲染。刷新时通过连接 ID 保持阅读位置，停在最底部时保持底部；列宽、横向滚动和固定主机名列继续可用。连接 WebSocket 不再额外缓存 200 份完整快照，关闭记录独立维护，避免每次刷新重新判定全部历史的状态。
+
+连接页统计的是浏览器当前保留集合，不是内核启动以来的累计连接数。关闭页面或刷新浏览器后不会从磁盘恢复历史。
+
+## DNS 概览、记录和上游
+
+DNS 页由本二开内核的 `/dns/observability` API 提供数据：
+
+| 页面 | 显示内容 |
+| --- | --- |
+| 概览 | 最近 24 小时查询量、QPS、缓存命中率、新鲜/过期缓存命中数、错误、平均耗时和估算 P95、分钟趋势、热门域名/客户端 |
+| 查询记录 | 原始查询名、客户端、类型、入口、结果、返回码、耗时、有限答案摘要；精确过滤与 50/100 条游标翻页 |
+| 上游 | 实际交换尝试、成功、错误、取消、超时、失败返回码、平均耗时与已完成成功率 |
+
+缓存命中率为同一窗口的 `(新鲜缓存命中 + 过期缓存命中) / 已完成客户端 DNS 查询总数`；hosts、Fake IP、测速候选缓存不计入正式 DNS 缓存命中。查询明细被淘汰后不会影响进程累计和 24 小时统计。QPS 使用内核返回的最近一个完整分钟；P95 是对数直方图上界估算。热门域名和客户端的范围是当前保留明细，页面会明确标注。
+
+**DNS 数据只在内存中。** 内核最多保留 4096 条明细，限制为最长 24 小时并受 8 MiB 记账预算约束；趋势使用固定分钟桶，上游保留最多 128 个独立身份和一个溢出合计。记账预算不是内核整个进程 RSS 上限。
+
+浏览器只保留当前页与正在显示的有限聚合，不向 `localStorage`、`IndexedDB` 或 PWA 缓存写 DNS 数据。查询记录默认暂停自动刷新，手动开启实时后也不会累积已看过的页面；离页、隐藏标签页或切换控制器会取消对应请求。常规 reload 保留内核观测，关闭观测释放数据，重新开启或重启从零开始。
+
+旧内核没有这些 API 时，DNS 页会明确提示不支持并停止轮询，其他页面继续工作。默认随 `dns.enable` 收集，可设 `dns.observability: false` 并完整重载关闭。协议和后端边界见 [DNS 状态文档](https://github.com/chummumm/mihomo-dns-optimized/blob/main/docs/dns-observability.md)。
 
 ## 安装和更新
 
@@ -28,11 +54,14 @@ external-ui-url: "https://github.com/chummumm/mihomo-dns-optimized/archive/refs/
 
 ```bash
 corepack pnpm@8.15.9 install --frozen-lockfile
+corepack pnpm@8.15.9 test:unit
 corepack pnpm@8.15.9 build
+corepack pnpm@8.15.9 exec playwright install chromium
+corepack pnpm@8.15.9 test:browser
 python3 scripts/package-ui.py --source-sha "$(git rev-parse HEAD)" --repository chummumm/mihomo-dns-optimized
 ```
 
-UI 工作流只处理 `clash-dashboard` 分支的代码变更及指向该分支的 PR。文档修改不触发构建，PR 不发布静态文件。
+UI 工作流只处理 `clash-dashboard` 分支的代码变更及指向该分支的 PR。文档修改不触发构建，PR 不发布静态文件。浏览器回归使用本机模拟控制器，不连接生产设备；发布前验证计数、底部刷新、关闭历史上限、滚动位置、DNS API 兼容和内存数据生命周期。
 
 ## 原项目与许可
 

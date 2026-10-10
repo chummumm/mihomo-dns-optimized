@@ -1,8 +1,7 @@
-import { useIntersectionObserver, useSyncedRef, useUnmountEffect } from '@react-hookz/web'
 import { useReactTable, getSortedRowModel, getFilteredRowModel, getCoreRowModel, flexRender, createColumnHelper } from '@tanstack/react-table'
 import classnames from 'classnames'
 import { useMemo, useLayoutEffect, useRef, useState, useEffect } from 'react'
-import { groupBy } from 'remeda'
+import AutoSizer from 'react-virtualized-auto-sizer'
 
 import { Header, Checkbox, Modal, Icon, Drawer, Card, Button } from '@components'
 import { fromNow } from '@lib/date'
@@ -13,7 +12,8 @@ import { useClient, useConnectionStreamReader, useI18n } from '@stores'
 
 import { Devices } from './Devices'
 import { ConnectionInfo } from './Info'
-import { getConnectionHost } from './helper'
+import { VirtualConnectionTable } from './VirtualTable'
+import { formatConnection } from './helper'
 import { type Connection, type FormatConnection, useConnections } from './store'
 import './style.scss'
 
@@ -52,7 +52,6 @@ export default function Connections () {
     const { translation, lang } = useI18n()
     const t = useMemo(() => translation('Connections').t, [translation])
     const connStreamReader = useConnectionStreamReader()
-    const readerRef = useSyncedRef(connStreamReader)
     const client = useClient()
     const cardRef = useRef<HTMLDivElement>(null)
 
@@ -69,35 +68,10 @@ export default function Connections () {
     }
 
     // connections
-    const { connections, feed, save, toggleSave } = useConnections()
-    const data: FormatConnection[] = useMemo(() => connections.map(
-        c => ({
-            id: c.id,
-            host: `${getConnectionHost(c.metadata)}:${c.metadata.destinationPort}`,
-            chains: c.chains.slice().reverse().join(' / '),
-            rule: c.rulePayload ? `${c.rule} :: ${c.rulePayload}` : c.rule,
-            time: new Date(c.start).getTime(),
-            upload: c.upload,
-            download: c.download,
-            sourceIP: c.metadata.sourceIP,
-            type: c.metadata.type,
-            network: c.metadata.network.toUpperCase(),
-            process: c.metadata.processPath,
-            speed: { upload: c.uploadSpeed, download: c.downloadSpeed },
-            completed: !!c.completed,
-            original: c,
-        }),
-    ), [connections])
-    const devices = useMemo(() => {
-        const gb = groupBy(connections, c => c.metadata.sourceIP)
-        return Object.keys(gb)
-            .map(key => ({ label: key, number: gb[key].length }))
-            .sort((a, b) => a.label.localeCompare(b.label))
-    }, [connections])
+    const { connections, devices, feed, save, toggleSave, clearHistory, getConnection, historyLimit, discarded } = useConnections(connStreamReader)
+    const data = useMemo(() => connections.map(formatConnection), [connections])
 
     // table
-    const pinRef = useRef<HTMLTableCellElement>(null)
-    const intersection = useIntersectionObserver(pinRef, { threshold: [1] })
     const columns = useMemo(
         () => [
             columnHelper.accessor(Columns.Host, { minSize: 260, size: 260, header: t(`columns.${Columns.Host}`) }),
@@ -142,6 +116,7 @@ export default function Connections () {
     )
 
     useLayoutEffect(() => {
+        setTraffic({ uploadTotal: 0, downloadTotal: 0 })
         function handleConnection (snapshots: API.Snapshot[]) {
             for (const snapshot of snapshots) {
                 setTraffic({
@@ -158,13 +133,19 @@ export default function Connections () {
             connStreamReader?.unsubscribe('data', handleConnection)
         }
     }, [connStreamReader, feed, setTraffic])
-    useUnmountEffect(() => {
-        readerRef.current?.destory()
-    })
+
+    const [device, setDevice] = useState('')
+    const selectedDevice = devices.some(item => item.label === device) ? device : ''
+    const columnFilters = useMemo(() => selectedDevice ? [{ id: Columns.SourceIP, value: selectedDevice }] : [], [selectedDevice])
+    useEffect(() => {
+        if (device !== selectedDevice) setDevice(selectedDevice)
+    }, [device, selectedDevice])
 
     const instance = useReactTable({
         data,
         columns,
+        getRowId: row => row.id,
+        state: { columnFilters },
         getCoreRowModel: getCoreRowModel(),
         getSortedRowModel: getSortedRowModel(),
         getFilteredRowModel: getFilteredRowModel(),
@@ -177,13 +158,6 @@ export default function Connections () {
 
     const headerGroup = instance.getHeaderGroups()[0]
 
-    // filter
-    const [device, setDevice] = useState('')
-    function handleDeviceSelected (label: string) {
-        setDevice(label)
-        instance.getColumn(Columns.SourceIP)?.setFilterValue(label || undefined)
-    }
-
     // click item
     const [drawerState, setDrawerState] = useObject({
         visible: false,
@@ -194,34 +168,26 @@ export default function Connections () {
         setDrawerState(d => { d.connection.completed = true })
         client.closeConnection(drawerState.selectedID)
     }
-    const latestConntion = useSyncedRef(drawerState.connection)
     useEffect(() => {
-        const conn = data.find(c => c.id === drawerState.selectedID)?.original
+        const conn = getConnection(drawerState.selectedID)
         if (conn) {
-            setDrawerState(d => {
-                d.connection = { ...conn }
-                if (drawerState.selectedID === latestConntion.current.id) {
-                    d.connection.completed = latestConntion.current.completed
-                }
-            })
-        } else if (Object.keys(latestConntion.current).length !== 0 && !latestConntion.current.completed) {
+            setDrawerState(d => { d.connection = conn })
+        } else if (drawerState.selectedID) {
             setDrawerState(d => { d.connection.completed = true })
         }
-    }, [data, drawerState.selectedID, latestConntion, setDrawerState])
+    }, [connections, drawerState.selectedID, getConnection, setDrawerState])
 
-    const scrolled = useMemo(() => (intersection?.intersectionRatio ?? 0) < 1, [intersection])
     const headers = headerGroup.headers.map((header, idx) => {
         const column = header.column
         const id = column.id
         return (
-            <th
+            <div
+                role="columnheader"
                 className={classnames('connections-th', {
                     resizing: column.getIsResizing(),
                     fixed: column.id === Columns.Host,
-                    shadow: scrolled && column.id === Columns.Host,
                 })}
                 style={{ width: header.getSize() }}
-                ref={column.id === Columns.Host ? pinRef : undefined}
                 key={id}>
                 <div onClick={column.getToggleSortingHandler()}>
                     { flexRender(header.column.columnDef.header, header.getContext()) }
@@ -237,42 +203,14 @@ export default function Connections () {
                         onTouchStart={header.getResizeHandler()}
                         className="connections-resizer" />
                 }
-            </th>
+            </div>
         )
     })
 
-    const content = instance.getRowModel().rows.map(row => {
-        return (
-            <tr
-                className="cursor-default select-none"
-                key={row.original?.id}
-                onClick={() => setDrawerState({ visible: true, selectedID: row.original?.id })}>
-                {
-                    row.getAllCells().map(cell => {
-                        const classname = classnames(
-                            'connections-block',
-                            { 'text-center': shouldCenter.has(cell.column.id), completed: row.original?.completed },
-                            {
-                                fixed: cell.column.id === Columns.Host,
-                                shadow: scrolled && cell.column.id === Columns.Host,
-                            },
-                        )
-                        return (
-                            <td
-                                className={classname}
-                                style={{ width: cell.column.getSize() }}
-                                key={cell.column.id}>
-                                { flexRender(cell.column.columnDef.cell, cell.getContext()) }
-                            </td>
-                        )
-                    })
-                }
-            </tr>
-        )
-    })
+    const rows = instance.getRowModel().rows
 
     return (
-        <div className="page !h-100vh">
+        <div className="page !h-full">
             <Header title={t('title')}>
                 <span className="connections-filter flex-1 cursor-default">
                     {`(${t('total.text')}: ${t('total.upload')} ${formatTraffic(traffic.uploadTotal)} ${t('total.download')} ${formatTraffic(traffic.downloadTotal)})`}
@@ -280,19 +218,23 @@ export default function Connections () {
                 <Checkbox className="connections-filter" checked={save} onChange={toggleSave}>{t('keepClosed')}</Checkbox>
                 <Icon className="connections-filter dangerous" onClick={show} type="close-all" size={20} />
             </Header>
-            { devices.length > 1 && <Devices devices={devices} selected={device} onChange={handleDeviceSelected} /> }
+            {save && <div className="connections-history-note">
+                <span>{t('historyLimit')}: {historyLimit}. {t('retainedOnly')}{discarded > 0 && ' ' + t('historyDiscarded') + ': ' + discarded}</span>
+                <Button className="ml-3 text-xs" onClick={clearHistory}>{t('clearHistory')}</Button>
+            </div>}
+            <Devices devices={devices} total={connections.length} selected={selectedDevice} onChange={setDevice} />
             <Card ref={cardRef} className="connections-card relative">
-                <div className="min-h-full min-w-full overflow-auto">
-                    <table>
-                        <thead>
-                            <tr className="connections-header">
-                                { headers }
-                            </tr>
-                        </thead>
-                        <tbody>
-                            { content }
-                        </tbody>
-                    </table>
+                <div className="connections-viewport">
+                    <AutoSizer>
+                        {({ height, width }) => <VirtualConnectionTable
+                            rows={rows}
+                            headers={headers}
+                            width={width}
+                            height={height}
+                            totalWidth={instance.getTotalSize()}
+                            centeredColumns={shouldCenter}
+                            onSelect={id => setDrawerState({ visible: true, selectedID: id })} />}
+                    </AutoSizer>
                 </div>
             </Card>
             <Modal title={t('closeAll.title')} show={visible} onClose={hide} onOk={handleCloseConnections}>{t('closeAll.content')}</Modal>

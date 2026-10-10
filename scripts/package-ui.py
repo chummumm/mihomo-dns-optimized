@@ -27,6 +27,11 @@ def main():
         'source_url': f'https://github.com/{args.repository}/tree/{args.source_sha}',
         'upstream_commit': '9a32d9d163ad233141c384ba365c6ef18c58cb94',
         'display_host_order': ['host', 'sniffHost', 'destinationIP'],
+        'dns_observability_api': 1,
+        'dns_storage': 'memory',
+        'dns_cache_ratio': '(cache_fresh + cache_stale) / queries',
+        'closed_connection_limit': 5000,
+        'virtualized_connections': True,
     }
     (dist / 'build-info.json').write_text(json.dumps(info, indent=2) + '\n')
     shutil.copyfile(root / 'LICENSE', dist / 'LICENSE')

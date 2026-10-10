@@ -3,6 +3,7 @@ import { Route, Navigate, Routes, useLocation, Outlet } from 'react-router-dom'
 
 // import Overview from '@containers/Overview'
 import Connections from '@containers/Connections'
+import DNS from '@containers/DNS'
 import ExternalControllerModal from '@containers/ExternalControllerDrawer'
 import Logs from '@containers/Logs'
 import Proxies from '@containers/Proxies'
@@ -26,6 +27,7 @@ export default function App () {
         { path: '/logs', name: 'Logs', element: <Logs /> },
         { path: '/rules', name: 'Rules', element: <Rules />, noMobile: true },
         { path: '/connections', name: 'Connections', element: <Connections />, noMobile: true },
+        { path: '/dns', name: 'DNS', element: <DNS /> },
         { path: '/settings', name: 'Settings', element: <Settings /> },
     ]
 

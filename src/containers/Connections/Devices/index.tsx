@@ -8,6 +8,7 @@ import './style.scss'
 interface DevicesProps extends BaseComponentProps {
     devices: Array<{ label: string, number: number }>
     selected: string
+    total: number
     onChange?: (label: string) => void
 }
 
@@ -24,7 +25,7 @@ export function Devices (props: DevicesProps) {
     return (
         <div className={classname} style={style}>
             <div className={classnames('connections-devices-item mb-2 pt-2', { selected: props.selected === '' })} onClick={() => handleSelected('')}>
-                { t('filter.all') }
+                { t('filter.all') } ({ props.total })
             </div>
             {
                 props.devices.map(
