@@ -950,26 +950,38 @@ rules:
                                                        (blocked, upstream_a.answer, resolver),
                                                        (dropped, upstream_a.answer, resolver),
                                                        (q2, upstream_a.answer, resolver_v6),
-                                                       (q1, upstream_b.answer, resolver_b)):
+                                                       (q1, upstream_a.answer, resolver_b)):
                             udp.sendto(b"\x00\x00\x00" + encode_address(*target) + query, relay)
                             target_back, response = decode_packet(udp.recvfrom(65535)[0])
-                            assert target_back == target and response == make_answer(query, answer)
+                            assert target_back == target, (target_back, target)
+                            assert response == make_answer(query, answer), (question_name(query), target, response.hex())
                         for wire in invalid_queries:
                             udp.sendto(b"\x00\x00\x00" + encode_address(*resolver) + wire, relay)
                             target_back, response = decode_packet(udp.recvfrom(65535)[0])
                             assert target_back == resolver and response == wire
+                        # Ordinary SOCKS UDP NAT chooses an outbound on the
+                        # first packet from a source socket and keeps it for
+                        # that session, even as packet destinations change.
+                        # A fresh source must independently select B by IP.
+                        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as other:
+                            other.bind(("127.0.0.1", 0))
+                            other.settimeout(3)
+                            other.sendto(b"\x00\x00\x00" + encode_address(*resolver_b) + q1, relay)
+                            target_back, response = decode_packet(other.recvfrom(65535)[0])
+                            assert target_back == resolver_b and response == make_answer(q1, upstream_b.answer)
                     with record_lock:
                         for wire in (q1, q2, blocked, dropped, *invalid_queries):
                             assert (resolver, "udp", wire) in upstream_a.wire_records
+                        assert (resolver_b, "udp", q1) in upstream_a.wire_records
                         assert (resolver_b, "udp", q1) in upstream_b.wire_records
-                    print("PASS SOCKS5 UDP association: resolver destination chooses the outbound; QNAME REJECT/DROP ignored, malformed datagrams unchanged")
+                    print("PASS SOCKS5 UDP: first destination selects the session outbound; changed destinations retain it, fresh sources reroute, QNAME REJECT/DROP ignored and bytes unchanged")
 
                     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
                         udp.bind(("127.0.0.1", 0))
                         udp.settimeout(3)
                         for query, answer, target in ((q2, upstream_a.answer, resolver),
                                                        (blocked, upstream_a.answer, resolver_v6),
-                                                       (q1, upstream_b.answer, resolver_b)):
+                                                       (q1, upstream_a.answer, resolver_b)):
                             udp.sendto(b"\x00\x00\x00" + encode_address(*target) + query, ("127.0.0.1", mixed_port))
                             packet, source = udp.recvfrom(65535)
                             target_back, response = decode_packet(packet)
@@ -980,7 +992,13 @@ rules:
                         udp.sendto(b"\x00\x00\x00" + encode_address(*target) + raw, ("127.0.0.1", mixed_port))
                         target_back, response = decode_packet(udp.recvfrom(65535)[0])
                         assert target_back == target and response == raw
-                    print("PASS fixed mixed UDP: unchanged destination-based DNS and non-53 forwarding")
+                        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as other:
+                            other.bind(("127.0.0.1", 0))
+                            other.settimeout(3)
+                            other.sendto(b"\x00\x00\x00" + encode_address(*resolver_b) + q1, ("127.0.0.1", mixed_port))
+                            target_back, response = decode_packet(other.recvfrom(65535)[0])
+                            assert target_back == resolver_b and response == make_answer(q1, upstream_b.answer)
+                    print("PASS fixed mixed UDP: ordinary NAT session routing, independent new sources and unchanged non-53 forwarding")
 
                     raw = b"ordinary-tcp-payload"
                     for protocol in ("http", "socks5", "socks4", "socks4a"):
