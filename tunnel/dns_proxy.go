@@ -191,7 +191,7 @@ func exchangeDNSProxyWire(ctx context.Context, query []byte, resolver *C.Metadat
 		if closeState != nil {
 			conn = &dnsQueryNotifyConn{Conn: conn, state: closeState}
 		}
-		conn = statistic.NewDNSTCPTracker(conn, statistic.DefaultManager, dnsProxyDisplayMetadata(resolver, route.qname), route.rule, 0, 0, true)
+		conn = statistic.NewDNSTCPTracker(conn, statistic.DefaultManager, dnsProxyTransportMetadata(resolver), nil, 0, 0, true)
 		normalClose := dnsQueryNormalCloser{close: conn.Close, state: closeState}
 		defer normalClose.Close()
 		if err := conn.SetDeadline(deadline); err != nil {
@@ -232,7 +232,7 @@ func exchangeDNSProxyWire(ctx context.Context, query []byte, resolver *C.Metadat
 	if closeState != nil {
 		conn = &dnsQueryNotifyPacketConn{PacketConn: conn, state: closeState}
 	}
-	conn = statistic.NewDNSUDPTracker(conn, statistic.DefaultManager, dnsProxyDisplayMetadata(resolver, route.qname), route.rule, 0, 0, true)
+	conn = statistic.NewDNSUDPTracker(conn, statistic.DefaultManager, dnsProxyTransportMetadata(resolver), nil, 0, 0, true)
 	normalClose := dnsQueryNormalCloser{close: conn.Close, state: closeState}
 	defer normalClose.Close()
 	if err := conn.SetDeadline(deadline); err != nil {
@@ -273,12 +273,11 @@ func appendDNSProxyGroups(conn C.Connection, groups []C.ProxyAdapter) {
 	}
 }
 
-func dnsProxyDisplayMetadata(resolver *C.Metadata, qname string) *C.Metadata {
-	metadata := resolver.Clone()
-	// QNAME is only a display/routing label. Never put it on the metadata used
-	// by the outbound adapter: the actual destination remains resolver IP:53.
-	metadata.Host = qname
-	return metadata
+func dnsProxyTransportMetadata(resolver *C.Metadata) *C.Metadata {
+	// This tracker belongs to the resolver's upstream socket. Client identity
+	// and business QNAME remain in the routing context, not this transport.
+	return &C.Metadata{Type: C.INNER, InName: "DNS-TRANSPORT", NetWork: resolver.NetWork,
+		DstIP: resolver.DstIP, DstPort: resolver.DstPort}
 }
 
 func writeDNSProxyFrame(w io.Writer, frame []byte) error {

@@ -528,29 +528,59 @@ def check_builtin_dns(config, api_port, upstream_a, upstream_b):
             pass
         udp.settimeout(3)
 
-        with upstream_b.hold("visible.example", "udp") as gate:
-            query = question("visible.example", 540)
-            udp.sendto(query, ("127.0.0.1", dns_port))
-            deadline = time.monotonic() + 3
-            while True:
-                matches = [item for item in (api_request(api_port, "/connections").get("connections") or [])
-                           if item["metadata"].get("inboundName") == "DNS" and
-                           item["metadata"].get("host") == "visible.example" and
-                           item.get("dns") is True]
-                if matches:
-                    break
-                if time.monotonic() >= deadline:
-                    raise AssertionError("built-in DNS upstream missing its explicit DNS connection marker")
-                time.sleep(0.03)
-            metadata = matches[0]["metadata"]
-            assert int(metadata["sourcePort"]) == udp.getsockname()[1]
-            assert int(metadata["inboundPort"]) == dns_port
-            assert int(metadata["destinationPort"]) == 53 and metadata["destinationIP"] == "203.0.113.53"
-            assert matches[0]["chains"][:3] == ["B", "Chosen", "DNSOuter"]
-            gate.set()
-            check_answer(udp.recvfrom(65535)[0], query, upstream_b.answer)
-    print("PASS built-in DNS TCP/UDP: QNAME routing, real IN/SRC/transport metadata, disabled nameserver-policy, selector-aware cache/ID, REJECT/DROP and dashboard")
-    check_rule_control_actions(dns_port, upstream_b.answer)
+        check_rule_control_actions(dns_port, upstream_b.answer)
+        for index, network in enumerate(("udp", "tcp")):
+            if network == "tcp":
+                # Change the actual upstream protocol while keeping a UDP
+                # client. Reload clears the answer cache for the second probe.
+                tcp_config = builtin_config.replace("nameserver: [203.0.113.53]",
+                                                    "nameserver: ['tcp://203.0.113.53']")
+                api_request(api_port, "/configs", {"payload": tcp_config}, "PUT")
+                api_request(api_port, "/proxies/Chosen", {"name": "B"}, "PUT")
+            with upstream_b.hold("visible.example", network) as gate:
+                query = question("visible.example", 540 + index)
+                udp.sendto(query, ("127.0.0.1", dns_port))
+                expected_upload = len(query) + (2 if network == "tcp" else 0)
+                deadline = time.monotonic() + 3
+                while True:
+                    matches = [item for item in (api_request(api_port, "/connections").get("connections") or [])
+                               if item.get("dns") is True and
+                               item["metadata"].get("network") == network and
+                               item["metadata"].get("destinationIP") == "203.0.113.53" and
+                               int(item["metadata"]["destinationPort"]) == 53 and
+                               item.get("chains", [])[:1] == ["B"] and
+                               item["upload"] == expected_upload]
+                    if matches:
+                        break
+                    if time.monotonic() >= deadline:
+                        raise AssertionError("built-in DNS upstream missing its explicit DNS connection marker")
+                    time.sleep(0.03)
+                assert len(matches) == 1, matches
+                entry = matches[0]
+                metadata = entry["metadata"]
+                assert metadata["type"] == "Inner" and metadata["inboundName"] == "DNS-TRANSPORT", metadata
+                for field in ("host", "sniffHost", "sourceIP", "inboundIP", "inboundUser", "process",
+                              "processPath", "specialProxy", "specialRules", "sourceGeoIP", "sourceIPASN"):
+                    assert not metadata.get(field), (field, metadata)
+                for field in ("sourcePort", "inboundPort", "uid"):
+                    assert int(metadata[field]) == 0, (field, metadata)
+                assert not entry["rule"] and not entry["rulePayload"], entry
+                assert entry["chains"][:3] == ["B", "Chosen", "DNSOuter"], entry
+                assert entry["download"] == 0, entry
+                gate.set()
+                check_answer(udp.recvfrom(65535)[0], query, upstream_b.answer)
+                active = api_request(api_port, "/connections").get("connections") or []
+                assert all(item["id"] != entry["id"] for item in active), "completed upstream remained active"
+
+                # Transport identity must not erase the actual caller from the
+                # independent, memory-only DNS query record.
+                records = api_request(api_port, "/dns/observability/queries?qname=visible.example&limit=1")["items"]
+                assert len(records) == 1, records
+                record = records[0]
+                assert record["client"] == "127.0.0.1" and record["qname"] == "visible.example", record
+                assert record["protocol"] == "udp" and record["source"] == "DNS", record
+                assert record["rcode"] == "NOERROR" and record["outcome"] == "upstream", record
+    print("PASS built-in DNS TCP/UDP: original QNAME/IN/SRC rules and query observations, neutral physical upstream identity, exact traffic and completion cleanup, disabled nameserver-policy, selector-aware cache/ID and REJECT/DROP")
 
 
 @contextlib.contextmanager

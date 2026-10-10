@@ -176,7 +176,12 @@ func TestDNSRuleRoutingNativeDashboardCloseDoesNotRetry(t *testing.T) {
 			seen()
 			var tracker statistic.Tracker
 			statistic.DefaultManager.Range(func(item statistic.Tracker) bool {
-				if item.Info().Metadata.Host == strings.TrimSuffix(query.Question[0].Name, ".") {
+				info := item.Info()
+				matches := info.Metadata.Host == strings.TrimSuffix(query.Question[0].Name, ".")
+				if protocol == "udp53" {
+					matches = info.DNS && info.Metadata.AddrPort().String() == "192.0.2.53:53" && info.Chain.Last() == leaf.Name()
+				}
+				if matches {
 					tracker = item
 					return false
 				}

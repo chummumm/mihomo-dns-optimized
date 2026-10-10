@@ -714,7 +714,7 @@ func TestDNSProxyIPv6ResolverAndEndpoint(t *testing.T) {
 	}
 }
 
-func waitDNSProxyTracker(t *testing.T, host string, upload int64) statistic.Tracker {
+func waitDNSProxyTracker(t *testing.T, destination *C.Metadata, leaf string, upload int64) statistic.Tracker {
 	t.Helper()
 	deadline := time.NewTimer(time.Second)
 	defer deadline.Stop()
@@ -723,7 +723,9 @@ func waitDNSProxyTracker(t *testing.T, host string, upload int64) statistic.Trac
 	for {
 		var found statistic.Tracker
 		statistic.DefaultManager.Range(func(tracker statistic.Tracker) bool {
-			if tracker.Info().Metadata.Host == host && tracker.Info().UploadTotal.Load() == upload {
+			info := tracker.Info()
+			if info.DNS && info.Metadata.AddrPort() == destination.AddrPort() && info.Metadata.NetWork == destination.NetWork &&
+				info.Chain.Last() == leaf && info.UploadTotal.Load() == upload {
 				found = tracker
 				return false
 			}
@@ -743,8 +745,8 @@ func waitDNSProxyTracker(t *testing.T, host string, upload int64) statistic.Trac
 
 func TestDNSProxyConnectionStatisticsAndPanelClose(t *testing.T) {
 	for _, network := range []C.NetWork{C.TCP, C.UDP} {
-		for _, panelClose := range []bool{false, true} {
-			name := network.String() + map[bool]string{false: "/complete", true: "/panel-close"}[panelClose]
+		for _, finish := range []string{"complete", "panel-close", "cancel", "timeout"} {
+			name := network.String() + "/" + finish
 			t.Run(name, func(t *testing.T) {
 				query := dnsProxyTestQuery(t, "MiXeD.ExAmPlE.")
 				response := dnsProxyTestReply(t, query)
@@ -752,6 +754,15 @@ func TestDNSProxyConnectionStatisticsAndPanelClose(t *testing.T) {
 				resolver.InName = "DEFAULT-DNS-PROXY"
 				resolver.InIP = netip.MustParseAddr("127.0.0.1")
 				resolver.InPort = 7853
+				resolver.Host, resolver.SniffHost = "resolver.example", "prior-business.example"
+				resolver.SrcGeoIP, resolver.DstGeoIP = []string{"source-country"}, []string{"prior-destination-country"}
+				resolver.SrcIPASN, resolver.DstIPASN = "source-asn", "prior-destination-asn"
+				resolver.RawSrcAddr = &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 53000}
+				resolver.RawDstAddr = &net.UDPAddr{IP: net.IPv4(198, 51, 100, 10), Port: 443}
+				resolver.RemoteDst = "prior-business.example:443"
+				resolver.RematchName, resolver.SpecialProxy, resolver.SpecialRules = "client-rematch", "client-proxy", "client-rules"
+				resolver.ProcessPath, resolver.Uid, resolver.DSCP = "/test/client-resolver", 1000, 46
+				resolver.DNSMode = C.DNSFakeIP
 				original := resolver.Clone()
 				leaf := &dnsProxyTestAdapter{dnsProxyTestBase: newDNSProxyTestBase("leaf", C.Direct, true)}
 				leaf.provider = "subscription"
@@ -763,7 +774,7 @@ func TestDNSProxyConnectionStatisticsAndPanelClose(t *testing.T) {
 					proxy: newDNSProxyTestProxy(leaf), rule: RC.NewDomainSuffix("example", "policy"),
 					groups: []C.ProxyAdapter{newDNSProxyTestProxy(outer), newDNSProxyTestProxy(inner)},
 				}
-				var dialMetadata *C.Metadata
+				var selectedMetadata, dialMetadata *C.Metadata
 				var releaseResponse func()
 				var upstreamQuery <-chan []byte
 				if network == C.TCP {
@@ -828,10 +839,17 @@ func TestDNSProxyConnectionStatisticsAndPanelClose(t *testing.T) {
 					err      error
 				}
 				finished := make(chan result, 1)
-				ctx, cancel := context.WithCancel(context.Background())
+				timeout := dnsProxyTimeout
+				if finish == "timeout" {
+					timeout = time.Second
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), timeout)
 				defer cancel()
 				go func() {
-					wire, err := exchangeDNSProxy(ctx, query, resolver, func(*C.Metadata) (dnsProxyRoute, error) { return route, nil }, exchangeDNSProxyWire)
+					wire, err := exchangeDNSProxy(ctx, query, resolver, func(metadata *C.Metadata) (dnsProxyRoute, error) {
+						selectedMetadata = metadata.Clone()
+						return route, nil
+					}, exchangeDNSProxyWire)
 					finished <- result{wire, err}
 				}()
 				select {
@@ -847,7 +865,7 @@ func TestDNSProxyConnectionStatisticsAndPanelClose(t *testing.T) {
 					expectedUp += 2
 					expectedDown += 2
 				}
-				tracker := waitDNSProxyTracker(t, "mixed.example", expectedUp)
+				tracker := waitDNSProxyTracker(t, resolver, leaf.Name(), expectedUp)
 				info := tracker.Info()
 				if !info.DNS {
 					t.Fatal("port-53 DNS exchange is missing its explicit DNS display marker")
@@ -855,16 +873,29 @@ func TestDNSProxyConnectionStatisticsAndPanelClose(t *testing.T) {
 				if statistic.DefaultManager.Get(tracker.ID()) != tracker {
 					t.Fatal("connection cannot be retrieved by its panel ID")
 				}
-				wantMetadata := original.Clone()
-				wantMetadata.Host = "mixed.example"
+				wantMetadata := &C.Metadata{Type: C.INNER, InName: "DNS-TRANSPORT", NetWork: network,
+					DstIP: resolver.DstIP, DstPort: 53}
 				if !reflect.DeepEqual(info.Metadata, wantMetadata) {
-					t.Fatalf("incorrect display metadata: got %+v, want %+v", info.Metadata, wantMetadata)
+					t.Fatalf("resolver transport inherited a client's identity: got %+v, want %+v", info.Metadata, wantMetadata)
 				}
-				if info.Metadata == dialMetadata || dialMetadata.Host != "" || dialMetadata.RemoteAddress() != "8.8.8.8:53" {
-					t.Fatalf("display QNAME leaked into the dial metadata: %+v", dialMetadata)
+				if info.Metadata == dialMetadata || info.Metadata == resolver {
+					t.Fatal("resolver transport metadata aliases the routing or dial context")
 				}
-				if info.Rule != "DomainSuffix" || info.RulePayload != "example" {
-					t.Fatalf("incorrect matched rule: %s/%s", info.Rule, info.RulePayload)
+				wantDialMetadata := original.Clone()
+				wantDialMetadata.Host, wantDialMetadata.SniffHost = "", ""
+				wantDialMetadata.DNSMode = C.DNSNormal
+				wantDialMetadata.SpecialProxy, wantDialMetadata.SpecialRules = "", ""
+				if !reflect.DeepEqual(dialMetadata, wantDialMetadata) {
+					t.Fatalf("transport display changed the actual dial metadata: got %+v, want %+v", dialMetadata, wantDialMetadata)
+				}
+				if selectedMetadata.Host != "mixed.example" || selectedMetadata.SniffHost != "mixed.example" || selectedMetadata.DstIP.IsValid() ||
+					selectedMetadata.SrcIP != original.SrcIP || selectedMetadata.SrcPort != original.SrcPort || selectedMetadata.Type != original.Type ||
+					selectedMetadata.InIP != original.InIP || selectedMetadata.InPort != original.InPort || selectedMetadata.InUser != original.InUser ||
+					selectedMetadata.ProcessPath != original.ProcessPath || selectedMetadata.Uid != original.Uid || selectedMetadata.SpecialRules != original.SpecialRules {
+					t.Fatalf("query routing lost its original client identity or QNAME: %+v", selectedMetadata)
+				}
+				if info.Rule != "" || info.RulePayload != "" {
+					t.Fatalf("resolver transport retained a business-query rule: %s/%s", info.Rule, info.RulePayload)
 				}
 				if !reflect.DeepEqual(info.Chain, C.Chain{"leaf", "region", "policy"}) || !reflect.DeepEqual(info.ProviderChain, C.Chain{"subscription", "region-provider", "policy-provider"}) {
 					t.Fatalf("incorrect proxy/provider chain order: %v / %v", info.Chain, info.ProviderChain)
@@ -872,26 +903,39 @@ func TestDNSProxyConnectionStatisticsAndPanelClose(t *testing.T) {
 				if info.DownloadTotal.Load() != 0 {
 					t.Fatal("download was counted before the upstream answered")
 				}
-				if panelClose {
+				switch finish {
+				case "panel-close":
 					// The existing /connections/{id} DELETE calls precisely this.
 					if err := statistic.DefaultManager.Get(tracker.ID()).Close(); err != nil {
 						t.Fatal(err)
 					}
-				} else {
+				case "cancel":
+					cancel()
+				case "complete":
 					releaseResponse()
+				}
+				wait := 500 * time.Millisecond
+				if finish == "timeout" {
+					wait = 2 * time.Second
 				}
 				select {
 				case got := <-finished:
-					if panelClose {
+					if finish != "complete" {
 						if got.err == nil {
-							t.Fatal("closing the panel connection did not interrupt the exchange")
+							t.Fatalf("%s did not interrupt the unanswered exchange", finish)
 						}
 						expectedDown = 0
+						// A TCP socket's deadline and its context timer can fire in
+						// either order. Both are legitimate deadline completion.
+						if finish == "timeout" && !errors.Is(ctx.Err(), context.DeadlineExceeded) &&
+							!errors.Is(got.err, context.DeadlineExceeded) && !errors.Is(got.err, os.ErrDeadlineExceeded) {
+							t.Fatalf("unanswered exchange ended without its deadline: %v", got.err)
+						}
 					} else if got.err != nil || !bytes.Equal(got.response, response) {
 						t.Fatalf("DNS exchange failed: %v", got.err)
 					}
-				case <-time.After(500 * time.Millisecond):
-					t.Fatal("exchange did not finish promptly after response/panel close")
+				case <-time.After(wait):
+					t.Fatalf("exchange did not finish promptly after %s", finish)
 				}
 				if statistic.DefaultManager.Get(tracker.ID()) != nil {
 					t.Fatal("completed exchange remained in the active connection manager")
@@ -966,7 +1010,8 @@ func TestDNSProxyConnectionStatisticsFailureCleanup(t *testing.T) {
 				var tracked statistic.Tracker
 				observe := func() {
 					statistic.DefaultManager.Range(func(c statistic.Tracker) bool {
-						if c.Info().Metadata.Host == "failure.example" {
+						info := c.Info()
+						if info.DNS && info.Metadata.NetWork == network && info.Metadata.RemoteAddress() == "8.8.8.8:53" && info.Chain.Last() == leaf.Name() {
 							tracked = c
 							return false
 						}
@@ -982,14 +1027,18 @@ func TestDNSProxyConnectionStatisticsFailureCleanup(t *testing.T) {
 					}
 					client, server := net.Pipe()
 					t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
-					return &dnsProxyTestFailureConn{Conn: &dnsProxyTestConn{ExtendedConn: N.NewExtendedConn(client)}, failAt: failAt, observe: observe}, nil
+					conn := &dnsProxyTestConn{ExtendedConn: N.NewExtendedConn(client)}
+					conn.AppendToChains(leaf)
+					return &dnsProxyTestFailureConn{Conn: conn, failAt: failAt, observe: observe}, nil
 				}
 				leaf.packet = func(context.Context, *C.Metadata) (C.PacketConn, error) {
 					if failAt == "dial" {
 						return nil, io.ErrClosedPipe
 					}
 					packets := &dnsProxyTestPacketConn{closed: make(chan struct{})}
-					return &dnsProxyTestFailurePacketConn{PacketConn: &dnsProxyTestProxyPacketConn{EnhancePacketConn: N.NewEnhancePacketConn(packets)}, failAt: failAt, observe: observe}, nil
+					conn := &dnsProxyTestProxyPacketConn{EnhancePacketConn: N.NewEnhancePacketConn(packets)}
+					conn.AppendToChains(leaf)
+					return &dnsProxyTestFailurePacketConn{PacketConn: conn, failAt: failAt, observe: observe}, nil
 				}
 				_, err := exchangeDNSProxy(context.Background(), dnsProxyTestQuery(t, "failure.example."), dnsProxyTestResolver(network),
 					func(*C.Metadata) (dnsProxyRoute, error) { return dnsProxyRoute{proxy: newDNSProxyTestProxy(leaf)}, nil }, exchangeDNSProxyWire)
@@ -1003,7 +1052,8 @@ func TestDNSProxyConnectionStatisticsFailureCleanup(t *testing.T) {
 					t.Fatal("failed exchange leaked an active connection")
 				}
 				statistic.DefaultManager.Range(func(c statistic.Tracker) bool {
-					if c.Info().Metadata.Host == "failure.example" {
+					info := c.Info()
+					if info.DNS && info.Metadata.NetWork == network && info.Metadata.AddrPort() == dnsProxyTestResolver(network).AddrPort() && info.Chain.Last() == leaf.Name() {
 						t.Error("failure left an entry in the active connection manager")
 					}
 					return true
