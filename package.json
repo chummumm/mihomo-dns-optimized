@@ -1,6 +1,7 @@
 {
     "name": "clash-dashboard",
-    "version": "0.1.0",
+    "version": "0.1.0-sniffhost.1",
+    "packageManager": "pnpm@8.15.9",
     "description": "Web port of clash.",
     "keywords": [
         "clash",

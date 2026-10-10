@@ -17,13 +17,14 @@ export default defineConfig(
             UnoCSS(),
             VitePWA({
                 injectRegister: 'inline',
+                registerType: 'autoUpdate',
                 manifest: {
                     icons: [{
-                        src: '//cdn.jsdelivr.net/gh/Dreamacro/clash-dashboard/src/assets/Icon.png',
+                        src: './Icon.png',
                         sizes: '512x512',
                         type: 'image/png',
                     }],
-                    start_url: '/',
+                    start_url: './',
                     short_name: 'Clash Dashboard',
                     name: 'Clash Dashboard',
                 },
