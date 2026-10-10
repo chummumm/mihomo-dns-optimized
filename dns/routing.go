@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/metacubex/mihomo/component/dnsmessage"
+	"github.com/metacubex/mihomo/component/dnsstats"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	icontext "github.com/metacubex/mihomo/context"
@@ -155,8 +156,10 @@ func (r *Resolver) prepareDNSRouting(ctx context.Context, message *D.Msg) (conte
 	if !explicit {
 		switch plan.Type() {
 		case C.Reject:
+			markDNSOutcome(ctx, dnsstats.Reject)
 			return ctx, new(D.Msg).SetRcode(message, D.RcodeRefused), nil
 		case C.RejectDrop:
+			markDNSOutcome(ctx, dnsstats.Drop)
 			return ctx, nil, resolver.ErrDNSDrop
 		}
 	}
@@ -171,10 +174,12 @@ func dnsCacheKey(ctx context.Context, question D.Question) string {
 	return question.String()
 }
 
-func (c *client) exchangeRouted(ctx context.Context, message *D.Msg, route *dnsQueryRoute) (*D.Msg, error) {
+func (c *client) exchangeRouted(ctx context.Context, message *D.Msg, route *dnsQueryRoute) (response *D.Msg, err error) {
 	if route.err != nil {
 		return nil, route.err
 	}
+	attempt := observeDNSUpstream(ctx, c.Address())
+	defer func() { finishDNSUpstream(attempt, response, err) }()
 	ctx = tunnel.WithDNSQueryCloseHandler(ctx, func() { route.closed.Store(true) })
 	address, err := netip.ParseAddr(c.host)
 	if err != nil {
@@ -207,7 +212,7 @@ func (c *client) exchangeRouted(ctx context.Context, message *D.Msg, route *dnsQ
 		}
 		return result, nil
 	}
-	response, err := exchange()
+	response, err = exchange()
 	if err == nil && response.Truncated && destination.NetWork == C.UDP {
 		destination.NetWork = C.TCP
 		return exchange()

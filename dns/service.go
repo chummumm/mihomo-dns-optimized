@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/metacubex/mihomo/component/dnsstats"
 	"github.com/metacubex/mihomo/component/resolver"
 	icontext "github.com/metacubex/mihomo/context"
 	D "github.com/miekg/dns"
@@ -14,12 +15,21 @@ type Service struct {
 }
 
 // ServeMsg implement [resolver.Service] ResolveMsg
-func (s *Service) ServeMsg(ctx context.Context, msg *D.Msg) (*D.Msg, error) {
+func (s *Service) ServeMsg(ctx context.Context, msg *D.Msg) (r *D.Msg, err error) {
 	if len(msg.Question) == 0 {
 		return nil, errors.New("at least one question is required")
 	}
 
-	r, err := s.handler(icontext.NewDNSContext(ctx), msg)
+	var observation *dnsstats.Query
+	if !icontext.DNSBootstrap(ctx) && !cacheBackground(ctx) {
+		ctx, observation = dnsstats.StartQuery(ctx)
+	}
+	dnsContext := icontext.NewDNSContext(ctx)
+	if observation != nil {
+		record := dnsObservationRecord(ctx, msg.Question[0])
+		defer func() { finishDNSObservation(observation, record, dnsContext, r, err) }()
+	}
+	r, err = s.handler(dnsContext, msg)
 	if err != nil {
 		return r, err
 	}

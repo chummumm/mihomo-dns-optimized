@@ -33,7 +33,15 @@ DNS 分流通过内置解析器提供，普通代理连接保持原转发行为�
 
 开启 `dns-rule-routing` 时，DNS 规则执行使用派生视图和 classical 纯域名连续段索引，仍按原业务规则顺序判断 SRC / PROCESS / IN。成功的自动查询应答可以在同一来源、进程和入站作用域内跨临时源端口复用；每个请求仍先匹配当前规则，在途查询保持独立取消语义。DIRECT 探测使用共享有界任务池、同出口目标 IP 合并及短期结果复用，代理结果不进行本地探测。
 
-没有新增指标 API、遥测或需要用户维护的第二份规则。优化范围、缓存安全边界及测试方式见 [DNS 性能说明](docs/dns-performance.md)。正式发布使用 `v1.19.32-dns-optimized-1` 形式，末尾为数字修订号；tag、发行标题与内核版本一致，源码哈希保留在 BUILDINFO 中供核对。内核一键更新使用本二开仓库的正式发行并验证 SHA256，不会回装官方内核，见[更新说明](docs/releases.md#内核一键更新)。
+新增的 DNS 面板数据由本机控制器提供，查询记录、趋势和上游统计只保存在进程内存中，不写数据库或日志文件，也不发送遥测。无需维护第二份分流规则；观测不会改变 DNS 回答和出口选择。优化范围、缓存安全边界及测试方式见 [DNS 性能说明](docs/dns-performance.md)。正式发布使用 `v1.19.32-dns-optimized-1` 形式，末尾为数字修订号；tag、发行标题与内核版本一致，源码哈希保留在 BUILDINFO 中供核对。内核一键更新使用本二开仓库的正式发行并验证 SHA256，不会回装官方内核，见[更新说明](docs/releases.md#内核一键更新)。
+
+## DNS 状态与原版面板
+
+本仓库的 [Clash Dashboard 分支](https://github.com/chummumm/mihomo-dns-optimized/tree/clash-dashboard) 在原有面板上提供 DNS 概览、查询记录与上游统计，并保留嗅探域名显示兼容。连接页的“全部”与各 IP 从同一份保留记录计算数量；活跃连接完整保留，“保留关闭连接”最多保留最近 5000 条关闭记录。长表格按可见区域渲染，刷新时保持阅读位置。
+
+DNS 观测默认随 `dns.enable` 开启，可用 `dns.observability: false` 关闭。最多保留 4096 条查询明细，并受 8 MiB 记账预算和 24 小时保留期限约束；趋势使用固定分钟桶，上游统计最多保留 128 个独立身份，超出部分归入合计。普通完整重载保留数据，关闭观测会释放数据，重新开启或重启内核从零开始。面板不会将 DNS 数据写入浏览器本地存储。
+
+查询次数、实际上游交换次数和连接数采用不同口径，不能直接相加；NXDOMAIN 是 DNS 回答，竞争中取消的上游交换单独统计。完整字段、内存边界、安装方式和验证方法见 [DNS 状态展示](docs/dns-observability.md)。
 
 ## 快速开始
 
@@ -199,6 +207,7 @@ rules:
 bash scripts/ci-check.sh test
 go build -tags with_gvisor -o dns-route-kernel
 python3 scripts/test-dns-proxy.py ./dns-route-kernel
+python3 scripts/test-dns-observability.py ./dns-route-kernel
 ```
 
 测试事实、ICMP / PROCESS 平台跳过项与验证范围见[实施与复查记录](docs/dns-rule-routing-validation.md)。发布成功以精确提交的 Actions / Releases 记录为准。
@@ -211,6 +220,7 @@ python3 scripts/test-dns-proxy.py ./dns-route-kernel
 | [完整原生示例](docs/dns-proxy.example.yaml) | 无私人凭据、无远程 provider 的可校验模板 |
 | [设计与验收约定](docs/dns-rule-routing-design.md) | 优先级、未知 IP、一次计划、生命周期 |
 | [验证记录](docs/dns-rule-routing-validation.md) | 实测结果与明确限制 |
+| [DNS 状态展示](docs/dns-observability.md) | 纯内存概览、查询明细、上游统计、面板与计数口径 |
 | [SmartDNS 迁移对照](docs/smartdns-migration.md) | 字段对应、双栈与缓存差异、域名屏蔽迁移 |
 | [预编译文件与安装包](docs/releases.md) | 37 目标矩阵、deb / rpm / Arch 安装与配置保护 |
 | [云编译与上游同步](docs/upstream-sync.md) | 下载、校验、发布、同步失败与预演 |

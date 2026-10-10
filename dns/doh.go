@@ -112,6 +112,8 @@ func (doh *dnsOverHTTPS) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.
 	if answer, err, handled := exchangeNativeTransport(ctx, m, doh); handled {
 		return answer, err
 	}
+	attempt := observeDNSUpstream(ctx, doh.Address())
+	defer func() { finishDNSUpstream(attempt, msg, err) }()
 	// Quote from https://www.rfc-editor.org/rfc/rfc8484.html:
 	// In order to maximize HTTP cache friendliness, DoH clients using media
 	// formats that include the ID field from the DNS message header, such

@@ -97,6 +97,8 @@ func (doq *dnsOverQUIC) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.M
 	if answer, err, handled := exchangeNativeTransport(ctx, m, doq); handled {
 		return answer, err
 	}
+	attempt := observeDNSUpstream(ctx, "quic://"+doq.Address())
+	defer func() { finishDNSUpstream(attempt, msg, err) }()
 	// When sending queries over a QUIC connection, the DNS Message ID MUST be
 	// set to zero.
 	m = m.Copy()

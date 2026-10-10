@@ -8,6 +8,7 @@ import (
 
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/pool"
+	"github.com/metacubex/mihomo/component/dnsstats"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
@@ -25,7 +26,7 @@ type DnsOption struct {
 // DialContext implements C.ProxyAdapter
 func (d *Dns) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
 	left, right := N.Pipe()
-	go resolver.RelayDnsConn(context.Background(), right, 0)
+	go resolver.RelayDnsConn(dnsOutboundObservationContext(metadata, "tcp"), right, 0)
 	return NewConn(left, d), nil
 }
 
@@ -36,13 +37,28 @@ func (d *Dns) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (C.
 		return nil, err
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(dnsOutboundObservationContext(metadata, "udp"))
 
 	return NewPacketConn(&dnsPacketConn{
 		response: make(chan dnsPacket, 1),
 		ctx:      ctx,
 		cancel:   cancel,
 	}, d), nil
+}
+
+// Observe the explicit DNS outbound's original client without adding DNS
+// routing metadata or changing its existing background resolver semantics.
+func dnsOutboundObservationContext(metadata *C.Metadata, protocol string) context.Context {
+	source := dnsstats.Source{Protocol: protocol, Name: "DNS-outbound"}
+	if metadata != nil {
+		if metadata.SrcIP.IsValid() {
+			source.Client = metadata.SrcIP.Unmap().String()
+		}
+		if metadata.InName != "" {
+			source.Name = metadata.InName
+		}
+	}
+	return dnsstats.WithSource(context.Background(), source)
 }
 
 func (d *Dns) ResolveUDP(ctx context.Context, metadata *C.Metadata) error {

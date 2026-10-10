@@ -243,7 +243,8 @@ jobs:
               printf 'DNS correctness fixes preserve upstream/fallback identity, EDNS fields, elapsed TTL and address-family policy. Probe saturation skips measurement immediately; normal DNS requests keep their own deadline.\n'
               printf 'Linux process lookup keeps scanning when an unrelated process exits during /proc enumeration.\n'
               printf 'The core updater uses this repository, pins the selected version and verifies SHA256SUMS before replacement. Use the release/auto channel; the official alpha channel is not used.\n'
-              printf 'No production metrics endpoint or telemetry was added. Controlled load and regression tests run in CI; see docs/dns-performance.md.\n'
+              printf 'The original Clash Dashboard fork adds DNS overview, bounded query history and upstream statistics. The authenticated /dns/observability API keeps all observations in memory, with no database, file logging or telemetry. Ordinary reload retains observations; disable or restart clears them. See docs/dns-observability.md.\n'
+              printf 'Controlled DNS routing, load and memory-only observability regressions run against the Linux amd64 release binary in CI; see docs/dns-performance.md and docs/dns-observability.md.\n'
             } > "$RUNNER_TEMP/release-notes.txt"
             gh release create "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \

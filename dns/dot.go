@@ -39,10 +39,12 @@ func (t *dnsOverTLS) Address() string {
 	return fmt.Sprintf("tls://%s", net.JoinHostPort(t.host, t.port))
 }
 
-func (t *dnsOverTLS) ExchangeContext(ctx context.Context, m *D.Msg) (*D.Msg, error) {
+func (t *dnsOverTLS) ExchangeContext(ctx context.Context, m *D.Msg) (response *D.Msg, err error) {
 	if answer, err, handled := exchangeNativeTransport(ctx, m, t); handled {
 		return answer, err
 	}
+	attempt := observeDNSUpstream(ctx, t.Address())
+	defer func() { finishDNSUpstream(attempt, response, err) }()
 	// miekg/dns ExchangeContext doesn't respond to context cancel.
 	// this is a workaround
 	type result struct {

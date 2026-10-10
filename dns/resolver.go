@@ -10,6 +10,7 @@ import (
 	"github.com/metacubex/mihomo/common/contextutils"
 	"github.com/metacubex/mihomo/common/lru"
 	"github.com/metacubex/mihomo/common/singleflight"
+	"github.com/metacubex/mihomo/component/dnsstats"
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/trie"
 	C "github.com/metacubex/mihomo/constant"
@@ -47,7 +48,7 @@ type Resolver struct {
 	fallbackDomainFilters []C.DomainMatcher
 	fallbackIPFilters     []C.IpMatcher
 	fallbackLazyQuery     bool
-	group                 singleflight.Group[*D.Msg]
+	group                 singleflight.Group[*dnsExchangeResult]
 	cache                 dnsCache
 	cacheControl          *cacheControl
 	speedChecker          *directSpeedChecker
@@ -205,11 +206,13 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 		hit, staleTTL = r.cacheControl.ServeStale(expireTime, now)
 	}
 	if hit {
+		markDNSOutcome(ctx, dnsstats.CacheFresh)
 		msg.Id = m.Id
 		if queryRoute(ctx) == nil || log.DNSDebugEnabled() {
 			log.Debugln("[DNS] cache hit %s --> %s, expire at %s", domain, msgToLogString(msg), expireTime.Format("2006-01-02 15:04:05"))
 		}
 		if expireTime.Before(now) {
+			markDNSOutcome(ctx, dnsstats.CacheStale)
 			setMsgTTL(msg, staleTTL)
 			continueFetch = true
 		} else {
@@ -218,6 +221,7 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 		}
 		return
 	}
+	markDNSOutcome(ctx, dnsstats.Upstream)
 	return r.exchangeWithoutCache(ctx, m)
 }
 
@@ -235,15 +239,16 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 	canRetry := func() bool {
 		return !cacheBackground(ctx) && !dnsQueryClosed(ctx) && (r.cacheControl == nil || r.cacheControl.active(ctx))
 	}
-	fn := func() (result *D.Msg, err error) {
+	exchange := func(ctx context.Context) (result *D.Msg, err error) {
 		release, admissionErr := admitDNSNativeWork(ctx)
 		if admissionErr != nil {
 			return &D.Msg{MsgHdr: D.MsgHdr{Opcode: retryMax}}, admissionErr
 		}
 		defer release()
-		workContext := ctx
+		// Shared work keeps aggregate scope, never its first caller's mutable event.
+		workContext := dnsstats.DetachQuery(ctx)
 		if !cacheBackground(ctx) {
-			workContext = contextutils.WithoutCancel(ctx)
+			workContext = contextutils.WithoutCancel(workContext)
 		}
 		ctx, cancel := context.WithTimeout(workContext, resolver.DefaultDNSTimeout)
 		defer cancel()
@@ -261,6 +266,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 			original := result
 			result = r.answerPolicy.apply(m, result)
 			result = ageDNSAnswerAfterPolicy(ctx, original, result)
+			inheritDNSLocalAnswer(ctx, result, original)
 			if cache {
 				if r.cacheControl != nil {
 					r.cacheControl.Store(ctx, key, q, result)
@@ -289,10 +295,15 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 		result, cache, err = r.exchangeBatch(ctx, main, m)
 		return
 	}
+	fn := func() (*dnsExchangeResult, error) {
+		local := &dnsLocalAnswers{}
+		message, err := exchange(context.WithValue(ctx, dnsLocalAnswersKey{}, local))
+		return &dnsExchangeResult{Msg: message, local: local.has(message)}, err
+	}
 
 	ch := r.group.DoChan(flightKey, fn)
 
-	var result singleflight.Result[*D.Msg]
+	var result singleflight.Result[*dnsExchangeResult]
 
 	select {
 	case result = <-ch:
@@ -321,7 +332,14 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 	}
 
 	if err == nil {
-		msg = ret
+		msg = ret.Msg
+		if ret.local {
+			if msg.Rcode == D.RcodeRefused {
+				markDNSOutcome(ctx, dnsstats.Reject)
+			} else {
+				markDNSOutcome(ctx, dnsstats.Local)
+			}
+		}
 		if shared {
 			msg = msg.Copy()
 		}

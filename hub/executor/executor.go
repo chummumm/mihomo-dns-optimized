@@ -17,6 +17,7 @@ import (
 	"github.com/metacubex/mihomo/component/auth"
 	"github.com/metacubex/mihomo/component/ca"
 	"github.com/metacubex/mihomo/component/dialer"
+	"github.com/metacubex/mihomo/component/dnsstats"
 	"github.com/metacubex/mihomo/component/geodata"
 	mihomoHttp "github.com/metacubex/mihomo/component/http"
 	"github.com/metacubex/mihomo/component/iface"
@@ -268,6 +269,7 @@ func closeDNSResolvers() {
 
 func updateDNS(c *config.DNS, generalIPv6 bool) {
 	closeDNSResolvers()
+	dnsstats.Default.Configure(c.Enable && c.Observability)
 	if !c.Enable {
 		resolver.DefaultResolver = nil
 		resolver.DefaultHostMapper = nil
