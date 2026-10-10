@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 	_ "unsafe"
 
 	"github.com/metacubex/mihomo/adapter"
@@ -161,6 +162,7 @@ type DNS struct {
 	Listen                string
 	ListenRoutingMark     int
 	EnhancedMode          C.DNSMode
+	RedirHostFilter       *trie.DomainSet
 	DefaultNameserver     []dns.NameServer
 	CacheAlgorithm        string
 	CacheMaxSize          int
@@ -239,6 +241,7 @@ type RawDNS struct {
 	Listen                        string                              `yaml:"listen" json:"listen"`
 	ListenRoutingMark             int                                 `yaml:"listen-routing-mark" json:"listen-routing-mark"`
 	EnhancedMode                  C.DNSMode                           `yaml:"enhanced-mode" json:"enhanced-mode"`
+	RedirHostFilter               []string                            `yaml:"redir-host-filter" json:"redir-host-filter"`
 	FakeIPRange                   string                              `yaml:"fake-ip-range" json:"fake-ip-range"`
 	FakeIPRange6                  string                              `yaml:"fake-ip-range6" json:"fake-ip-range6"`
 	FakeIPFilter                  []string                            `yaml:"fake-ip-filter" json:"fake-ip-filter"`
@@ -1450,6 +1453,10 @@ func parseDNS(rawCfg *RawConfig, ruleProviders map[string]P.RuleProvider) (*DNS,
 	if err != nil {
 		return nil, err
 	}
+	redirHostFilter, err := parseRedirHostFilter(cfg.RedirHostFilter)
+	if err != nil {
+		return nil, err
+	}
 	if rawCfg.DNSRuleRouting {
 		// Work on a copy: disabling the feature on the next full reload must
 		// restore the user's original resolver policy, not a mutated config.
@@ -1480,6 +1487,7 @@ func parseDNS(rawCfg *RawConfig, ruleProviders map[string]P.RuleProvider) (*DNS,
 		UseHosts:          cfg.UseHosts,
 		UseSystemHosts:    cfg.UseSystemHosts,
 		EnhancedMode:      cfg.EnhancedMode,
+		RedirHostFilter:   redirHostFilter,
 		CacheAlgorithm:    cfg.CacheAlgorithm,
 		CacheMaxSize:      cfg.CacheMaxSize,
 		SpeedCheck:        speedCheck,
@@ -1667,6 +1675,24 @@ func parseDNS(rawCfg *RawConfig, ruleProviders map[string]P.RuleProvider) (*DNS,
 	}
 
 	return dnsCfg, nil
+}
+
+func parseRedirHostFilter(domains []string) (*trie.DomainSet, error) {
+	var builder trie.DomainSetBuilder
+	for idx, pattern := range domains {
+		// A single final DNS root dot does not change the domain pattern;
+		// keep any additional dot for the existing pattern validator to reject.
+		domain := strings.TrimSuffix(pattern, ".")
+		if strings.ContainsAny(domain, ":/\\,") || strings.IndexFunc(domain, func(r rune) bool {
+			return unicode.IsSpace(r) || unicode.IsControl(r)
+		}) >= 0 {
+			return nil, fmt.Errorf("dns.redir-host-filter[%d] %q: only domain patterns are supported", idx, pattern)
+		}
+		if err := builder.Insert(domain); err != nil {
+			return nil, fmt.Errorf("dns.redir-host-filter[%d]: %w", idx, err)
+		}
+	}
+	return builder.Build(), nil
 }
 
 func parseFakeIPRules(rawRules []string, ruleProviders map[string]P.RuleProvider) ([]C.Rule, error) {

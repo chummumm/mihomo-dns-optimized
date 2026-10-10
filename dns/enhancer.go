@@ -3,21 +3,24 @@ package dns
 import (
 	"errors"
 	"net/netip"
+	"strings"
 
 	"github.com/metacubex/mihomo/common/lru"
 	"github.com/metacubex/mihomo/component/fakeip"
+	"github.com/metacubex/mihomo/component/trie"
 	C "github.com/metacubex/mihomo/constant"
 )
 
 type ResolverEnhancer struct {
-	ipv6          bool
-	mode          C.DNSMode
-	fakeIPPool    *fakeip.Pool
-	fakeIPPool6   *fakeip.Pool
-	fakeIPSkipper *fakeip.Skipper
-	fakeIPTTL     int
-	mapping       *lru.LruCache[netip.Addr, string]
-	useHosts      bool
+	ipv6            bool
+	mode            C.DNSMode
+	fakeIPPool      *fakeip.Pool
+	fakeIPPool6     *fakeip.Pool
+	fakeIPSkipper   *fakeip.Skipper
+	fakeIPTTL       int
+	mapping         *lru.LruCache[netip.Addr, string]
+	redirHostFilter *trie.DomainSet
+	useHosts        bool
 }
 
 func (h *ResolverEnhancer) FakeIPEnabled() bool {
@@ -102,7 +105,7 @@ func (h *ResolverEnhancer) FindHostByIP(ip netip.Addr) (string, bool) {
 	}
 
 	if mapping := h.mapping; mapping != nil {
-		if host, existed := h.mapping.Get(ip); existed {
+		if host, existed := mapping.Get(ip); existed && h.mappingAllowed(host) {
 			return host, true
 		}
 	}
@@ -111,9 +114,24 @@ func (h *ResolverEnhancer) FindHostByIP(ip netip.Addr) (string, bool) {
 }
 
 func (h *ResolverEnhancer) InsertHostByIP(ip netip.Addr, host string) {
-	if mapping := h.mapping; mapping != nil {
-		h.mapping.Set(ip, host)
+	if mapping := h.mappingForHost(host); mapping != nil {
+		mapping.Set(ip, host)
 	}
+}
+
+// mappingAllowed checks one name against the immutable domain index. Keeping
+// the filter nil outside redir-host preserves fake-IP and normal-mode behavior.
+func (h *ResolverEnhancer) mappingAllowed(host string) bool {
+	return h.redirHostFilter == nil || !h.redirHostFilter.Has(strings.TrimSuffix(host, "."))
+}
+
+// mappingForHost authorizes a whole answer's mapping writes with one lookup,
+// instead of repeating the same domain match for every returned address.
+func (h *ResolverEnhancer) mappingForHost(host string) *lru.LruCache[netip.Addr, string] {
+	if h.mapping != nil && h.mappingAllowed(host) {
+		return h.mapping
+	}
+	return nil
 }
 
 func (h *ResolverEnhancer) FlushFakeIP() error {
@@ -136,7 +154,13 @@ func (h *ResolverEnhancer) FlushFakeIP() error {
 
 func (h *ResolverEnhancer) PatchFrom(o *ResolverEnhancer) {
 	if h.mapping != nil && o.mapping != nil {
-		o.mapping.CloneTo(h.mapping)
+		if h.redirHostFilter == nil {
+			o.mapping.CloneTo(h.mapping)
+		} else {
+			o.mapping.CloneToFiltered(h.mapping, func(_ netip.Addr, host string) bool {
+				return h.mappingAllowed(host)
+			})
+		}
 	}
 
 	if h.fakeIPPool != nil && o.fakeIPPool != nil {
@@ -159,13 +183,14 @@ func (h *ResolverEnhancer) StoreFakePoolState() {
 }
 
 type EnhancerConfig struct {
-	IPv6          bool
-	EnhancedMode  C.DNSMode
-	FakeIPPool    *fakeip.Pool
-	FakeIPPool6   *fakeip.Pool
-	FakeIPSkipper *fakeip.Skipper
-	FakeIPTTL     int
-	UseHosts      bool
+	IPv6            bool
+	EnhancedMode    C.DNSMode
+	FakeIPPool      *fakeip.Pool
+	FakeIPPool6     *fakeip.Pool
+	FakeIPSkipper   *fakeip.Skipper
+	FakeIPTTL       int
+	RedirHostFilter *trie.DomainSet
+	UseHosts        bool
 }
 
 func NewEnhancer(cfg EnhancerConfig) *ResolverEnhancer {
@@ -173,6 +198,9 @@ func NewEnhancer(cfg EnhancerConfig) *ResolverEnhancer {
 		ipv6:     cfg.IPv6,
 		mode:     cfg.EnhancedMode,
 		useHosts: cfg.UseHosts,
+	}
+	if cfg.EnhancedMode == C.DNSMapping {
+		e.redirHostFilter = cfg.RedirHostFilter
 	}
 
 	if cfg.EnhancedMode != C.DNSNormal {

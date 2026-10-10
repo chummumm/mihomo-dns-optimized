@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/metacubex/mihomo/common/lru"
 	"github.com/metacubex/mihomo/component/fakeip"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
@@ -20,7 +19,7 @@ type (
 	middleware func(next handler) handler
 )
 
-func withHosts(mapping *lru.LruCache[netip.Addr, string]) middleware {
+func withHosts(mapper *ResolverEnhancer) middleware {
 	return func(next handler) handler {
 		return func(ctx *icontext.DNSContext, r *D.Msg) (*D.Msg, error) {
 			q := r.Question[0]
@@ -29,7 +28,7 @@ func withHosts(mapping *lru.LruCache[netip.Addr, string]) middleware {
 				return next(ctx, r)
 			}
 
-			host := strings.TrimRight(q.Name, ".")
+			host := strings.TrimSuffix(q.Name, ".")
 			handleCName := func(resp *D.Msg, domain string) {
 				rr := &D.CNAME{}
 				rr.Hdr = D.RR_Header{Name: q.Name, Rrtype: D.TypeCNAME, Class: D.ClassINET, Ttl: 10}
@@ -39,6 +38,11 @@ func withHosts(mapping *lru.LruCache[netip.Addr, string]) middleware {
 			record, ok := resolver.DefaultHosts.Search(host, q.Qtype != D.TypeA && q.Qtype != D.TypeAAAA)
 			if !ok {
 				if record != nil && record.IsDomain {
+					// An allowed alias must not bypass the original query's
+					// exclusion when the next middleware sees the rewritten name.
+					if !mapper.mappingAllowed(q.Name) {
+						ctx.SkipDNSMapping = true
+					}
 					// replace request domain
 					newR := r.Copy()
 					newR.Question[0].Name = record.Domain + "."
@@ -53,6 +57,10 @@ func withHosts(mapping *lru.LruCache[netip.Addr, string]) middleware {
 				return next(ctx, r)
 			}
 
+			mapping := mapper.mappingForHost(q.Name)
+			if ctx.SkipDNSMapping {
+				mapping = nil
+			}
 			msg := r.Copy()
 			handleIPs := func() {
 				for _, ipAddr := range record.IPs {
@@ -96,7 +104,7 @@ func withHosts(mapping *lru.LruCache[netip.Addr, string]) middleware {
 	}
 }
 
-func withMapping(mapping *lru.LruCache[netip.Addr, string]) middleware {
+func withMapping(mapper *ResolverEnhancer) middleware {
 	return func(next handler) handler {
 		return func(ctx *icontext.DNSContext, r *D.Msg) (*D.Msg, error) {
 			q := r.Question[0]
@@ -104,13 +112,18 @@ func withMapping(mapping *lru.LruCache[netip.Addr, string]) middleware {
 			if !isIPRequest(q) {
 				return next(ctx, r)
 			}
-
 			msg, err := next(ctx, r)
 			if err != nil {
 				return nil, err
 			}
-
-			host := strings.TrimRight(q.Name, ".")
+			if ctx.SkipDNSMapping {
+				return msg, nil
+			}
+			mapping := mapper.mappingForHost(q.Name)
+			if mapping == nil {
+				return msg, nil
+			}
+			host := strings.TrimSuffix(q.Name, ".")
 
 			for _, ans := range msg.Answer {
 				var ip netip.Addr
@@ -234,7 +247,7 @@ func newHandler(resolver resolver.Resolver, mapper *ResolverEnhancer) handler {
 	var middlewares []middleware
 
 	if mapper.useHosts {
-		middlewares = append(middlewares, withHosts(mapper.mapping))
+		middlewares = append(middlewares, withHosts(mapper))
 	}
 
 	if mapper.mode == C.DNSFakeIP {
@@ -242,7 +255,7 @@ func newHandler(resolver resolver.Resolver, mapper *ResolverEnhancer) handler {
 	}
 
 	if mapper.mode != C.DNSNormal {
-		middlewares = append(middlewares, withMapping(mapper.mapping))
+		middlewares = append(middlewares, withMapping(mapper))
 	}
 
 	return compose(middlewares, withResolver(resolver, mapper.ipv6))

@@ -90,6 +90,10 @@ const (
 type DNSContext struct {
 	context.Context
 
+	// SkipDNSMapping carries a redir-host exclusion across hosts alias rewriting.
+	// It belongs to this request only; it does not affect DNS answer caching.
+	SkipDNSMapping bool
+
 	id uuid.UUID
 	tp string
 }

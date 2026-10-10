@@ -56,6 +56,28 @@ sniffer:
 
 全端口表示在符合嗅探条件的 TCP 连接上识别 HTTP Host / TLS ClientHello 中可见的服务器名，不主动扫描端口，也不解密 TLS 应用数据。已有明确域名的代理请求不会仅因端口范围扩大就被强制再次嗅探。没有可见域名、ECH 隐藏真实名称、非 HTTP / TLS 或嗅探失败的连接，不能保证恢复域名。范围扩大后，某些等待服务端先发数据的协议可能多出首包等待；可按需要缩小端口或配置跳过地址。QUIC 属于独立的 UDP 嗅探设置，不由这两个 TCP 端口范围开启。
 
+## redir-host 映射黑名单
+
+`dns.redir-host-filter` 只在 `enhanced-mode: redir-host` 下控制真实 IP → 域名映射，默认空名单保持原行为。它独立于 `dns-rule-routing`；使用原有 DNS 分流方式时也可使用。
+
+```yaml
+dns:
+  enhanced-mode: redir-host
+  redir-host-filter:
+    - "example.com"
+    - "+.example.net"
+```
+
+`example.com` 精确匹配该域名；`+.example.net` 匹配本域名及其全部子域名；`*.example.org` 匹配一层子域名，`.example.org` 匹配任意层子域名但不含本域名。沿用内核已有域名模式语法，忽略域名大小写并接受单个结尾根点。基础名单不接受 URL、`geosite:`、`rule-set:` 或完整路由规则；无效项在配置校验时报告具体下标。
+
+命中名单后，A / AAAA / CNAME 和 hosts 的 DNS 回答仍正常返回，已有答案缓存、上游选择、fallback、TTL / EDNS 和测速策略保持原有语义；只跳过该域名的映射写入，并拒绝从旧映射读回该域名。hosts 静态地址与域名别名使用同一检查，别名改写不会绕过原始查询名的排除。普通 CNAME 回答按原始查询名判断，不另行遍历整条 CNAME 链作为黑名单规则。
+
+完整 reload 时，允许的旧映射以独立条目复制并保留 LRU 顺序和原过期时间元数据，命中当前名单的旧条目不继承。新配置的读取仍会检查名单，避免旧标签被采用。移除名单并 reload 后，后续 DNS 查询可重新建立映射；已经建立的连接不会重新进行域名识别。真实 IP 映射沿用现有按容量回收的 LRU 生命周期；保存过期时间元数据不等于普通 DNS 答案缓存的 TTL 淘汰，本功能没有修改这个既有区别。
+
+名单在配置加载时编译为内核现有的不可变 `DomainSet` 索引，正常查询不逐项扫描名单，也不扫描映射缓存。索引支持通配分支；只在 reload 时对最多 4096 条真实 IP 映射执行一次过滤复制。
+
+这是基础域名黑名单：允许域名 B 与被排除域名 A 共用 IP 时，B 仍可建立映射，不做 IP 级抑制。因此不能据此保证没有域名信息的共享 IP 连接必然属于哪个域名。SOCKS / HTTP 入站携带的显式域名、TLS / HTTP / QUIC 嗅探出的域名仍可用于规则和面板显示；黑名单不会强制 DIRECT、拒绝解析或转换 IPv6 目标。`normal`、fake-IP 映射和 `fake-ip-filter` 保持原有行为。
+
 ## 内置 DNS 如何选择上游
 
 `dns.listen`、TUN DNS 劫持以及适用的内部解析，共用已有 QNAME 选路核心。在 Rule 模式中，先选出实际叶子，再按下表处理：
@@ -268,5 +290,7 @@ payload:
 关闭一条这样的逻辑查询会中断该交换，不关闭同一 HTTP/2 或 QUIC 连接上的其他查询，也不触发该查询的自动重试或后台刷新。正常完成后逻辑记录离开活动列表，共享传输可以继续存在。经普通代理转发的 DNS 显示为普通连接，不再生成逐查询 QNAME 记录。普通 SSH 的反向映射或嗅探显示不在本功能修改范围内。
 
 更改 `dns-rule-routing` 应重新加载完整配置。`GET /configs` 返回生效值，`PATCH /configs` 不接受该字段；可通过原 `PUT /configs` 完整重载。省略开关等同于关闭。旧 `dns-proxy-port` 应删除，不再新增专用 DNS listener。
+
+完整配置重载（`PUT /configs` 或 SIGHUP）会重建当前配置的主、直连、节点域名和 bootstrap 解析器的答案缓存，以及候选缓存、测速和预取状态，即使 DNS 配置内容没有变化也一样。真实 IP → 域名映射按上述黑名单约束继承；fake-IP 有单独的继承与持久化逻辑。`PATCH /configs` 修改部分运行设置不等于完整重载，`force=true` 也不是“强制清空全部 DNS 缓存”的开关。客户端系统和浏览器自己的 DNS 缓存不受内核 reload 控制。
 
 实现与核验见 [设计约定](dns-rule-routing-design.md)、[验证记录](dns-rule-routing-validation.md)；构建和更新见 [上游同步说明](upstream-sync.md)。本地运行 `bash scripts/ci-check.sh test`，完整二进制检查使用 `scripts/test-dns-proxy.py`；最终结果以对应提交的 Actions 为准。
