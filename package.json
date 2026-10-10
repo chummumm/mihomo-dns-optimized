@@ -1,6 +1,6 @@
 {
     "name": "clash-dashboard",
-    "version": "0.2.0-dns-memory.1",
+    "version": "0.2.0-dns-memory.2",
     "packageManager": "pnpm@8.15.9",
     "description": "Web port of clash.",
     "keywords": [

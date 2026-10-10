@@ -17,6 +17,7 @@ function loadSource(relative) {
 
 const { ConnectionsStore } = loadSource('store.ts')
 const { StreamReader } = loadSource('../../lib/streamer.ts')
+const { formatConnection, getConnectionPresentation, isDNSConnection } = loadSource('helper.ts')
 
 function connection(id, sourceIP = '192.0.2.1', download = 0) {
     return {
@@ -36,6 +37,52 @@ function assertCounts(store, expected) {
     assert.equal(state.connections.length, Object.values(expected).reduce((total, count) => total + count, 0))
     assert.equal(new Set(state.connections.map(value => value.id)).size, state.connections.length)
 }
+
+test('DNS connection presentation uses the final node without changing raw routing data', () => {
+    const original = connection('dns')
+    original.dns = true
+    original.chains = Object.freeze(['leaf-node', 'inner-group', 'outer-group'])
+    original.rule = 'DomainSuffix'
+    original.rulePayload = 'example.test'
+    original.uploadSpeed = 0; original.downloadSpeed = 0
+    const before = JSON.stringify(original)
+    Object.freeze(original.metadata); Object.freeze(original)
+    const result = formatConnection(original)
+    assert.equal(result.type, 'DNS')
+    assert.equal(result.chains, 'leaf-node')
+    assert.equal(result.rule, '')
+    assert.equal(result.original, original)
+    assert.equal(JSON.stringify(original), before)
+    assert.equal(formatConnection(original), result, 'unchanged records reuse presentation')
+    assert.deepEqual(getConnectionPresentation({ ...original, chains: ['DIRECT'] }), { type: 'DNS', chains: 'DIRECT', rule: '' })
+    assert.deepEqual(getConnectionPresentation({ ...original, chains: [] }), { type: 'DNS', chains: '', rule: '' })
+})
+
+test('DNS compatibility markers do not misclassify ordinary proxy port 53 or arbitrary inbound names', () => {
+    const original = connection('ordinary-dns-port')
+    original.chains = ['leaf-node', 'inner-group', 'outer-group']
+    original.rule = 'DomainSuffix'; original.rulePayload = 'example.test'
+    original.metadata.destinationPort = '53'
+    original.metadata.inboundName = 'DNS'
+    for (const type of ['Socks5', 'HTTP', 'Tun']) {
+        const value = { ...original, metadata: { ...original.metadata, type } }
+        assert.equal(isDNSConnection(value), false)
+        assert.deepEqual(getConnectionPresentation(value), {
+            type, chains: 'outer-group / inner-group / leaf-node', rule: 'DomainSuffix :: example.test',
+        })
+        assert.equal(isDNSConnection({ ...value, dns: true }), true, 'explicit DNS work can retain its original inbound type')
+    }
+    for (const inboundName of ['DNS', 'DNS-TRANSPORT']) {
+        const value = { ...original, metadata: { ...original.metadata, type: 'Inner', inboundName, destinationPort: '443' } }
+        assert.equal(isDNSConnection(value), true, 'old fork marker is independent of upstream port')
+        assert.equal(getConnectionPresentation(value).type, 'DNS')
+    }
+    for (const inboundName of [undefined, '', 'DNS-other', 'dns', 'HTTPS']) {
+        assert.equal(isDNSConnection({ ...original, metadata: { ...original.metadata, type: 'Inner', inboundName } }), false)
+    }
+    assert.equal(isDNSConnection({}), false)
+    assert.deepEqual(getConnectionPresentation({}), { type: '', chains: '', rule: '' })
+})
 
 test('every valid snapshot updates the observed collection, including null and empty', () => {
     const store = new ConnectionsStore()

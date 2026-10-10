@@ -5,7 +5,7 @@ import { basePath, formatTraffic } from '@lib/helper'
 import { type BaseComponentProps } from '@models'
 import { useI18n } from '@stores'
 
-import { getConnectionHost } from '../helper'
+import { getConnectionHost, getConnectionPresentation, isDNSConnection } from '../helper'
 import { type Connection } from '../store'
 
 interface ConnectionsInfoProps extends BaseComponentProps {
@@ -16,6 +16,7 @@ export function ConnectionInfo (props: ConnectionsInfoProps) {
     const { translation } = useI18n()
     const t = useMemo(() => translation('Connections').t, [translation])
     const host = getConnectionHost(props.connection.metadata)
+    const presentation = getConnectionPresentation(props.connection)
 
     return (
         <div className={classnames(props.className, 'flex flex-col overflow-y-auto text-sm')}>
@@ -30,7 +31,7 @@ export function ConnectionInfo (props: ConnectionsInfoProps) {
                 </div>
                 <div className="flex flex-1">
                     <span className="w-20 font-bold">{t('info.inbound')}</span>
-                    <span className="font-mono">{props.connection.metadata?.type}</span>
+                    <span className="font-mono">{presentation.type}</span>
                 </div>
             </div>
             <div className="my-3 flex">
@@ -71,16 +72,14 @@ export function ConnectionInfo (props: ConnectionsInfoProps) {
                         : t('info.hostEmpty')
                 }</span>
             </div>
-            <div className="my-3 flex">
+            {!isDNSConnection(props.connection) && <div className="my-3 flex">
                 <span className="w-20 font-bold">{t('info.rule')}</span>
-                <span className="font-mono">
-                    { props.connection.rule && `${props.connection.rule}${props.connection.rulePayload && ` :: ${props.connection.rulePayload}`}` }
-                </span>
-            </div>
+                <span className="font-mono">{presentation.rule}</span>
+            </div>}
             <div className="my-3 flex">
                 <span className="w-20 font-bold">{t('info.chains')}</span>
                 <span className="flex-1 break-all font-mono">
-                    { props.connection.chains?.slice().reverse().join(' / ') }
+                    {presentation.chains}
                 </span>
             </div>
             <div className="my-3 flex justify-between">
