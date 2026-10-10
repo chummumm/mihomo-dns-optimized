@@ -35,11 +35,13 @@ DNS 分流通过内置解析器提供，普通代理连接保持原转发行为�
 
 新增的 DNS 面板数据由本机控制器提供，查询记录、趋势和上游统计只保存在进程内存中，不写数据库或日志文件，也不发送遥测。无需维护第二份分流规则；观测不会改变 DNS 回答和出口选择。优化范围、缓存安全边界及测试方式见 [DNS 性能说明](docs/dns-performance.md)。
 
-正式发布从本次起使用 `v1.19.32-optimized-8` 形式，末尾为数字修订号；tag、发行标题与内核版本一致，源码哈希保留在 BUILDINFO 中供核对。修订号由 `OPTIMIZED_REVISION` 记录，更新文档不会消耗编号或自动发版。内核一键更新使用本二开仓库的正式发行并验证 SHA256；**旧命名内核首次迁移需要手动安装新版**，之后继续使用二开源一键更新，见[更新说明](docs/releases.md#内核一键更新)。
+正式版本采用 `vX.Y.Z-optimized-N`，本次为 `v1.19.32-optimized-9`；tag、发行标题与内核版本一致，源码哈希保留在 BUILDINFO 中供核对。修订号由 `OPTIMIZED_REVISION` 记录，更新文档不会消耗编号或自动发版。自 v9 起，发行文件统一使用 `mihomo-<target>-<version>`，Windows ZIP 内为 `mihomo-<target>.exe`。内核一键更新继续使用本二开仓库的正式发行并验证 SHA256；**包括 `v1.19.32-optimized-8` 在内的旧内核，首次升级 v9 需要手动安装一次**，因为其编译内置的更新器要求旧资产文件名。安装 v9 后可继续一键更新，见[更新说明](docs/releases.md#内核一键更新)。
 
 ## DNS 状态与原版面板
 
 本仓库的 [Clash Dashboard 分支](https://github.com/chummumm/mihomo-dns-optimized/tree/clash-dashboard) 在原有面板上提供 DNS 概览、查询记录与上游统计，并保留嗅探域名显示兼容。连接页的“全部”与各 IP 从同一份保留记录计算数量；活跃连接完整保留，“保留关闭连接”最多保留最近 5000 条关闭记录。长表格按可见区域渲染，刷新时保持阅读位置。
+
+连接页的 `DNS` 类型仅用于内核本机 resolver 发起的真实上游 DNS transport，由核心明确返回 `dns: true`；合成记录和客户端查询记录不携带这个标记。面板 0.3.2 只读取该明确标记，DNS 连接的节点显示最终选择的出站，接口仍保留完整规则和链路数据。面板同时提供 `mihomo` 筛选，并调整移动端连接页、开始时间显示、重载入口和测速 URL 设置。
 
 DNS 观测默认随 `dns.enable` 开启，可用 `dns.observability: false` 关闭。最多保留 4096 条查询明细，并受 8 MiB 记账预算和 24 小时保留期限约束；趋势使用固定分钟桶，上游统计最多保留 128 个独立身份，超出部分归入合计。普通完整重载保留数据，关闭观测会释放数据，重新开启或重启内核从零开始。面板不会将 DNS 数据写入浏览器本地存储。
 
@@ -61,17 +63,17 @@ DNS 观测默认随 `dns.enable` 开启，可用 `dns.observability: false` 关�
 
 完整矩阵为 **37 个平台 / CPU 目标、66 个二进制归档和安装包**，另附 `BUILDINFO.json` 与 `SHA256SUMS`。`linux-amd64` 保持 GOAMD64=v1；v2/v3 单独提供。当前不重复上游旧 Go 工具链、LoongArch ABI1 等兼容变体。完整 CPU、最低兼容边界和安装说明见[预编译文件与安装包](docs/releases.md)。
 
-Debian / Ubuntu 例如使用 `mihomo-dns-linux-amd64-<version>.deb`：
+Debian / Ubuntu 例如使用 `mihomo-linux-amd64-<version>.deb`：
 
 ```bash
-sudo apt install ./mihomo-dns-linux-amd64-<version>.deb
+sudo apt install ./mihomo-linux-amd64-<version>.deb
 # 将自己的配置放入 /etc/mihomo/config.yaml 后再校验和启动。
 sudo mihomo -t -d /etc/mihomo
 sudo systemctl daemon-reload
 sudo systemctl enable --now mihomo
 ```
 
-安装包使用 `/usr/bin/mihomo`、`/etc/mihomo/config.yaml` 和 `mihomo.service`，通过包管理器保护已有配置，不自动启动服务。包名为 `mihomo-dns-optimized`，声明替换官方 `mihomo` 包。通用起始配置只有本机 mixed 和 DIRECT；私人节点与规则需自行提供。
+安装包使用 `/usr/bin/mihomo`、`/etc/mihomo/config.yaml` 和 `mihomo.service`，通过包管理器保护已有配置，不自动启动服务。文件改名后，包管理器内部名称仍保留 `mihomo-dns-optimized`，声明替换官方 `mihomo` 包，已有安装可按同一个包正常升级。通用起始配置只有本机 mixed 和 DIRECT；私人节点与规则需自行提供。
 
 直接使用压缩核心时，解压并命名为 `dns-route-kernel` 后运行：
 

@@ -15,7 +15,7 @@ sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location('release_build', Path(__file__).with_name('release-build.py'))
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
-VERSION = 'v1.19.32-optimized-8'
+VERSION = 'v1.19.32-optimized-9'
 LEGACY_VERSION = 'v1.19.32-dns-optimized-8'
 COMMIT = '123456789abcdef0123456789abcdef0123456789'
 TIME = '2026-10-09T02:00:00+00:00'
@@ -44,11 +44,17 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(release.target('linux-amd64-v3')['env'], {'GOAMD64': 'v3'})
         self.assertEqual(release.target('linux-mips-softfloat')['env'], {'GOMIPS': 'softfloat'})
         self.assertFalse(any('abi1' in row['id'] or 'go120' in row['id'] for row in rows))
+        for row in rows:
+            for name in release.asset_names(row, VERSION):
+                self.assertTrue(name.startswith(f"mihomo-{row['id']}-{VERSION}."), name)
+                self.assertFalse(name.startswith('mihomo-dns-'), name)
+        self.assertIn('mihomo-linux-arm64-v1.19.32-optimized-9.deb',
+                      release.asset_names(release.target('linux-arm64'), VERSION))
 
     def test_version_upgrade_order_and_timestamp_timezone(self):
         versions = release.package_versions(TIME, COMMIT, 'v1.19.32', VERSION)
-        self.assertEqual(versions['deb'], '1.19.32+dns.20261009020000.8')
-        later = release.package_versions('2026-10-09T02:01:00Z', '0' * 40, 'v1.19.32', 'v1.19.32-optimized-9')
+        self.assertEqual(versions['deb'], '1.19.32+dns.20261009020000.9')
+        later = release.package_versions('2026-10-09T02:01:00Z', '0' * 40, 'v1.19.32', 'v1.19.32-optimized-10')
         release.run('dpkg', '--compare-versions', later['deb'], 'gt', versions['deb'])
         same_time = release.package_versions('2026-10-09T10:00:00+08:00', COMMIT, 'v1.19.32', VERSION)
         self.assertEqual(versions, same_time)
@@ -67,6 +73,7 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(canonical, legacy)
         for previous_tag, next_tag in [
             ('v1.19.32-dns-optimized-7', VERSION),
+            ('v1.19.32-optimized-8', VERSION),
             ('v1.19.32-dns-optimized-9', 'v1.19.32-optimized-10'),
             ('v1.19.32-optimized-9', 'v1.19.32-dns-optimized-10'),
         ]:
@@ -95,13 +102,13 @@ class ReleaseTests(unittest.TestCase):
             release.basename(release.target('amd64'), '../unsafe')
 
     def test_windows_and_unix_archives_preserve_binary(self):
-        for name in ['windows-amd64', 'linux-armv7']:
-            row = release.target(name)
+        for row in release.targets():
+            name = row['id']
             path = release.write_archive(self.binary, row, VERSION, self.out, release.epoch(TIME))
-            self.assertEqual(path.name, f'mihomo-dns-{name}-{VERSION}' + ('.zip' if row['goos'] == 'windows' else '.gz'))
+            self.assertEqual(path.name, f'mihomo-{name}-{VERSION}' + ('.zip' if row['goos'] == 'windows' else '.gz'))
             if row['goos'] == 'windows':
                 with zipfile.ZipFile(path) as archive:
-                    self.assertEqual(archive.namelist(), ['mihomo-dns-windows-amd64.exe'])
+                    self.assertEqual(archive.namelist(), [f'mihomo-{name}.exe'])
                     self.assertEqual(archive.read(archive.namelist()[0]), self.binary.read_bytes())
             else:
                 self.assertEqual(gzip.decompress(path.read_bytes()), self.binary.read_bytes())
@@ -115,6 +122,7 @@ class ReleaseTests(unittest.TestCase):
                 with self.subTest(target=row['id']):
                     built = release.package_binary(self.binary, row, VERSION, self.out, TIME, COMMIT, 'v1.19.32')
                     self.assertEqual(len(built), len(row['packages']))
+                    self.assertEqual({path.name for path in built}, set(release.asset_names(row, VERSION)[1:]))
                     count += len(built)
         self.assertEqual(count, 29)
 
@@ -135,6 +143,11 @@ class ReleaseTests(unittest.TestCase):
         release.collect(self.out, VERSION, COMMIT)
         self.assertEqual(len((self.out / 'SHA256SUMS').read_text().splitlines()), 68)
         self.assertEqual((self.out / 'version.txt').read_text(), VERSION + '\n')
+        recorded = json.loads((self.out / 'BUILDINFO.json').read_text())
+        for target in recorded['targets']:
+            for asset in target['assets']:
+                self.assertTrue(asset['name'].startswith('mihomo-'))
+                self.assertFalse(asset['name'].startswith('mihomo-dns-'))
         with self.assertRaisesRegex(ValueError, 'identity mismatch'):
             release.collect(self.out, VERSION, '0' * 40)
         with self.assertRaisesRegex(ValueError, 'identity mismatch'):
@@ -169,9 +182,14 @@ class ReleaseTests(unittest.TestCase):
 
     def test_collection_rejects_unmanifested_assets(self):
         self.fixture_collection()
-        (self.out / 'unexpected.gz').write_bytes(b'not verified')
-        with self.assertRaisesRegex(ValueError, 'unexpected release files'):
-            release.collect(self.out, VERSION, COMMIT)
+        # New releases contain only canonical assets, never old-name copies.
+        for name in ['unexpected.gz', f'mihomo-dns-linux-arm64-{VERSION}.gz']:
+            with self.subTest(name=name):
+                path = self.out / name
+                path.write_bytes(b'not verified')
+                with self.assertRaisesRegex(ValueError, 'unexpected release files'):
+                    release.collect(self.out, VERSION, COMMIT)
+                path.unlink()
 
 
 if __name__ == '__main__':

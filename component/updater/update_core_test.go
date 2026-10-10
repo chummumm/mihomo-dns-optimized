@@ -65,8 +65,63 @@ func TestCoreUpdaterTargetMatrix(t *testing.T) {
 			t.Fatalf("unsupported ABI silently mapped to %q", target)
 		}
 	}
-	if !strings.HasPrefix(DefaultCoreUpdater.CoreBaseName(), "mihomo-dns-") {
-		t.Fatal("updater lost fork asset prefix")
+	nativeTarget, err := coreTarget(runtime.GOOS, runtime.GOARCH, coreBuildSettings())
+	if err != nil || DefaultCoreUpdater.CoreBaseName() != "mihomo-"+nativeTarget {
+		t.Fatalf("updater lost the canonical target asset name: %v", err)
+	}
+}
+
+func TestCoreUpdaterAssetNameSelection(t *testing.T) {
+	const version = "v1.19.32-optimized-9"
+	newSum, oldSum := strings.Repeat("1", 64), strings.Repeat("2", 64)
+	for _, platform := range []struct {
+		target  string
+		windows bool
+	}{
+		{target: "linux-arm64"},
+		{target: "windows-amd64", windows: true},
+	} {
+		ext := ".gz"
+		if platform.windows {
+			ext = ".zip"
+		}
+		canonical := "mihomo-" + platform.target + "-" + version + ext
+		legacy := "mihomo-dns-" + platform.target + "-" + version + ext
+		newLine, oldLine := newSum+"  "+canonical+"\n", oldSum+"  "+legacy+"\n"
+		for _, test := range []struct {
+			name, contents, wantName, wantSum string
+		}{
+			{name: "canonical", contents: newLine, wantName: canonical, wantSum: newSum},
+			{name: "historical", contents: oldLine, wantName: legacy, wantSum: oldSum},
+			{name: "canonical-first", contents: newLine + oldLine, wantName: canonical, wantSum: newSum},
+			{name: "historical-first", contents: oldLine + newLine, wantName: canonical, wantSum: newSum},
+			{name: "duplicate-canonical", contents: newLine + newLine + oldLine},
+			{name: "duplicate-historical", contents: newLine + oldLine + oldLine},
+			{name: "duplicate-other-target", contents: newLine + newSum + "  other.gz\n" + newSum + "  other.gz\n"},
+			{name: "invalid-canonical-no-fallback", contents: "invalid  " + canonical + "\n" + oldLine},
+			{name: "malformed-other-entry", contents: newLine + "not-a-checksum\n"},
+			{name: "wrong-target", contents: newSum + "  mihomo-wrong-target-" + version + ext + "\n"},
+			{name: "wrong-version", contents: newSum + "  mihomo-" + platform.target + "-v1.19.32-optimized-8" + ext + "\n"},
+			{name: "wrong-format", contents: newSum + "  mihomo-" + platform.target + "-" + version + ".deb\n"},
+			{name: "unsafe-path", contents: newSum + "  ../" + canonical + "\n"},
+		} {
+			t.Run(platform.target+"/"+test.name, func(t *testing.T) {
+				asset, err := selectCoreReleaseAsset([]byte(test.contents), platform.target, version, platform.windows)
+				if test.wantName == "" {
+					if err == nil {
+						t.Fatalf("accepted ambiguous or ineligible asset %q", asset.name)
+					}
+					return
+				}
+				member := strings.TrimSuffix(test.wantName, "-"+version+ext)
+				if platform.windows {
+					member += ".exe"
+				}
+				if err != nil || asset.name != test.wantName || asset.executable != member || hex.EncodeToString(asset.checksum) != test.wantSum {
+					t.Fatalf("incorrect pinned release asset: %+v, %v", asset, err)
+				}
+			})
+		}
 	}
 }
 
@@ -166,7 +221,7 @@ func TestCoreUpdaterPinnedReleaseAndFailurePreservesExecutable(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, fault := range []string{"", "checksum", "missing-checksum", "duplicate-checksum", "archive-http", "version-http", "official-version", "empty-executable", "broken-archive"} {
+	for _, fault := range []string{"", "legacy-asset", "both-asset-names", "both-corrupt-new", "both-new-http", "both-new-broken", "checksum", "missing-checksum", "duplicate-checksum", "duplicate-other-checksum", "archive-http", "version-http", "official-version", "empty-executable", "broken-archive"} {
 		t.Run(fault, func(t *testing.T) {
 			dir := t.TempDir()
 			current := filepath.Join(dir, "mihomo")
@@ -175,6 +230,10 @@ func TestCoreUpdaterPinnedReleaseAndFailurePreservesExecutable(t *testing.T) {
 				t.Fatal(err)
 			}
 			base := DefaultCoreUpdater.CoreBaseName()
+			legacyBase := "mihomo-dns-" + strings.TrimPrefix(base, "mihomo-")
+			if fault == "legacy-asset" {
+				base = legacyBase
+			}
 			member, extension := base, ".gz"
 			if runtime.GOOS == "windows" {
 				member, extension = base+".exe", ".zip"
@@ -185,18 +244,30 @@ func TestCoreUpdaterPinnedReleaseAndFailurePreservesExecutable(t *testing.T) {
 				payload = nil
 			}
 			archive := testCoreArchive(t, payload, member, runtime.GOOS == "windows")
-			if fault == "broken-archive" {
+			if fault == "broken-archive" || fault == "both-new-broken" {
 				archive = []byte("checksum matches but this is not an archive")
 			}
 			sum := sha256.Sum256(archive)
 			checksums := fmt.Sprintf("%x  %s\n", sum, asset)
 			switch fault {
-			case "checksum":
+			case "checksum", "both-corrupt-new":
 				checksums = strings.Repeat("0", 64) + "  " + asset + "\n"
 			case "missing-checksum":
 				checksums = fmt.Sprintf("%x  another-architecture.gz\n", sum)
 			case "duplicate-checksum":
 				checksums += checksums
+			case "duplicate-other-checksum":
+				checksums += fmt.Sprintf("%x  another-architecture.gz\n%x  another-architecture.gz\n", sum, sum)
+			}
+			legacyMember := legacyBase
+			if runtime.GOOS == "windows" {
+				legacyMember += ".exe"
+			}
+			legacyAsset := legacyBase + "-" + version + extension
+			legacyArchive := testCoreArchive(t, newCore, legacyMember, runtime.GOOS == "windows")
+			if strings.HasPrefix(fault, "both-") {
+				legacySum := sha256.Sum256(legacyArchive)
+				checksums += fmt.Sprintf("%x  %s\n", legacySum, legacyAsset)
 			}
 			var mu sync.Mutex
 			var paths []string
@@ -216,11 +287,14 @@ func TestCoreUpdaterPinnedReleaseAndFailurePreservesExecutable(t *testing.T) {
 				case "/releases/download/" + version + "/SHA256SUMS":
 					fmt.Fprint(w, checksums)
 				case "/releases/download/" + version + "/" + asset:
-					if fault == "archive-http" {
+					if fault == "archive-http" || fault == "both-new-http" {
 						http.Error(w, "not found", http.StatusNotFound)
 					} else {
 						w.Write(archive)
 					}
+				case "/releases/download/" + version + "/" + legacyAsset:
+					t.Errorf("unexpected fallback from the selected canonical asset: %s", r.URL.Path)
+					w.Write(legacyArchive)
 				default:
 					t.Errorf("unrequested source or unpinned release URL: %s", r.URL.Path)
 					http.NotFound(w, r)
@@ -233,7 +307,7 @@ func TestCoreUpdaterPinnedReleaseAndFailurePreservesExecutable(t *testing.T) {
 			if readErr != nil {
 				t.Fatal(readErr)
 			}
-			if fault == "" {
+			if fault == "" || fault == "legacy-asset" || fault == "both-asset-names" {
 				if err != nil || (runtime.GOOS != "darwin" && !bytes.Equal(actual, newCore)) {
 					t.Fatalf("update failed: %v; installed %d bytes, expected %d bytes", err, len(actual), len(newCore))
 				}
@@ -319,7 +393,8 @@ func TestCoreUpdaterChannelsAndDowngrade(t *testing.T) {
 
 // These cases run the NEW updater with old/new installed-version labels.
 // They do not imply that an already compiled old updater accepts the new
-// version.txt format: those installations need a one-time manual migration.
+// version.txt format or asset filenames: those installations need a one-time
+// manual migration before this new selection code can run.
 func TestCoreUpdaterReleaseFormatMigrationAndForce(t *testing.T) {
 	oldVersion := C.Version
 	t.Cleanup(func() { C.Version = oldVersion })
@@ -468,21 +543,31 @@ func TestCoreUpdaterArchiveNamesAndChecksumValidation(t *testing.T) {
 	if actual, _ := os.ReadFile(output); !bytes.Equal(actual, payload) {
 		t.Fatal("gzip did not use the caller-selected output path")
 	}
-	for _, member := range []string{"../core.exe", "other.exe", "nested/core.exe"} {
-		path := filepath.Join(dir, "core.zip")
-		if err := os.WriteFile(path, testCoreArchive(t, payload, member, true), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := u.unpack(path, filepath.Join(dir, "core.exe"), "core.exe", 0o755); err == nil {
-			t.Fatalf("accepted unexpected archive member %q", member)
+	for _, expected := range []string{"mihomo-windows-arm64.exe", "mihomo-dns-windows-arm64.exe"} {
+		for _, member := range []string{expected, "../" + expected, "nested/" + expected, "other.exe"} {
+			path := filepath.Join(dir, "core.zip")
+			if err := os.WriteFile(path, testCoreArchive(t, payload, member, true), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			staged := filepath.Join(t.TempDir(), expected)
+			err := u.unpack(path, staged, expected, 0o755)
+			if member == expected {
+				if err != nil {
+					t.Fatalf("rejected the exact release archive member %q: %v", expected, err)
+				}
+			} else if err == nil {
+				t.Fatalf("accepted unexpected archive member %q", member)
+			}
 		}
 	}
 	sum := sha256.Sum256(payload)
+	const version = "v1.19.32-optimized-9"
+	const name = "mihomo-linux-arm64-" + version + ".gz"
 	for _, invalid := range []string{
-		"invalid", "abcd  core.gz", hex.EncodeToString(sum[:]) + "  absent.gz",
-		hex.EncodeToString(sum[:]) + "  core.gz\n" + hex.EncodeToString(sum[:]) + "  core.gz",
+		"invalid", "abcd  " + name, hex.EncodeToString(sum[:]) + "  absent.gz",
+		hex.EncodeToString(sum[:]) + "  " + name + "\n" + hex.EncodeToString(sum[:]) + "  " + name,
 	} {
-		if _, err := releaseChecksum([]byte(invalid), "core.gz"); err == nil {
+		if _, err := selectCoreReleaseAsset([]byte(invalid), "linux-arm64", version, false); err == nil {
 			t.Fatalf("accepted malformed or incomplete checksums: %q", invalid)
 		}
 	}

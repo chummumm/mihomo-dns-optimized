@@ -10,7 +10,11 @@ import (
 	"strings"
 )
 
-const coreReleaseURL = "https://github.com/chummumm/mihomo-dns-optimized/releases/"
+const (
+	coreReleaseURL        = "https://github.com/chummumm/mihomo-dns-optimized/releases/"
+	coreAssetPrefix       = "mihomo-"
+	legacyCoreAssetPrefix = "mihomo-dns-"
+)
 
 // New releases use -optimized-N. Accept the previous spelling when comparing
 // installed versions or reading an older pinned release; never rewrite the
@@ -128,11 +132,13 @@ func (u *CoreUpdater) CoreBaseName() string {
 	if err != nil {
 		return ""
 	}
-	return "mihomo-dns-" + target
+	return coreAssetPrefix + target
 }
 
-func releaseChecksum(contents []byte, name string) ([]byte, error) {
-	var checksum []byte
+// Parse the pinned manifest once. Reject ambiguous records even when they
+// concern another target; an invalid manifest must never trigger a fallback.
+func releaseChecksums(contents []byte) (map[string][]byte, error) {
+	checksums := make(map[string][]byte)
 	for _, line := range strings.Split(string(contents), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -145,16 +151,44 @@ func releaseChecksum(contents []byte, name string) ([]byte, error) {
 		if err != nil || len(sum) != 32 {
 			return nil, fmt.Errorf("invalid SHA256SUMS digest")
 		}
-		if fields[1] != name {
-			continue
-		}
-		if checksum != nil {
+		name := fields[1]
+		if _, exists := checksums[name]; exists {
 			return nil, fmt.Errorf("duplicate SHA256SUMS entry for %s", name)
 		}
-		checksum = sum
+		checksums[name] = sum
 	}
-	if checksum == nil {
-		return nil, fmt.Errorf("release does not contain a checksum for %s", name)
+	return checksums, nil
+}
+
+type coreReleaseAsset struct {
+	name       string
+	executable string
+	checksum   []byte
+}
+
+// Only exact names for the already validated target and version are eligible.
+// Prefer the canonical name regardless of manifest order. Historical assets
+// are selected only when the canonical checksum is absent, never after a
+// download, checksum or archive validation failure.
+func selectCoreReleaseAsset(contents []byte, target, version string, windows bool) (coreReleaseAsset, error) {
+	checksums, err := releaseChecksums(contents)
+	if err != nil {
+		return coreReleaseAsset{}, err
 	}
-	return checksum, nil
+	extension := ".gz"
+	if windows {
+		extension = ".zip"
+	}
+	for _, prefix := range []string{coreAssetPrefix, legacyCoreAssetPrefix} {
+		coreName := prefix + target
+		name := coreName + "-" + version + extension
+		if checksum, exists := checksums[name]; exists {
+			executable := coreName
+			if windows {
+				executable += ".exe"
+			}
+			return coreReleaseAsset{name: name, executable: executable, checksum: checksum}, nil
+		}
+	}
+	return coreReleaseAsset{}, fmt.Errorf("release does not contain a checksum for target %s at %s", target, version)
 }

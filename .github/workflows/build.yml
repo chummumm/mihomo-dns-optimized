@@ -185,7 +185,7 @@ jobs:
       - name: Upload binaries and checksums
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: mihomo-dns-${{ matrix.target }}-${{ needs.check.outputs.commit }}
+          name: mihomo-${{ matrix.target }}-${{ needs.check.outputs.commit }}
           path: ${{ runner.temp }}/dist/*
           if-no-files-found: error
           retention-days: 30
@@ -239,7 +239,7 @@ jobs:
       - name: Download all release targets
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          pattern: mihomo-dns-*-${{ needs.check.outputs.commit }}
+          pattern: mihomo-*-${{ needs.check.outputs.commit }}
           path: dist
           merge-multiple: true
       - name: Publish immutable commit build
@@ -286,7 +286,8 @@ jobs:
           else
             {
               printf 'Mihomo DNS optimized `%s`\n\n' "$BUILD_VERSION"
-              printf 'Migration: this release uses vX.Y.Z-optimized-N consistently for its tag, title, version.txt and binary version. Existing -dns-optimized-N kernels require one manual installation because their compiled updater cannot parse the new name. The new updater accepts both spellings and continues updating from this fork.\n\n'
+              printf 'Migration: starting with v1.19.32-optimized-9, all core archives and installation packages use mihomo-<target>-<version>; Windows ZIP members use mihomo-<target>.exe. Install v9 or newer manually once when coming from v1.19.32-optimized-8 or older: those compiled updaters require the former mihomo-dns- asset names, and older -dns-optimized-N kernels also cannot parse the renamed release version. New releases do not duplicate the old asset names, and published v8 assets remain unchanged.\n\n'
+              printf 'The new updater selects a verified archive from this fork at one fixed version, prefers the new name and can still read historical releases with only the old name. It never retries an old name after a new-name download or verification failure. Installed package identity, native package-version ordering, configuration and service paths remain unchanged.\n\n'
               printf 'Source commit: `%s`\n\n' "$BUILD_SHA"
               printf '37 platform/CPU targets: Linux, Windows, macOS, FreeBSD and Android. Linux deb/rpm and selected Arch packages are included.\n\n'
               printf 'Built with the upstream MetaCubeX Go 1.26 toolchain and with_gvisor; Android uses pinned NDK r29/API34 with CGO, other builds use CGO=0.\n\n'
@@ -302,7 +303,8 @@ jobs:
               printf 'Linux process lookup keeps scanning when an unrelated process exits during /proc enumeration.\n'
               printf 'The core updater uses this repository, pins the selected version and verifies SHA256SUMS before replacement. Use the release/auto channel; the official alpha channel is not used.\n'
               printf 'The original Clash Dashboard fork adds DNS overview, bounded query history and upstream statistics. The authenticated /dns/observability API keeps all observations in memory, with no database, file logging or telemetry. Ordinary reload retains observations; disable or restart clears them. See docs/dns-observability.md.\n'
-              printf 'Dedicated DNS connections now carry an explicit DNS marker. The updated dashboard displays their type as DNS and only the final selected node, while the connections API retains the original network, inbound and complete rule/chain data. Ordinary proxy traffic is not identified as DNS merely by port 53.\n'
+              printf 'Only real upstream DNS transports opened by the local core resolver carry dns:true. Synthetic records and client-query records are not marked DNS. The connections API retains the original network, inbound and complete rule/chain data; the dashboard uses the explicit marker to display DNS and the final selected node.\n'
+              printf 'Clash Dashboard 0.3.2 follows this explicit DNS marker contract, adds a mihomo filter and improves the mobile connections layout, start-time display, reload control and speed-test URL setting.\n'
               printf 'Controlled DNS routing, load and memory-only observability regressions run against the Linux amd64 release binary in CI; see docs/dns-performance.md and docs/dns-observability.md.\n'
             } > "$RUNNER_TEMP/release-notes.txt"
             verify_release_tag "$RELEASE_TAG" "$BUILD_SHA" true

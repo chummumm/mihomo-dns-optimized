@@ -18,6 +18,8 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
+# Release filenames can change without migrating the installed package or its
+# configuration ownership. Keep the existing Debian/RPM/Arch package identity.
 PACKAGE = "mihomo-dns-optimized"
 NDK_VERSION = "29.0.14206865"
 GO_ENV = ("GOOS", "GOARCH", "GOAMD64", "GO386", "GOARM", "GOMIPS", "GOMIPS64", "CGO_ENABLED", "CC", "CXX")
@@ -91,7 +93,7 @@ def digest(path):
 def basename(row, version):
     if not re.fullmatch(r"[0-9A-Za-z._+-]+", version):
         raise ValueError("unsafe version")
-    return f"mihomo-dns-{row['id']}-{version}"
+    return f"mihomo-{row['id']}-{version}"
 
 
 def asset_names(row, version):
@@ -105,7 +107,7 @@ def write_archive(binary, row, version, output, timestamp):
     name = asset_names(row, version)[0]
     path = output / name
     if row["goos"] == "windows":
-        info = zipfile.ZipInfo(f"mihomo-dns-{row['id']}.exe", datetime.fromtimestamp(timestamp, timezone.utc).timetuple()[:6])
+        info = zipfile.ZipInfo(f"mihomo-{row['id']}.exe", datetime.fromtimestamp(timestamp, timezone.utc).timetuple()[:6])
         info.create_system = 3
         info.external_attr = (0o100755 << 16)
         info.compress_type = zipfile.ZIP_DEFLATED

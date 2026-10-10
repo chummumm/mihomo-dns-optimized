@@ -50,8 +50,8 @@ func TestDNSRoutingNativeQueryTracksCurrentOriginAndCancelsOnlyItself(t *testing
 	}
 	for _, tracker := range []*DNSNativeQueryTracker{first, second} {
 		md := tracker.Metadata
-		if !tracker.DNS {
-			t.Fatal("logical DNS query is missing its explicit DNS display marker")
+		if tracker.DNS {
+			t.Fatal("a logical client query was marked as a local resolver transport")
 		}
 		if md.DstIP.String() != "192.0.2.53" || md.DstPort != 443 || md.NetWork != C.UDP || md.InName != origin.InName || md.Process != origin.Process || md.ProcessPath != origin.ProcessPath || md.InUser != origin.InUser || md.SrcIP != origin.SrcIP {
 			t.Fatalf("query origin or actual endpoint was lost: %+v", md)
@@ -87,8 +87,8 @@ func TestDNSRoutingNativeQueryTracksCurrentOriginAndCancelsOnlyItself(t *testing
 		t.Fatal(err)
 	}
 	defer internal.Close()
-	if internal.Metadata.NetWork != C.TCP {
-		t.Fatal("an internal lookup without a DNS client must display its actual upstream protocol")
+	if internal.Metadata.NetWork != C.TCP || internal.DNS {
+		t.Fatal("an internal lookup must retain its protocol without becoming a physical DNS transport")
 	}
 }
 

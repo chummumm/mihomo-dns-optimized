@@ -25,6 +25,7 @@ import (
 	"github.com/metacubex/mihomo/component/ca"
 	C "github.com/metacubex/mihomo/constant"
 	icontext "github.com/metacubex/mihomo/context"
+	"github.com/metacubex/mihomo/tunnel"
 	"github.com/metacubex/mihomo/tunnel/statistic"
 	"github.com/metacubex/quic-go"
 	"github.com/metacubex/quic-go/http3"
@@ -341,6 +342,102 @@ func (s *encryptedRoutingServer) next(t *testing.T) encryptedRoutingObservation 
 	case <-time.After(3 * time.Second):
 		t.Fatal("encrypted server never received a DNS question")
 		return encryptedRoutingObservation{}
+	}
+}
+
+// Keep the real listener's client context while selecting the loopback adapter
+// without replacing the process-wide proxy/rule configuration for this test.
+type encryptedRoutingFixedService struct {
+	service  *Service
+	outbound C.ProxyAdapter
+}
+
+func (s *encryptedRoutingFixedService) ServeMsg(ctx context.Context, query *D.Msg) (*D.Msg, error) {
+	ctx, cancel := context.WithTimeout(icontext.WithDNSFixedOutbound(ctx, s.outbound), 5*time.Second)
+	defer cancel()
+	return s.service.ServeMsg(ctx, query)
+}
+
+func TestDNSMarkerEncryptedTransportAndClientOrigin(t *testing.T) {
+	routingTestEnable(t)
+	for _, protocol := range []string{"h2", "h3", "tls", "quic"} {
+		for _, network := range []C.NetWork{C.TCP, C.UDP} {
+			t.Run(fmt.Sprintf("%s/%s", protocol, network), func(t *testing.T) {
+				release := make(chan struct{})
+				var once sync.Once
+				unblock := func() { once.Do(func() { close(release) }) }
+				defer unblock()
+				server := newEncryptedRoutingServer(t, protocol, true, func(ctx context.Context, _ string) bool {
+					select {
+					case <-release:
+						return true
+					case <-ctx.Done():
+						return false
+					}
+				})
+				r := NewResolver(Config{RuleRouting: true, Main: []NameServer{server.ns}}).Resolver
+				t.Cleanup(r.Close)
+				leaf := newEncryptedRoutingOutbound("local-dns-leaf")
+				writer := &routingTestResponseWriter{}
+				handler := serverHandler{Server: &Server{service: &encryptedRoutingFixedService{
+					service: NewService(r, &ResolverEnhancer{mode: C.DNSNormal}), outbound: leaf,
+				}}, isUDP: network == C.UDP}
+				query := routingTestQuery("client-origin.example", 37)
+				done := make(chan struct{})
+				go func() { handler.ServeDNS(writer, query); close(done) }()
+				t.Cleanup(func() {
+					unblock()
+					select {
+					case <-done:
+					case <-time.After(5 * time.Second):
+						t.Error("DNS listener did not finish after releasing its upstream")
+					}
+				})
+				if seen := server.next(t); seen.name != query.Question[0].Name {
+					t.Fatalf("unexpected upstream question: %+v", seen)
+				}
+				// Receiving the real encrypted request is the barrier: its
+				// logical query and its upstream socket must both be registered.
+				endpoint := netip.MustParseAddrPort(server.address)
+				var logical, physical int
+				statistic.DefaultManager.Range(func(tracker statistic.Tracker) bool {
+					info := tracker.Info()
+					if info.Metadata.AddrPort() != endpoint || info.Chain.Last() != leaf.Name() {
+						return true
+					}
+					md := info.Metadata
+					if _, ok := tracker.(*tunnel.DNSNativeQueryTracker); ok {
+						logical++
+						if info.DNS || md.Type != C.INNER || md.InName != "DNS" || md.NetWork != network ||
+							md.SrcIP.String() != "192.0.2.10" || md.SrcPort != 41000 || md.InPort != 1053 || md.Host != "client-origin.example" {
+							t.Errorf("client query was marked as a resolver socket or lost its origin: %+v", info)
+						}
+					} else {
+						physical++
+						upstreamNetwork := C.TCP
+						if protocol == "h3" || protocol == "quic" {
+							upstreamNetwork = C.UDP
+						}
+						if !info.DNS || md.Type != C.INNER || md.InName != "DNS-TRANSPORT" || md.SrcIP.IsValid() || md.NetWork != upstreamNetwork {
+							t.Errorf("resolver socket has incorrect explicit origin: %+v", info)
+						}
+					}
+					return true
+				})
+				if logical != 1 || physical != 1 {
+					t.Fatalf("got %d client-query and %d transport trackers, want exactly one of each", logical, physical)
+				}
+				unblock()
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Fatal("DNS listener did not return the encrypted answer")
+				}
+				if writer.msg == nil || writer.msg.Id != query.Id || len(writer.msg.Answer) != 1 || writer.msg.Answer[0].(*D.A).A.String() != "192.0.2.99" {
+					t.Fatalf("listener returned an invalid DNS answer: %v", writer.msg)
+				}
+			})
+		}
 	}
 }
 

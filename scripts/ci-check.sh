@@ -28,7 +28,7 @@ case "${1:-test}" in
       ./adapter ./common/arc/... ./common/lru/... ./component/trie/... ./component/dnsmessage/... ./component/process/... ./component/resolver/... ./component/updater/... ./context/... ./dns/... \
       ./listener/sing_tun/... ./tunnel/... ./rules/logic/... ./rules/provider/... \
       ./config/... ./hub/route/... ./hub/executor/... \
-      -run 'DNSRouting|DNSRuleRouting|DNSProxy|DNSDrop|DNSDirectProbe|DNSOptimization|DNSObservability|SpeedCheck|DualStack|CacheControl|ARCDelete|DNSPerf|DNSCandidate|DNSCachedTTL|DNSAnswerLifetime|DNSResolverDoesNotRestartTTL|DNSFallback|DNSIndependentDirectPool|CoreUpdater|ProcessLookup|RedirHostFilter|LRUClone'
+      -run 'DNSRouting|DNSRuleRouting|DNSProxy|DNSDrop|DNSDirectProbe|DNSOptimization|DNSObservability|DNSMarker|SpeedCheck|DualStack|CacheControl|ARCDelete|DNSPerf|DNSCandidate|DNSCachedTTL|DNSAnswerLifetime|DNSResolverDoesNotRestartTTL|DNSFallback|DNSIndependentDirectPool|CoreUpdater|ProcessLookup|RedirHostFilter|LRUClone'
     # A single green rerun cannot validate detached HTTP/2 dial shutdown.
     # Repeat the lifecycle barriers with different Go scheduler parallelism.
     for procs in 1 4; do

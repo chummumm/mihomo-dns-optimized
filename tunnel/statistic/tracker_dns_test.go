@@ -30,7 +30,7 @@ func (dnsTrackerTestRule) Payload() string      { return "example.test" }
 func TestDNSMarkerPreservesConnectionMetadataAndRawRoute(t *testing.T) {
 	for _, dns := range []bool{false, true} {
 		for _, network := range []C.NetWork{C.TCP, C.UDP} {
-			for _, port := range []uint16{53, 853} {
+			for _, port := range []uint16{53, 853, 8443} {
 				manager := &Manager{}
 				metadata := &C.Metadata{
 					Type: C.SOCKS5, NetWork: network, InName: "DNS", Host: "example.test",

@@ -243,7 +243,9 @@ func (p *DNSRoutingPlan) TrackNativeQuery(ctx context.Context, endpoint string, 
 	metadata.RemoteDst = endpoint
 	ctx, cancel := context.WithCancelCause(ctx)
 	tracker := &DNSNativeQueryTracker{
-		TrackerInfo: &statistic.TrackerInfo{UUID: utils.NewUUIDV4(), Start: time.Now(), Metadata: metadata, DNS: true,
+		// A logical query retains its client's identity. Only the separate
+		// resolver-owned upstream socket receives the DNS transport marker.
+		TrackerInfo: &statistic.TrackerInfo{UUID: utils.NewUUIDV4(), Start: time.Now(), Metadata: metadata,
 			UploadTotal: atomic.NewInt64(int64(upload)), DownloadTotal: atomic.NewInt64(0)},
 		endpoint: endpoint, cancel: cancel,
 	}

@@ -360,6 +360,7 @@ def check_dashboard_connections(proxy_port, api_port, resolver, upstream):
                 uploaded = len(query) + (2 if network == "tcp" else 0)
                 entry = wait_proxy_connection(api_port, network, source_port, uploaded)
                 metadata = entry["metadata"]
+                assert entry.get("dns") is not True, "ordinary proxy port 53 was marked as a local DNS upstream"
                 assert metadata["type"] == "Socks5" and not metadata.get("host"), metadata
                 assert metadata["sourceIP"] == "127.0.0.1"
                 assert metadata["destinationIP"] == resolver[0]
@@ -534,11 +535,12 @@ def check_builtin_dns(config, api_port, upstream_a, upstream_b):
             while True:
                 matches = [item for item in (api_request(api_port, "/connections").get("connections") or [])
                            if item["metadata"].get("inboundName") == "DNS" and
-                           item["metadata"].get("host") == "visible.example"]
+                           item["metadata"].get("host") == "visible.example" and
+                           item.get("dns") is True]
                 if matches:
                     break
                 if time.monotonic() >= deadline:
-                    raise AssertionError("built-in DNS query missing from dashboard")
+                    raise AssertionError("built-in DNS upstream missing its explicit DNS connection marker")
                 time.sleep(0.03)
             metadata = matches[0]["metadata"]
             assert int(metadata["sourcePort"]) == udp.getsockname()[1]

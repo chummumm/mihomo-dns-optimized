@@ -99,21 +99,15 @@ func (u *CoreUpdater) Update(currentExePath string, channel string, force bool) 
 	// Only the initial version lookup uses Latest. All subsequent requests are
 	// pinned to the validated immutable tag, even if Latest changes meanwhile.
 	releaseURL := baseURL + "download/" + latestVersion + "/"
-	coreName := "mihomo-dns-" + target
-	packageName := coreName + "-" + latestVersion + ".gz"
-	exeName := coreName
-	if runtime.GOOS == "windows" {
-		packageName = coreName + "-" + latestVersion + ".zip"
-		exeName += ".exe"
-	}
 	sums, err := u.readReleaseFile(releaseURL+"SHA256SUMS", maxReleaseMetadata)
 	if err != nil {
 		return fmt.Errorf("get release checksums: %w", err)
 	}
-	expected, err := releaseChecksum(sums, packageName)
+	asset, err := selectCoreReleaseAsset(sums, target, latestVersion, runtime.GOOS == "windows")
 	if err != nil {
 		return err
 	}
+	packageName, exeName := asset.name, asset.executable
 
 	// Stage on the same filesystem so replacement can use a rename. No
 	// existing executable or backup is touched before verification succeeds.
@@ -124,7 +118,7 @@ func (u *CoreUpdater) Update(currentExePath string, channel string, force bool) 
 	}
 	defer os.RemoveAll(updateDir)
 	packagePath := filepath.Join(updateDir, packageName)
-	if err = u.download(packagePath, releaseURL+packageName, expected); err != nil {
+	if err = u.download(packagePath, releaseURL+packageName, asset.checksum); err != nil {
 		return fmt.Errorf("download DNS optimized core: %w", err)
 	}
 	updateExePath := filepath.Join(updateDir, exeName)

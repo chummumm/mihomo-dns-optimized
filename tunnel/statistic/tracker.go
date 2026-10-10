@@ -22,7 +22,9 @@ type Tracker interface {
 }
 
 type TrackerInfo struct {
-	UUID          uuid.UUID    `json:"id"`
+	UUID uuid.UUID `json:"id"`
+	// DNS identifies an upstream connection opened by the built-in resolver,
+	// never a logical query, a forwarded client flow, or an arbitrary INNER flow.
 	DNS           bool         `json:"dns,omitempty"`
 	Metadata      *C.Metadata  `json:"metadata"`
 	UploadTotal   atomic.Int64 `json:"upload"`
@@ -121,8 +123,9 @@ func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.R
 	return newTCPTracker(conn, manager, metadata, rule, uploadTotal, downloadTotal, pushToManager, false)
 }
 
-// NewDNSTCPTracker identifies DNS work independently of its original inbound
-// type or destination port. The marker is immutable once the manager sees it.
+// NewDNSTCPTracker is reserved for a built-in resolver's upstream TCP connection.
+// Its caller establishes that origin; metadata and ports never infer it.
+// The marker is immutable once the manager sees it.
 func NewDNSTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager bool) *tcpTracker {
 	return newTCPTracker(conn, manager, metadata, rule, uploadTotal, downloadTotal, pushToManager, true)
 }
@@ -224,7 +227,8 @@ func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, ru
 	return newUDPTracker(conn, manager, metadata, rule, uploadTotal, downloadTotal, pushToManager, false)
 }
 
-// NewDNSUDPTracker marks a resolver's UDP work before registering the tracker.
+// NewDNSUDPTracker is reserved for a built-in resolver's upstream UDP connection.
+// Forwarded client datagrams and other internal transports use NewUDPTracker.
 func NewDNSUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager bool) *udpTracker {
 	return newUDPTracker(conn, manager, metadata, rule, uploadTotal, downloadTotal, pushToManager, true)
 }
