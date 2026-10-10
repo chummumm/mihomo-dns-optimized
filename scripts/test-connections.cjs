@@ -277,6 +277,46 @@ async function main() {
     await waitCount(3)
     await details.getByText('Closed', { exact: true }).waitFor()
     assert.equal(await closeConnection.isDisabled(), true, 'retained details reflect closure on the next snapshot')
+
+    await details.locator('.icon-close').click()
+    await page.getByText('Keep closed connections', { exact: true }).click()
+    const dns = connection(32000)
+    dns.dns = true
+    dns.metadata.destinationPort = '853'
+    dns.chains = ['dns-leaf', 'dns-inner-group', 'dns-outer-group']
+    dns.rule = 'DomainSuffix'; dns.rulePayload = 'dns.example.test'
+    const legacyDNS = connection(32001)
+    legacyDNS.metadata.type = 'Inner'; legacyDNS.metadata.inboundName = 'DNS-TRANSPORT'
+    legacyDNS.chains = ['legacy-dns-leaf', 'legacy-dns-group']
+    const ordinary53 = connection(32002)
+    ordinary53.metadata.destinationPort = '53'; ordinary53.metadata.inboundName = 'DNS'
+    ordinary53.chains = ['ordinary-leaf', 'ordinary-inner-group', 'ordinary-outer-group']
+    ordinary53.rule = 'DomainSuffix'; ordinary53.rulePayload = 'ordinary.example.test'
+    await send([dns, legacyDNS, ordinary53])
+    await waitCount(3); await waitRows(3)
+    for (const [item, type, chain, rule] of [
+        [dns, 'DNS', 'dns-leaf', ''],
+        [legacyDNS, 'DNS', 'legacy-dns-leaf', ''],
+        [ordinary53, 'Socks5', 'ordinary-outer-group / ordinary-inner-group / ordinary-leaf', 'DomainSuffix :: ordinary.example.test'],
+    ]) {
+        const cells = page.locator('[data-connection-id="' + item.id + '"] .connections-block')
+        assert.equal((await cells.nth(2).textContent()).trim(), type, 'connection type: ' + item.id)
+        assert.equal((await cells.nth(3).textContent()).trim(), chain, 'connection node: ' + item.id)
+        assert.equal((await cells.nth(4).textContent()).trim(), rule, 'connection rule: ' + item.id)
+        await cells.first().click()
+        await details.getByText(item.id, { exact: true }).waitFor()
+        await details.getByText(type, { exact: true }).waitFor()
+        await details.getByText(chain, { exact: true }).waitFor()
+        if (type === 'DNS') {
+            assert.equal(await details.getByText('Rule', { exact: true }).count(), 0, 'DNS details omit matched rule')
+            assert.ok(!(await details.textContent()).includes('group'), 'DNS details omit proxy groups')
+        } else {
+            await details.getByText(rule, { exact: true }).waitFor()
+            assert.equal(await details.getByText('Rule', { exact: true }).count(), 1, 'ordinary port 53 keeps its rule')
+        }
+        await details.locator('.icon-close').click()
+    }
+    observations.push({ label: 'dns_connection_presentation', markedDNS: 'DNS / dns-leaf', legacyDNS: 'DNS / legacy-dns-leaf', ordinaryPort53: 'Socks5 with unchanged chain and rule' })
     assert.deepEqual(pageErrors, [])
     assert.ok(externalRequests.every(request => request.type === 'font' && request.url === 'http://at.alicdn.com/t/font_841708_ok9czskbhel.ttf'), 'only the inherited icon font may attempt an external request; all external requests are blocked')
     console.log(JSON.stringify({ passed: true, browser: browser.version(), observations, pageErrors, blockedExternalRequests: externalRequests }, null, 2))

@@ -81,9 +81,11 @@ export interface Snapshot {
 
 export interface Connections {
     id: string
+    dns?: boolean
     metadata: {
         network: string
         type: string
+        inboundName?: string
         host: string
         sniffHost?: string
         processPath?: string
