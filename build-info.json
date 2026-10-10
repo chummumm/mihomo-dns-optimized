@@ -1,8 +1,8 @@
 {
   "name": "clash-dashboard",
   "version": "0.1.0-sniffhost.1",
-  "source_commit": "93470a437dd4196f441f0859ba462252f5792b9b",
-  "source_url": "https://github.com/chummumm/mihomo-dns-optimized/tree/93470a437dd4196f441f0859ba462252f5792b9b",
+  "source_commit": "8d9a83c600631f9995920b95d3dbea445b07f688",
+  "source_url": "https://github.com/chummumm/mihomo-dns-optimized/tree/8d9a83c600631f9995920b95d3dbea445b07f688",
   "upstream_commit": "9a32d9d163ad233141c384ba365c6ef18c58cb94",
   "display_host_order": [
     "host",
