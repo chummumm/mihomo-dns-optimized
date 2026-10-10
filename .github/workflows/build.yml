@@ -240,6 +240,7 @@ jobs:
               printf 'Ordinary mixed/SOCKS/HTTP and other proxy traffic is no longer automatically inspected or intercepted as DNS on destination port 53; it follows normal connection routing.\n'
               printf 'Optional DIRECT IP speed checks and dual-stack selection, bounded cache prefetch/stale answers, TTL bounds and safe CNAME flattening are configured under `dns:`. These optional optimizations default to off; see the migration, DNSSEC protection and scope notes.\n'
               printf 'DNS correctness fixes preserve upstream/fallback identity, EDNS fields, elapsed TTL and address-family policy. Probe saturation skips measurement immediately; normal DNS requests keep their own deadline.\n'
+              printf 'Linux process lookup keeps scanning when an unrelated process exits during /proc enumeration.\n'
               printf 'The core updater uses this repository, pins the selected version and verifies SHA256SUMS before replacement. Use the release/auto channel; the official alpha channel is not used.\n'
               printf 'No production metrics endpoint or telemetry was added. Controlled load and regression tests run in CI; see docs/dns-performance.md.\n'
             } > "$RUNNER_TEMP/release-notes.txt"
