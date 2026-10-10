@@ -5,12 +5,22 @@ on:
     branches: [clash-dashboard]
     paths-ignore:
       - '**/*.md'
+      - '**/*.mdx'
+      - '**/*.markdown'
+      - '**/*.rst'
+      - '**/*.adoc'
+      - 'docs/**'
       - LICENSE
       - .all-contributorsrc
   pull_request:
     branches: [clash-dashboard]
     paths-ignore:
       - '**/*.md'
+      - '**/*.mdx'
+      - '**/*.markdown'
+      - '**/*.rst'
+      - '**/*.adoc'
+      - 'docs/**'
       - LICENSE
       - .all-contributorsrc
 
@@ -25,6 +35,7 @@ jobs:
   build:
     name: Build original UI
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,8 +49,16 @@ jobs:
           cache: pnpm
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
+      - name: Check types and connection state regressions
+        run: |
+          pnpm typecheck
+          pnpm test:unit
       - name: Build UI
         run: pnpm build
+      - name: Install browser for isolated regression tests
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Verify connection scrolling, counts and memory-only DNS pages
+        run: pnpm test:browser
       - name: Package UI
         run: python3 scripts/package-ui.py --source-sha "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY"
       - uses: actions/upload-artifact@v4
@@ -76,7 +95,7 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --no-tags origin refs/heads/clash-dashboard
-          if git diff --quiet "$SOURCE_SHA" FETCH_HEAD -- . ':(top,exclude,glob)**/*.md' ':(top,exclude)LICENSE' ':(top,exclude).all-contributorsrc'; then
+          if git diff --quiet "$SOURCE_SHA" FETCH_HEAD -- . ':(top,exclude,glob)**/*.md' ':(top,exclude,glob)**/*.mdx' ':(top,exclude,glob)**/*.markdown' ':(top,exclude,glob)**/*.rst' ':(top,exclude,glob)**/*.adoc' ':(top,exclude)docs/**' ':(top,exclude)LICENSE' ':(top,exclude).all-contributorsrc'; then
             :
           else
             diff_status=$?
@@ -103,7 +122,7 @@ jobs:
           fi
           git -C "$publish_dir" -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "Publish Clash Dashboard from $SOURCE_SHA"
           git fetch --no-tags origin refs/heads/clash-dashboard
-          if git diff --quiet "$SOURCE_SHA" FETCH_HEAD -- . ':(top,exclude,glob)**/*.md' ':(top,exclude)LICENSE' ':(top,exclude).all-contributorsrc'; then
+          if git diff --quiet "$SOURCE_SHA" FETCH_HEAD -- . ':(top,exclude,glob)**/*.md' ':(top,exclude,glob)**/*.mdx' ':(top,exclude,glob)**/*.markdown' ':(top,exclude,glob)**/*.rst' ':(top,exclude,glob)**/*.adoc' ':(top,exclude)docs/**' ':(top,exclude)LICENSE' ':(top,exclude).all-contributorsrc'; then
             :
           else
             diff_status=$?

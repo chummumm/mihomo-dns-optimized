@@ -24,7 +24,7 @@ export function Group (props: GroupProps) {
         if (Config.breakConnections) {
             const list: string[] = []
             const snapshot = await client.getConnections()
-            for (const connection of snapshot.data.connections) {
+            for (const connection of snapshot.data.connections ?? []) {
                 if (connection.chains.includes(props.config.name)) {
                     list.push(connection.id)
                 }

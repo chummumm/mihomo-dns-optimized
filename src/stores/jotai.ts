@@ -5,7 +5,7 @@ import { atom, useAtom, useAtomValue, useSetAtom } from 'jotai'
 import { atomWithStorage } from 'jotai/utils'
 import { atomWithImmer } from 'jotai-immer'
 import { ResultAsync } from 'neverthrow'
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import * as R from 'remeda'
 import useSWR from 'swr'
 import { type Get } from 'type-fest'
@@ -280,14 +280,15 @@ export function useLogsStreamReader () {
 export function useConnectionStreamReader () {
     const apiInfo = useAPIInfo()
 
-    const connection = useRef(new StreamReader<API.Snapshot>({ bufferLength: 200 }))
-
     const protocol = apiInfo.protocol === 'http:' ? 'ws:' : 'wss:'
     const url = `${protocol}//${apiInfo.hostname}:${apiInfo.port}/connections?token=${encodeURIComponent(apiInfo.secret)}`
 
-    useEffect(() => {
-        connection.current.connect(url)
-    }, [url])
+    const connection = useMemo(() => ({ url, reader: new StreamReader<API.Snapshot>({ bufferLength: 0 }) }), [url])
 
-    return connection.current
+    useEffect(() => {
+        connection.reader.connect(connection.url)
+        return () => { connection.reader.destory() }
+    }, [connection])
+
+    return connection.reader
 }

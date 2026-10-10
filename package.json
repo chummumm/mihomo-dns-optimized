@@ -1,6 +1,6 @@
 {
     "name": "clash-dashboard",
-    "version": "0.1.0-sniffhost.1",
+    "version": "0.2.0-dns-memory.1",
     "packageManager": "pnpm@8.15.9",
     "description": "Web port of clash.",
     "keywords": [
@@ -20,6 +20,9 @@
     "scripts": {
         "start": "vite",
         "build": "vite build",
+        "typecheck": "tsc --noEmit",
+        "test:unit": "node --test src/containers/Connections/connections.test.cjs",
+        "test:browser": "node scripts/test-connections.cjs && node scripts/test-dns.cjs",
         "lint": "pnpm lint:ts",
         "lint:ts": "eslint --ext=jsx,ts,tsx --fix src",
         "contributors:add": "all-contributors add",
@@ -48,13 +51,15 @@
         "eslint-plugin-promise": "^6.1.1",
         "eslint-plugin-react": "^7.33.2",
         "eslint-plugin-react-hooks": "^4.6.0",
+        "playwright": "1.62.1",
         "sass": "^1.66.1",
         "type-fest": "^4.2.0",
         "typescript": "^5.1.6",
         "unocss": "^0.55.2",
         "vite": "^4.4.9",
         "vite-plugin-pwa": "^0.16.4",
-        "vite-tsconfig-paths": "^4.2.0"
+        "vite-tsconfig-paths": "^4.2.0",
+        "ws": "8.18.3"
     },
     "dependencies": {
         "@react-hookz/web": "^23.1.0",

@@ -17,6 +17,10 @@ export class StreamReader<T> {
 
     protected connection: WebSocket | null = null
 
+    private retryTimer: ReturnType<typeof setTimeout> | undefined
+
+    private stopped = false
+
     constructor (config: Config) {
         this.config = Object.assign(
             {
@@ -27,16 +31,24 @@ export class StreamReader<T> {
         )
     }
 
-    protected connectWebsocket () {
-        if (!this.url) {
+    protected connectWebsocket = () => {
+        if (!this.url || this.stopped) {
             return
         }
 
         const url = new URL(this.url)
 
-        this.connection = new WebSocket(url.toString())
-        this.connection.addEventListener('message', msg => {
-            const data = JSON.parse(msg.data)
+        const socket = new WebSocket(url.toString())
+        this.connection = socket
+        socket.addEventListener('message', msg => {
+            if (this.connection !== socket || this.stopped) return
+            let data: T
+            try {
+                data = JSON.parse(msg.data)
+            } catch (error) {
+                this.EE.emit('error', error)
+                return
+            }
             this.EE.emit('data', [data])
             if (this.config.bufferLength > 0) {
                 this.innerBuffer.push(data)
@@ -46,19 +58,37 @@ export class StreamReader<T> {
             }
         })
 
-        this.connection.addEventListener('error', err => {
+        const reconnect = () => {
+            if (this.connection !== socket || this.stopped) return
+            this.connection = null
+            socket.close()
+            if (this.retryTimer === undefined) {
+                this.retryTimer = setTimeout(() => {
+                    this.retryTimer = undefined
+                    this.connectWebsocket()
+                }, this.config.retryInterval)
+            }
+        }
+        socket.addEventListener('error', err => {
+            if (this.connection !== socket || this.stopped) return
             this.EE.emit('error', err)
-            this.connection?.close()
-            setTimeout(this.connectWebsocket, this.config.retryInterval)
+            reconnect()
         })
+        socket.addEventListener('close', reconnect)
     }
 
     connect (url: string) {
-        if (this.url === url && this.connection) {
+        if (this.url === url && this.connection && this.connection.readyState < WebSocket.CLOSING) {
             return
         }
         this.url = url
-        this.connection?.close()
+        this.stopped = false
+        clearTimeout(this.retryTimer)
+        this.retryTimer = undefined
+        this.innerBuffer = []
+        const previous = this.connection
+        this.connection = null
+        previous?.close()
         this.connectWebsocket()
     }
 
@@ -75,8 +105,13 @@ export class StreamReader<T> {
     }
 
     destory () {
+        this.stopped = true
+        clearTimeout(this.retryTimer)
+        this.retryTimer = undefined
         this.EE.removeAllListeners()
-        this.connection?.close()
+        const previous = this.connection
         this.connection = null
+        previous?.close()
+        this.innerBuffer = []
     }
 }
