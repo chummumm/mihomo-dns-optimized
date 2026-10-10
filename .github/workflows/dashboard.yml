@@ -75,9 +75,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          current_source=$(git ls-remote --refs origin refs/heads/clash-dashboard | awk '{print $1}')
-          if [[ "$current_source" != "$SOURCE_SHA" ]]; then
-            echo 'A newer UI source commit exists; skipping this publication.'
+          git fetch --no-tags origin refs/heads/clash-dashboard
+          if git diff --quiet "$SOURCE_SHA" FETCH_HEAD -- . ':(top,exclude,glob)**/*.md' ':(top,exclude)LICENSE' ':(top,exclude).all-contributorsrc'; then
+            :
+          else
+            diff_status=$?
+            if [[ "$diff_status" != 1 ]]; then
+              exit "$diff_status"
+            fi
+            echo 'A newer UI code change exists; skipping this publication.'
             exit 0
           fi
           publish_dir="$RUNNER_TEMP/clash-dashboard-publish"
@@ -96,9 +102,15 @@ jobs:
             exit 0
           fi
           git -C "$publish_dir" -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "Publish Clash Dashboard from $SOURCE_SHA"
-          current_source=$(git ls-remote --refs origin refs/heads/clash-dashboard | awk '{print $1}')
-          if [[ "$current_source" != "$SOURCE_SHA" ]]; then
-            echo 'A newer UI source commit exists; skipping this publication.'
+          git fetch --no-tags origin refs/heads/clash-dashboard
+          if git diff --quiet "$SOURCE_SHA" FETCH_HEAD -- . ':(top,exclude,glob)**/*.md' ':(top,exclude)LICENSE' ':(top,exclude).all-contributorsrc'; then
+            :
+          else
+            diff_status=$?
+            if [[ "$diff_status" != 1 ]]; then
+              exit "$diff_status"
+            fi
+            echo 'A newer UI code change exists; skipping this publication.'
             exit 0
           fi
           git -C "$publish_dir" push origin HEAD:refs/heads/clash-dashboard-dist
