@@ -73,8 +73,15 @@ func TestCoreUpdaterTargetMatrix(t *testing.T) {
 func TestCoreUpdaterNumericVersions(t *testing.T) {
 	for _, pair := range [][2]string{
 		{"v1.19.32-dns-optimized-12", "v1.19.32-dns-optimized-2"},
+		{"v1.19.32-optimized-12", "v1.19.32-optimized-2"},
+		{"v1.19.32-optimized-8", "v1.19.32-dns-optimized-7"},
+		{"v1.19.32-dns-optimized-12", "v1.19.32-optimized-8"},
 		{"v1.19.33-dns-optimized-1", "v1.19.32-dns-optimized-999"},
+		{"v1.19.33-optimized-1", "v1.19.32-dns-optimized-999"},
+		{"v1.19.33-dns-optimized-1", "v1.19.32-optimized-999"},
 		{"v2.0.0-dns-optimized-1", "v1.99.99-dns-optimized-9"},
+		{"v2.0.0-optimized-1", "v1.99.99-dns-optimized-9"},
+		{"v1.19.32-optimized-18446744073709551615", "v1.19.32-dns-optimized-9"},
 	} {
 		newer, err := parseReleaseVersion(pair[0])
 		if err != nil {
@@ -85,10 +92,27 @@ func TestCoreUpdaterNumericVersions(t *testing.T) {
 			t.Fatalf("numeric ordering failed: %v", pair)
 		}
 	}
+	for _, suffix := range []string{"1.19.32", "0.0.0", "18446744073709551615.0.0"} {
+		legacy, err := parseReleaseVersion("v" + suffix + "-dns-optimized-8")
+		if err != nil {
+			t.Fatal(err)
+		}
+		current, err := parseReleaseVersion("v" + suffix + "-optimized-8")
+		if err != nil || legacy.compare(current) != 0 || current.compare(legacy) != 0 {
+			t.Fatalf("renaming the release changed numeric ordering: %s, %v", suffix, err)
+		}
+	}
 	for _, invalid := range []string{
 		"v1.19.32", "alpha", "v1.19.32-dns.2", "v1.19.32-dns-optimized-0",
 		"v1.19.32-dns-optimized-01", "v1.19.32-dns-optimized-1/../core",
 		"v1.19.32-dns-optimized-1\nother", "v1.19.32-dns-optimized-18446744073709551616",
+		"v1.19.32-optimized-0", "v1.19.32-optimized-01", "v1.19.32-optimized-1/../core",
+		"v1.19.32-optimized-1\nother", "v1.19.32-optimized-18446744073709551616",
+		"v18446744073709551616.19.32-optimized-1", "v1.18446744073709551616.32-optimized-1",
+		"v1.19.18446744073709551616-optimized-1", "v01.19.32-optimized-1",
+		"v1.019.32-optimized-1", "v1.19.032-optimized-1", "v1.19.32-optimized--1",
+		"v1.19.32-optimized-+1", "v1.19.32-dns-dns-optimized-1", "v1.19.32-optimized-1?tag=other",
+		"v1.19.32-optimized-1#other", "V1.19.32-optimized-1", "v1.19.32-optimized-1 ",
 	} {
 		if _, err := parseReleaseVersion(invalid); err == nil {
 			t.Fatalf("accepted unsafe/non-fork release %q", invalid)
@@ -125,9 +149,9 @@ func testCoreArchive(t *testing.T, payload []byte, member string, windows bool) 
 }
 
 func TestCoreUpdaterPinnedReleaseAndFailurePreservesExecutable(t *testing.T) {
-	const version = "v1.19.32-dns-optimized-12"
+	const version = "v1.19.32-optimized-12"
 	oldVersion := C.Version
-	C.Version = "v1.19.32-dns.2" // migration from the previous fork series
+	C.Version = "v1.19.32-dns.2" // the NEW updater may encounter an older installed version label
 	t.Cleanup(func() { C.Version = oldVersion })
 	newCore := []byte("isolated updated core fixture\n")
 	if runtime.GOOS == "darwin" {
@@ -290,6 +314,123 @@ func TestCoreUpdaterChannelsAndDowngrade(t *testing.T) {
 	mu.Unlock()
 	if err := u.Update(current, "", false); err == nil || !strings.Contains(err.Error(), "already using latest version") {
 		t.Fatalf("equal-version dashboard behavior changed: %v", err)
+	}
+}
+
+// These cases run the NEW updater with old/new installed-version labels.
+// They do not imply that an already compiled old updater accepts the new
+// version.txt format: those installations need a one-time manual migration.
+func TestCoreUpdaterReleaseFormatMigrationAndForce(t *testing.T) {
+	oldVersion := C.Version
+	t.Cleanup(func() { C.Version = oldVersion })
+	payload := []byte("new updater fixture for either release spelling\n")
+	if runtime.GOOS == "darwin" {
+		path, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload, err = os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := DefaultCoreUpdater.CoreBaseName()
+	member, extension := base, ".gz"
+	if runtime.GOOS == "windows" {
+		member, extension = base+".exe", ".zip"
+	}
+	archive := testCoreArchive(t, payload, member, runtime.GOOS == "windows")
+	sum := sha256.Sum256(archive)
+	for _, test := range []struct {
+		name, installed, advertised, wantError string
+		force                                  bool
+	}{
+		{name: "legacy-to-current", installed: "v1.19.32-dns-optimized-7", advertised: "v1.19.32-optimized-8"},
+		{name: "current-to-current", installed: "v1.19.32-optimized-8", advertised: "v1.19.32-optimized-12"},
+		{name: "current-to-newer-legacy", installed: "v1.19.32-optimized-8", advertised: "v1.19.32-dns-optimized-12"},
+		{name: "equal-revision-renamed", installed: "v1.19.32-dns-optimized-8", advertised: "v1.19.32-optimized-8"},
+		{name: "legacy-to-current-downgrade", installed: "v1.19.32-dns-optimized-12", advertised: "v1.19.32-optimized-8", wantError: "downgrade"},
+		{name: "current-to-legacy-downgrade", installed: "v1.19.32-optimized-12", advertised: "v1.19.32-dns-optimized-8", wantError: "downgrade"},
+		{name: "force-legacy-to-current-downgrade", installed: "v1.19.32-dns-optimized-12", advertised: "v1.19.32-optimized-8", force: true},
+		{name: "force-current-to-legacy-downgrade", installed: "v1.19.32-optimized-12", advertised: "v1.19.32-dns-optimized-8", force: true},
+		{name: "current-equal", installed: "v1.19.32-optimized-8", advertised: "v1.19.32-optimized-8", wantError: "already using latest version"},
+		{name: "force-current-equal", installed: "v1.19.32-optimized-8", advertised: "v1.19.32-optimized-8", force: true},
+		{name: "force-does-not-bypass-version-validation", installed: "v1.19.32-optimized-8", advertised: "v1.19.32-optimized-9/../core", wantError: "unsupported", force: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			C.Version = test.installed
+			dir := t.TempDir()
+			current := filepath.Join(dir, "mihomo")
+			original := []byte("existing executable is preserved until verification\n")
+			if err := os.WriteFile(current, original, 0o751); err != nil {
+				t.Fatal(err)
+			}
+			asset := base + "-" + test.advertised + extension
+			pinned := "/releases/download/" + test.advertised + "/"
+			var mu sync.Mutex
+			var paths []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				paths = append(paths, r.URL.Path)
+				mu.Unlock()
+				switch r.URL.Path {
+				case "/releases/latest/download/version.txt":
+					fmt.Fprintln(w, test.advertised)
+				case pinned + "SHA256SUMS":
+					fmt.Fprintf(w, "%x  %s\n", sum, asset)
+				case pinned + asset:
+					_, _ = w.Write(archive)
+				default:
+					t.Errorf("updater changed the advertised tag or archive name: %s", r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			u := CoreUpdater{releaseURL: server.URL + "/releases/"}
+			err := u.Update(current, ReleaseChannel, test.force)
+			installed, readErr := os.ReadFile(current)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			wantRequests := 3
+			if test.wantError != "" {
+				wantRequests = 1
+				if err == nil || !strings.Contains(err.Error(), test.wantError) || !bytes.Equal(installed, original) {
+					t.Fatalf("rejected update changed the executable or error: %v", err)
+				}
+				if _, backupErr := os.Stat(filepath.Join(dir, "meta-backup")); !os.IsNotExist(backupErr) {
+					t.Fatalf("rejected update touched backup state: %v", backupErr)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if runtime.GOOS == "darwin" {
+					if err := exec.Command("/usr/bin/codesign", "--verify", current).Run(); err != nil {
+						t.Fatalf("renamed release lost its native signature: %v", err)
+					}
+					if _, err := buildinfo.ReadFile(current); err != nil {
+						t.Fatalf("renamed release is not the staged Go executable: %v", err)
+					}
+				} else if !bytes.Equal(installed, payload) {
+					t.Fatal("renamed release installed unexpected bytes")
+				}
+				backup, err := os.ReadFile(filepath.Join(dir, "meta-backup", "mihomo"))
+				if err != nil || !bytes.Equal(backup, original) {
+					t.Fatalf("renamed release did not preserve the existing executable: %v", err)
+				}
+			}
+			mu.Lock()
+			gotRequests := len(paths)
+			mu.Unlock()
+			if gotRequests != wantRequests {
+				t.Fatalf("expected %d metadata/archive requests, got %d", wantRequests, gotRequests)
+			}
+			staging, err := filepath.Glob(filepath.Join(dir, ".mihomo-update-*"))
+			if err != nil || len(staging) != 0 {
+				t.Fatalf("renamed release leaked staging files: %v, %v", staging, err)
+			}
+		})
 	}
 }
 

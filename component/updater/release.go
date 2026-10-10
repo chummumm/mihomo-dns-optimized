@@ -12,7 +12,10 @@ import (
 
 const coreReleaseURL = "https://github.com/chummumm/mihomo-dns-optimized/releases/"
 
-var dnsReleaseVersion = regexp.MustCompile("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)-dns-optimized-([1-9][0-9]*)$")
+// New releases use -optimized-N. Accept the previous spelling when comparing
+// installed versions or reading an older pinned release; never rewrite the
+// advertised tag, which also determines its immutable asset names.
+var dnsReleaseVersion = regexp.MustCompile("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)-(?:dns-)?optimized-([1-9][0-9]*)$")
 
 type releaseVersion [4]uint64
 

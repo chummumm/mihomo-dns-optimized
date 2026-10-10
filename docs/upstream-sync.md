@@ -27,9 +27,15 @@ Actions artifact 保留 30 天。归档解压后需按平台给二进制增加�
 文件集合、版本和摘要校验均通过，才自动把构建结果发布到
 GitHub Releases，提供持久下载。Pull Request 只测试和上传 Actions artifact。
 手动运行 `Build DNS optimized` 并勾选 `publish_release`、推送形如
-`v1.19.32-dns-optimized-1` 的版本标签，以及自动上游更新成功后，也会发布 release。
+`v1.19.32-optimized-8` 的版本标签，以及自动上游更新成功后，也会发布 release。
 发布只在本仓库进行，已有同名 release 的附件不会被覆盖；重跑也必须核对既有
-Release 的完整附件集合及 GitHub 返回的 SHA-256 摘要。
+Release 的完整附件集合及 GitHub 返回的 SHA-256 摘要。构建前和发布时都会确认
+同名标签仍指向本次源码提交，轻量标签和附注标签均会解引用后核对。
+
+内核版本使用 `UPSTREAM_VERSION` 与 `OPTIMIZED_REVISION`，不再从 Git 提交数量
+生成修订号。准备下一次代码发行时递增 `OPTIMIZED_REVISION`；仅修改文档不会
+触发构建或发版，也不会消耗修订号。旧版内核首次切换到新命名的安装要求见
+[内核一键更新](releases.md#内核一键更新)。
 
 发布任务按仓库串行执行。新 release 创建时先不标记 Latest，附件上传后重新读取
 当前 `main` 的提交；只有它仍等于这次的构建提交，才更新 Latest。较旧提交的构建
@@ -44,8 +50,9 @@ GitHub 的定时任务可能延迟；它查询 MetaCubeX/mihomo 的最新正式 
 更新顺序：
 
 1. 从当前 `main` 准备普通 Git merge，保留本分支修改和上游历史。
-2. 保留本分支的整个 `.github/workflows` 目录、同步 / 编译脚本和 `packaging/`，移除这次合并
-   新带入的上游工作流，避免导入上游发布或跨仓库触发任务。
+2. 保留本分支的整个 `.github/workflows` 目录、同步 / 编译脚本、`packaging/` 和
+   `OPTIMIZED_REVISION`，移除新带入的上游工作流。随后将本分支修订号加一，
+   与上游版本元数据一起加入待测试的合并，候选构建和提交后的正式构建读取同一版本。
 3. 运行测试和安装包检查，并完整编译 Linux amd64、arm64。测试、编译或代码冲突失败即停止。
 4. 检查远端 `main` 是否仍是开始测试时的提交；有并发修改则停止，稍后重试。
 5. 正常提交并推送合并，不使用强制推送。随后直接调用编译工作流，生成下载产物

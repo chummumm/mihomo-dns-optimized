@@ -82,10 +82,20 @@ jobs:
           UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
         run: |
           set -euo pipefail
+          export LC_ALL=C
+          is_uint64() {
+            [[ "$1" =~ ^(0|[1-9][0-9]*)$ ]] &&
+              { (( ${#1} < 20 )) || { (( ${#1} == 20 )) && [[ "$1" < 18446744073709551615 || "$1" == 18446744073709551615 ]]; }; }
+          }
+          upstream=$(cat UPSTREAM_VERSION)
+          [[ "$upstream" == "$UPSTREAM_TAG" && "$upstream" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || { echo 'Invalid merged UPSTREAM_VERSION' >&2; exit 1; }
+          for component in "${BASH_REMATCH[@]:1}"; do
+            is_uint64 "$component" || { echo 'UPSTREAM_VERSION components must be canonical uint64 values' >&2; exit 1; }
+          done
+          revision=$(cat OPTIMIZED_REVISION)
+          is_uint64 "$revision" && [[ "$revision" != 0 ]] || { echo 'OPTIMIZED_REVISION must be a positive uint64 without leading zeros' >&2; exit 1; }
+          candidate_version="${upstream}-optimized-${revision}"
           bash scripts/ci-check.sh test
-          revision=$(git rev-list --first-parent --count "$(cat DNS_RELEASE_BASE)"..HEAD)
-          revision=$((revision + 1)) # candidate is committed after this step
-          candidate_version="${UPSTREAM_TAG}-dns-optimized-${revision}"
           bash scripts/ci-check.sh build amd64 "$RUNNER_TEMP/sync-amd64" "$candidate_version" "$(date -u +%FT%TZ)"
           bash scripts/ci-check.sh build arm64 "$RUNNER_TEMP/sync-arm64" "$candidate_version" "$(date -u +%FT%TZ)"
       - name: Commit and push the tested merge

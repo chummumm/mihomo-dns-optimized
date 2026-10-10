@@ -3,7 +3,7 @@ name: Build DNS optimized
 on:
   push:
     branches: [main]
-    tags: ["v*-dns-optimized-*"]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+-optimized-[0-9]+"]
     paths-ignore:
       - "**/*.md"
       - "**/*.mdx"
@@ -76,6 +76,62 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Identify the exact build
+        id: version
+        env:
+          EVENT_REF: ${{ github.ref }}
+          EVENT_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          is_uint64() {
+            [[ "$1" =~ ^(0|[1-9][0-9]*)$ ]] &&
+              { (( ${#1} < 20 )) || { (( ${#1} == 20 )) && [[ "$1" < 18446744073709551615 || "$1" == 18446744073709551615 ]]; }; }
+          }
+          verify_release_tag() {
+            local tag=$1 expected=$2 allow_missing=$3 refs status sha ref extra object= peeled=
+            if refs=$(git ls-remote --exit-code --tags origin "refs/tags/$tag" "refs/tags/$tag^{}"); then
+              while IFS=$'\t' read -r sha ref extra; do
+                [[ "$sha" =~ ^[0-9a-f]{40}$ && -z "$extra" ]] || return 1
+                case "$ref" in
+                  "refs/tags/$tag") [[ -z "$object" ]] || return 1; object=$sha ;;
+                  "refs/tags/$tag^{}") [[ -z "$peeled" ]] || return 1; peeled=$sha ;;
+                  *) return 1 ;;
+                esac
+              done <<< "$refs"
+              [[ -n "$object" && "${peeled:-$object}" == "$expected" ]] || {
+                printf 'Release tag %s is not build %s. Bump OPTIMIZED_REVISION for a new source commit.\n' "$tag" "$expected" >&2
+                return 1
+              }
+            else
+              status=$?
+              if (( status == 2 )) && [[ "$allow_missing" == true ]]; then
+                return 0
+              fi
+              printf 'Cannot verify release tag %s (git status %s); refusing to publish.\n' "$tag" "$status" >&2
+              return 1
+            fi
+          }
+          commit=$(git rev-parse HEAD)
+          upstream=$(cat UPSTREAM_VERSION)
+          [[ "$upstream" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || { echo 'Invalid UPSTREAM_VERSION' >&2; exit 1; }
+          for component in "${BASH_REMATCH[@]:1}"; do
+            is_uint64 "$component" || { echo 'UPSTREAM_VERSION components must be canonical uint64 values' >&2; exit 1; }
+          done
+          revision=$(cat OPTIMIZED_REVISION)
+          is_uint64 "$revision" && [[ "$revision" != 0 ]] || { echo 'OPTIMIZED_REVISION must be a positive uint64 without leading zeros' >&2; exit 1; }
+          version="${upstream}-optimized-${revision}"
+          release_tag="$version"
+          if [[ "$EVENT_REF" == refs/tags/* ]]; then
+            [[ "$EVENT_REF_NAME" == "$release_tag" ]] || { echo 'Tag does not match this numeric revision' >&2; exit 1; }
+          fi
+          verify_release_tag "$release_tag" "$commit" true
+          {
+            printf 'commit=%s\n' "$commit"
+            printf 'version=%s\n' "$version"
+            printf 'release_tag=%s\n' "$release_tag"
+            printf 'build_time=%s\n' "$(git show -s --format=%cI HEAD)"
+          } >> "$GITHUB_OUTPUT"
       - name: Set up upstream-compatible Go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
@@ -89,32 +145,6 @@ jobs:
         run: printf 'matrix=%s\n' "$(python3 scripts/release-build.py matrix)" >> "$GITHUB_OUTPUT"
       - name: Test fork changes and sync safeguards
         run: bash scripts/ci-check.sh test
-      - name: Identify the exact build
-        id: version
-        env:
-          EVENT_REF: ${{ github.ref }}
-          EVENT_REF_NAME: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          commit=$(git rev-parse HEAD)
-          upstream=$(cat UPSTREAM_VERSION)
-          [[ "$upstream" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          base=$(cat DNS_RELEASE_BASE)
-          [[ "$base" =~ ^[0-9a-f]{40}$ ]]
-          git merge-base --is-ancestor "$base" HEAD
-          revision=$(git rev-list --first-parent --count "$base"..HEAD)
-          [[ "$revision" =~ ^[1-9][0-9]*$ ]]
-          version="${upstream}-dns-optimized-${revision}"
-          release_tag="$version"
-          if [[ "$EVENT_REF" == refs/tags/* ]]; then
-            [[ "$EVENT_REF_NAME" == "$release_tag" ]] || { echo 'Tag does not match this numeric revision' >&2; exit 1; }
-          fi
-          {
-            printf 'commit=%s\n' "$commit"
-            printf 'version=%s\n' "$version"
-            printf 'release_tag=%s\n' "$release_tag"
-            printf 'build_time=%s\n' "$(git show -s --format=%cI HEAD)"
-          } >> "$GITHUB_OUTPUT"
 
   build:
     name: ${{ matrix.target }}
@@ -192,7 +222,7 @@ jobs:
       github.repository == 'chummumm/mihomo-dns-optimized' &&
       github.event_name != 'pull_request' &&
       ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-       (startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '-dns-optimized-')) ||
+       (startsWith(github.ref, 'refs/tags/') && github.ref_name == needs.check.outputs.release_tag) ||
        (inputs.publish_release && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -220,16 +250,43 @@ jobs:
           RELEASE_TAG: ${{ needs.check.outputs.release_tag }}
         run: |
           set -euo pipefail
+          verify_release_tag() {
+            local tag=$1 expected=$2 allow_missing=$3 refs status sha ref extra object= peeled=
+            if refs=$(git ls-remote --exit-code --tags origin "refs/tags/$tag" "refs/tags/$tag^{}"); then
+              while IFS=$'\t' read -r sha ref extra; do
+                [[ "$sha" =~ ^[0-9a-f]{40}$ && -z "$extra" ]] || return 1
+                case "$ref" in
+                  "refs/tags/$tag") [[ -z "$object" ]] || return 1; object=$sha ;;
+                  "refs/tags/$tag^{}") [[ -z "$peeled" ]] || return 1; peeled=$sha ;;
+                  *) return 1 ;;
+                esac
+              done <<< "$refs"
+              [[ -n "$object" && "${peeled:-$object}" == "$expected" ]] || {
+                printf 'Release tag %s is not build %s. Bump OPTIMIZED_REVISION for a new source commit.\n' "$tag" "$expected" >&2
+                return 1
+              }
+            else
+              status=$?
+              if (( status == 2 )) && [[ "$allow_missing" == true ]]; then
+                return 0
+              fi
+              printf 'Cannot verify release tag %s (git status %s); refusing to publish.\n' "$tag" "$status" >&2
+              return 1
+            fi
+          }
+          verify_release_tag "$RELEASE_TAG" "$BUILD_SHA" true
           python3 scripts/release-build.py collect dist "$BUILD_VERSION" "$BUILD_SHA"
           cd dist
           sha256sum --check SHA256SUMS
           shopt -s nullglob
           assets=( ./*.gz ./*.zip ./*.deb ./*.rpm ./*.pkg.tar.zst BUILDINFO.json SHA256SUMS version.txt )
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            verify_release_tag "$RELEASE_TAG" "$BUILD_SHA" false
             printf 'Release %s already exists; checking its immutable assets.\n' "$RELEASE_TAG"
           else
             {
               printf 'Mihomo DNS optimized `%s`\n\n' "$BUILD_VERSION"
+              printf 'Migration: this release uses vX.Y.Z-optimized-N consistently for its tag, title, version.txt and binary version. Existing -dns-optimized-N kernels require one manual installation because their compiled updater cannot parse the new name. The new updater accepts both spellings and continues updating from this fork.\n\n'
               printf 'Source commit: `%s`\n\n' "$BUILD_SHA"
               printf '37 platform/CPU targets: Linux, Windows, macOS, FreeBSD and Android. Linux deb/rpm and selected Arch packages are included.\n\n'
               printf 'Built with the upstream MetaCubeX Go 1.26 toolchain and with_gvisor; Android uses pinned NDK r29/API34 with CGO, other builds use CGO=0.\n\n'
@@ -248,6 +305,7 @@ jobs:
               printf 'Dedicated DNS connections now carry an explicit DNS marker. The updated dashboard displays their type as DNS and only the final selected node, while the connections API retains the original network, inbound and complete rule/chain data. Ordinary proxy traffic is not identified as DNS merely by port 53.\n'
               printf 'Controlled DNS routing, load and memory-only observability regressions run against the Linux amd64 release binary in CI; see docs/dns-performance.md and docs/dns-observability.md.\n'
             } > "$RUNNER_TEMP/release-notes.txt"
+            verify_release_tag "$RELEASE_TAG" "$BUILD_SHA" true
             gh release create "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --target "$BUILD_SHA" \
@@ -256,8 +314,10 @@ jobs:
               --latest=false \
               "${assets[@]}"
           fi
+          verify_release_tag "$RELEASE_TAG" "$BUILD_SHA" false
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/published-release.json"
           python3 ../scripts/release-build.py verify-published . "$RUNNER_TEMP/published-release.json"
+          verify_release_tag "$RELEASE_TAG" "$BUILD_SHA" false
           current_main=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
           [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
           if [[ "$BUILD_SHA" == "$current_main" ]]; then

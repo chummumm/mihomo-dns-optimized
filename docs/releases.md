@@ -7,9 +7,9 @@
 所有文件名包含平台、CPU 和版本，例如：
 
 ```text
-mihomo-dns-linux-amd64-v1.19.32-dns-optimized-1.gz
-mihomo-dns-linux-amd64-v1.19.32-dns-optimized-1.deb
-mihomo-dns-windows-amd64-v1.19.32-dns-optimized-1.zip
+mihomo-dns-linux-amd64-v1.19.32-optimized-8.gz
+mihomo-dns-linux-amd64-v1.19.32-optimized-8.deb
+mihomo-dns-windows-amd64-v1.19.32-optimized-8.zip
 ```
 
 `SHA256SUMS` 覆盖全部 66 个二进制归档/安装包，以及 `BUILDINFO.json` 和 `version.txt`。`BUILDINFO.json` 记录完整提交号、各目标的 Go 架构参数、工具链、CGO、编译标签以及每个文件的大小和 SHA-256。每个目标缺少文件或校验不一致时，整个 Release 发布失败。已有同名 Release 的文件不被覆盖；重新发布时也必须验证其文件集合和摘要一致。
@@ -81,7 +81,9 @@ RPM 系统用 `sudo dnf install ./mihomo-dns-<target>-<version>.rpm`，Arch 系�
 
 ## 数字修订版本
 
-新发行版本形式为 `v1.19.32-dns-optimized-1`，tag、Release 标题与 `mihomo -v` 使用相同版本。新命名序列从审计基线提交后的修复开始；末尾数字由 `DNS_RELEASE_BASE` 之后的 first-parent 提交数量确定，因此可复现、随主线推进递增，并不要求每次发行连续编号。纯文档提交仍计入主线历史，但不会自动创建 Release，因此后续发行编号可能跳号。上游稳定版更新仍由原同步流程处理。提交 SHA 不再放入二进制版本或发行文件名，保留于 `BUILDINFO.json` 和提交记录。
+新发行版本从 `v1.19.32-optimized-8` 开始，tag、Release 标题、`version.txt` 与 `mihomo -v` 使用相同版本。版本由源码中的 `UPSTREAM_VERSION` 和 `OPTIMIZED_REVISION` 共同确定，不再按提交次数推算。每次准备新的内核发行时递增修订号；纯文档更新不改编号，也不会触发构建或自动创建 Release。自动同步上游稳定版时，准备合并的脚本会将修订号加一并加入同一份待测试提交，候选构建与正式构建读取相同版本文件。
+
+已有修订号不能用于不同源码：CI 在完整平台构建前检查同名标签的目标提交，发布时再次检查标签和附件。已经发布的旧命名标签保留原样。提交 SHA 保留于 `BUILDINFO.json` 和提交记录，便于核对和重现构建。
 
 包管理器版本保留 UTC 构建时间前缀以保证从已有带哈希版本正常升级，其末尾改为数字修订号。安装包不会自动重启服务，升级后仍需校验配置并手动重启。
 
@@ -89,8 +91,10 @@ RPM 系统用 `sudo dnf install ./mihomo-dns-<target>-<version>.rpm`，Arch 系�
 
 本版本的核心 `/upgrade` 使用 **chummumm/mihomo-dns-optimized** 的正式 Release。默认、`auto` 和 `release` 通道都先读取本仓库 Latest 的 `version.txt`，再将校验和及对应架构归档的下载固定到该版本标签；下载过程中 Latest 改变不会混用版本。未提供本仓库 alpha 发行，显式请求 `alpha` 会提示使用 `release`，不会跳转官方仓库。
 
-更新保留当前平台和 CPU 变体，包括 amd64 v1/v2/v3、386 softfloat、ARM、MIPS 浮点 ABI、LoongArch ABI2 和 Android 文件名。不存在对应发行目标时明确失败。版本比较按上游版本和数字修订号进行；未设置 `force` 时不会降级。
+更新保留当前平台和 CPU 变体，包括 amd64 v1/v2/v3、386 softfloat、ARM、MIPS 浮点 ABI、LoongArch ABI2 和 Android 文件名。不存在对应发行目标时明确失败。新版更新器同时识别 `vX.Y.Z-optimized-N` 和旧 `vX.Y.Z-dns-optimized-N`，按上游版本和数字修订号比较；未设置 `force` 时不会降级。下载使用发行元数据给出的原始标签，不通过改写版本字符串猜测下载地址。
 
 归档必须通过本版本 `SHA256SUMS` 校验，解压到独立临时目录后才替换内核；HTTP 错误、版本格式错误、缺失校验、摘要不符或无效归档不会覆盖当前文件。原内核保存在同目录 `meta-backup/`。一键更新成功后仍沿用现有接口的重启行为，配置文件不被替换。
 
-**旧版 `v1.19.32-dns.2` 等内核的更新逻辑已经编译在旧文件中，首次迁移需手动安装本次修复版。** 此后才使用上述二开源一键更新。用 deb/rpm/pkg 安装的用户建议继续通过相应安装包升级，以保持包管理器记录一致；直接使用核心的用户可使用面板的内核更新入口。
+**已经安装的 `v1.19.32-dns-optimized-N`、`v1.19.32-dns.2` 等旧内核，首次迁移需要手动安装本次新版。** 旧更新器的版本解析规则已编译进旧文件，无法识别新名称；`force` 也不能跳过版本格式检查。新版支持双格式解析，不会改变旧二进制的行为。
+
+首次迁移时，下载并校验对应平台的新归档或安装包，按原来的安装方式替换内核并重启，用 `mihomo -v` 确认已运行 `v1.19.32-optimized-8` 或后续新版本。此后直接使用核心的用户可继续通过面板的内核更新入口升级；用 deb/rpm/pkg 安装的用户建议继续通过相应安装包升级，以保持包管理器记录一致。

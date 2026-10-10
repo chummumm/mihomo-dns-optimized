@@ -62,6 +62,7 @@ class StableSyncTests(unittest.TestCase):
         write(self.fork, ".github/workflows/build.yml", "fork automation\n")
         write(self.fork, "UPSTREAM_VERSION", "v1.0.0\n")
         write(self.fork, "UPSTREAM_COMMIT", self.initial + "\n")
+        write(self.fork, "OPTIMIZED_REVISION", "7\n")
         for name in ["upstream-sync.sh", "ci-check.sh", "test-upstream-sync.py", "release-build.py", "test-release-build.py"]:
             target = self.fork / "scripts" / name
             target.parent.mkdir(exist_ok=True)
@@ -87,6 +88,7 @@ class StableSyncTests(unittest.TestCase):
         write(self.upstream, ".github/workflows/unexpected.yml", "new upstream dispatch\n")
         write(self.upstream, "scripts/release-build.py", "unexpected build replacement\n")
         write(self.upstream, "packaging/unexpected", "unexpected package hook\n")
+        write(self.upstream, "OPTIMIZED_REVISION", "9000\n")
         self.latest = commit(self.upstream, "new upstream release")
         git(self.upstream, "tag", "v1.0.1")
         return self.latest
@@ -107,11 +109,14 @@ class StableSyncTests(unittest.TestCase):
         self.assertFalse((self.fork / "packaging/unexpected").exists())
         self.assertEqual((self.fork / "scripts/release-build.py").read_bytes(), (SOURCE_ROOT / "scripts/release-build.py").read_bytes())
         self.assertEqual((self.fork / "UPSTREAM_COMMIT").read_text().strip(), latest)
+        self.assertEqual((self.fork / "OPTIMIZED_REVISION").read_text(), "8\n")
+        self.assertIn("OPTIMIZED_REVISION", git(self.fork, "diff", "--cached", "--name-only").splitlines())
         merged = commit(self.fork, "tested sync")
         parents = git(self.fork, "show", "-s", "--format=%P", "HEAD").split()
         self.assertEqual(parents, [self.base, latest])
         result = self.sync("v1.0.1")
         self.assertIn("changed=false", result.stdout)
+        self.assertEqual((self.fork / "OPTIMIZED_REVISION").read_text(), "8\n")
         self.assert_clean_base(merged)
 
     def test_existing_upstream_merge_only_updates_metadata(self):
@@ -123,6 +128,7 @@ class StableSyncTests(unittest.TestCase):
         self.sync("v1.0.1")
         self.assertEqual(git(self.fork, "rev-parse", "HEAD"), base)
         self.assertEqual((self.fork / "UPSTREAM_VERSION").read_text(), "v1.0.1\n")
+        self.assertEqual((self.fork / "OPTIMIZED_REVISION").read_text(), "8\n")
         self.assertFalse((self.fork / ".git/MERGE_HEAD").exists())
 
     def test_code_conflict_aborts_without_overwriting_fork(self):
@@ -134,13 +140,35 @@ class StableSyncTests(unittest.TestCase):
         self.assertIn("manual conflict resolution", result.stdout)
         self.assert_clean_base(base)
         self.assertEqual((self.fork / "code.txt").read_text(), "fork DNS routing change\n")
+        self.assertEqual((self.fork / "OPTIMIZED_REVISION").read_text(), "7\n")
 
     def test_dry_run_keeps_original_branch_and_working_tree(self):
         self.new_upstream()
         result = self.sync("v1.0.1", dry_run=True)
         self.assertIn("Dry run finished", result.stdout)
         self.assert_clean_base()
+        self.assertEqual((self.fork / "OPTIMIZED_REVISION").read_text(), "7\n")
         self.assertEqual(len(git(self.fork, "worktree", "list", "--porcelain").split("worktree ")) - 1, 1)
+
+    def test_document_commits_do_not_consume_release_revisions(self):
+        write(self.fork, "README.md", "fork documentation\n")
+        commit(self.fork, "update documentation")
+        write(self.fork, "README.md", "more fork documentation\n")
+        commit(self.fork, "clarify documentation")
+        self.new_upstream()
+        self.sync("v1.0.1")
+        self.assertEqual((self.fork / "OPTIMIZED_REVISION").read_text(), "8\n")
+
+    def test_invalid_or_exhausted_revision_stops_before_merge(self):
+        self.new_upstream()
+        for revision in ["0", "01", "-1", "one", str((1 << 64) - 1), str(1 << 64)]:
+            with self.subTest(revision=revision):
+                write(self.fork, "OPTIMIZED_REVISION", revision + "\n")
+                base = commit(self.fork, "invalid release revision fixture")
+                result = self.sync("v1.0.1", check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("OPTIMIZED_REVISION", result.stdout)
+                self.assert_clean_base(base)
 
     def test_rejects_prereleases_old_versions_and_unrelated_history(self):
         self.assertNotEqual(self.sync("v1.0.1-rc1", check=False).returncode, 0)

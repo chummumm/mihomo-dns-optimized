@@ -68,9 +68,11 @@ def package_versions(build_time, commit, upstream, version=None):
     # in BUILDINFO/manifests solely for source verification.
     revision = "0"
     if version is not None:
-        match = re.fullmatch(re.escape(upstream) + r"-dns-optimized-([1-9][0-9]*)", version)
+        # Historical tags remain readable; the native package version below
+        # keeps its existing prefix so renaming a release never resets upgrades.
+        match = re.fullmatch(re.escape(upstream) + r"-(?:dns-)?optimized-([1-9][0-9]*)", version)
         if not match:
-            raise ValueError("release version must contain a numeric DNS revision")
+            raise ValueError("release version must contain a numeric optimized revision")
         revision = match.group(1)
     suffix = f"dns.{stamp}.{revision}"
     base = upstream[1:]

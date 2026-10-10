@@ -15,7 +15,8 @@ sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location('release_build', Path(__file__).with_name('release-build.py'))
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
-VERSION = 'v1.19.32-dns-optimized-12'
+VERSION = 'v1.19.32-optimized-8'
+LEGACY_VERSION = 'v1.19.32-dns-optimized-8'
 COMMIT = '123456789abcdef0123456789abcdef0123456789'
 TIME = '2026-10-09T02:00:00+00:00'
 
@@ -46,19 +47,50 @@ class ReleaseTests(unittest.TestCase):
 
     def test_version_upgrade_order_and_timestamp_timezone(self):
         versions = release.package_versions(TIME, COMMIT, 'v1.19.32', VERSION)
-        self.assertEqual(versions['deb'], '1.19.32+dns.20261009020000.12')
-        later = release.package_versions('2026-10-09T02:01:00Z', '0' * 40, 'v1.19.32', 'v1.19.32-dns-optimized-13')
+        self.assertEqual(versions['deb'], '1.19.32+dns.20261009020000.8')
+        later = release.package_versions('2026-10-09T02:01:00Z', '0' * 40, 'v1.19.32', 'v1.19.32-optimized-9')
         release.run('dpkg', '--compare-versions', later['deb'], 'gt', versions['deb'])
         same_time = release.package_versions('2026-10-09T10:00:00+08:00', COMMIT, 'v1.19.32', VERSION)
         self.assertEqual(versions, same_time)
         release.run('dpkg', '--compare-versions', later['deb'], 'gt', '1.19.32+dns.20261009020000.123456789abc')
-        first_new = release.package_versions('2026-10-09T02:01:00Z', COMMIT, 'v1.19.32', 'v1.19.32-dns-optimized-1')
+        first_new = release.package_versions('2026-10-09T02:01:00Z', COMMIT, 'v1.19.32', 'v1.19.32-optimized-1')
         release.run('dpkg', '--compare-versions', first_new['deb'], 'gt', '1.19.32+dns.20261009020000.2')
-        for invalid in ['v1.19.32-dns.12', 'v1.19.32-dns-optimized-0', 'v1.19.32-dns-optimized-01']:
-            with self.assertRaises(ValueError):
+
+    def test_renamed_tags_preserve_package_identity_and_upgrade_order(self):
+        self.assertEqual(release.PACKAGE, 'mihomo-dns-optimized')
+        for revision in [1, 7, 8, 9, 10, 1234]:
+            with self.subTest(revision=revision):
+                canonical = release.package_versions(TIME, COMMIT, 'v1.19.32', f'v1.19.32-optimized-{revision}')
+                legacy = release.package_versions(TIME, COMMIT, 'v1.19.32', f'v1.19.32-dns-optimized-{revision}')
+                # Exact equality covers Debian, RPM and Arch package versions:
+                # their comparators never see the changed release-tag prefix.
+                self.assertEqual(canonical, legacy)
+        for previous_tag, next_tag in [
+            ('v1.19.32-dns-optimized-7', VERSION),
+            ('v1.19.32-dns-optimized-9', 'v1.19.32-optimized-10'),
+            ('v1.19.32-optimized-9', 'v1.19.32-dns-optimized-10'),
+        ]:
+            with self.subTest(previous=previous_tag, next=next_tag):
+                previous = release.package_versions(TIME, COMMIT, 'v1.19.32', previous_tag)
+                following = release.package_versions(TIME, COMMIT, 'v1.19.32', next_tag)
+                release.run('dpkg', '--compare-versions', following['deb'], 'gt', previous['deb'])
+        previous = release.package_versions(TIME, COMMIT, 'v1.19.32', LEGACY_VERSION)
+        following = release.package_versions('2026-10-09T02:01:00Z', COMMIT, 'v1.19.32', VERSION)
+        release.run('dpkg', '--compare-versions', following['deb'], 'gt', previous['deb'])
+
+    def test_release_versions_reject_malformed_or_mismatched_values(self):
+        invalid_versions = ['v1.19.32-dns.8', 'v1.19.32-dns-deadbeef1234',
+                            'v1.19.33-optimized-8', '1.19.32-optimized-8',
+                            'v1.19.32-dns-dns-optimized-8', 'v1.19.32-optimized']
+        for prefix in ['v1.19.32-optimized-', 'v1.19.32-dns-optimized-']:
+            invalid_versions.extend(prefix + revision for revision in
+                                    ['', '0', '00', '01', '-1', '+1', '8.1', '8-extra', '8/../', '8\n', '8 ', '８'])
+        for invalid in invalid_versions:
+            with self.subTest(version=invalid), self.assertRaises(ValueError):
                 release.package_versions(TIME, COMMIT, 'v1.19.32', invalid)
-        with self.assertRaises(ValueError):
-            release.package_versions(TIME, COMMIT, 'v1.19.32', 'v1.19.32-dns-deadbeef1234')
+        for upstream in ['1.19.32', 'v1.19', 'v1.19.32\n', VERSION, '../v1.19.32']:
+            with self.subTest(upstream=upstream), self.assertRaises(ValueError):
+                release.package_versions(TIME, COMMIT, upstream, VERSION)
         with self.assertRaises(ValueError):
             release.basename(release.target('amd64'), '../unsafe')
 
@@ -66,6 +98,7 @@ class ReleaseTests(unittest.TestCase):
         for name in ['windows-amd64', 'linux-armv7']:
             row = release.target(name)
             path = release.write_archive(self.binary, row, VERSION, self.out, release.epoch(TIME))
+            self.assertEqual(path.name, f'mihomo-dns-{name}-{VERSION}' + ('.zip' if row['goos'] == 'windows' else '.gz'))
             if row['goos'] == 'windows':
                 with zipfile.ZipFile(path) as archive:
                     self.assertEqual(archive.namelist(), ['mihomo-dns-windows-amd64.exe'])
@@ -104,6 +137,8 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual((self.out / 'version.txt').read_text(), VERSION + '\n')
         with self.assertRaisesRegex(ValueError, 'identity mismatch'):
             release.collect(self.out, VERSION, '0' * 40)
+        with self.assertRaisesRegex(ValueError, 'identity mismatch'):
+            release.collect(self.out, LEGACY_VERSION, COMMIT)
         asset = self.out / release.asset_names(release.target('amd64'), VERSION)[0]
         original = asset.read_bytes()
         asset.write_bytes(b'corrupt')
@@ -122,6 +157,11 @@ class ReleaseTests(unittest.TestCase):
         saved = self.root / 'published.json'
         saved.write_text(json.dumps(metadata))
         release.verify_published(self.out, saved)
+        metadata['tag_name'] = LEGACY_VERSION
+        saved.write_text(json.dumps(metadata))
+        with self.assertRaisesRegex(ValueError, 'incomplete or differs'):
+            release.verify_published(self.out, saved)
+        metadata['tag_name'] = VERSION
         metadata['assets'].pop()
         saved.write_text(json.dumps(metadata))
         with self.assertRaisesRegex(ValueError, 'incomplete or differs'):
