@@ -3,4 +3,7 @@
     border: 1px solid var(--hair);
     border-radius: var(--r-panel);
     background: var(--panel);
+    box-shadow: var(--shadow-card);
+    -webkit-backdrop-filter: blur(16px);
+    backdrop-filter: blur(16px);
 }

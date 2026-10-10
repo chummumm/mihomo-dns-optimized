@@ -27,6 +27,65 @@ const { ConnectionsStore } = loadSource('store.ts')
 const { StreamReader } = loadSource('../../lib/streamer.ts')
 const { formatConnection, getConnectionPresentation, isDNSConnection } = loadSource('helper.ts')
 const { getConnectionSourceKey, ALL_CONNECTIONS, INTERNAL_CONNECTIONS, UNKNOWN_CONNECTIONS } = loadSource('source.ts')
+const { ThroughputHistory, RATE_SAMPLE_LIMIT, RATE_WINDOW_MS, RATE_STALE_MS, pruneRateSamples, rateSampleX } = loadSource('throughput-history.ts')
+
+test('throughput uses elapsed time and accepts empty active-connection snapshots', () => {
+    const history = new ThroughputHistory()
+    assert.deepEqual(history.feed({ uploadTotal: 0, downloadTotal: 0, connections: null }, 0), { up: 0, down: 0, at: 0 })
+    assert.deepEqual(history.feed({ uploadTotal: 100, downloadTotal: 300, connections: [] }, 1000), { up: 100, down: 300, at: 1000 })
+    assert.deepEqual(history.feed({ uploadTotal: 250, downloadTotal: 900 }, 2500), { up: 100, down: 400, at: 2500 })
+    assert.deepEqual(history.feed({ uploadTotal: 250, downloadTotal: 900 }, 4500), { up: 0, down: 0, at: 4500 })
+})
+
+test('throughput restarts its baseline after pauses, resets and invalid totals', () => {
+    const history = new ThroughputHistory()
+    history.feed({ uploadTotal: 0, downloadTotal: 0 }, 0)
+    history.feed({ uploadTotal: 100, downloadTotal: 300 }, 1000)
+    const before = history.samples[0].segment
+    const resumedAt = RATE_STALE_MS + 2000
+    assert.equal(history.feed({ uploadTotal: 1e9, downloadTotal: 2e9 }, resumedAt).down, 0, 'a paused stream does not turn missed bytes into a fresh spike')
+    assert.equal(history.feed({ uploadTotal: 1e9 + 100, downloadTotal: 2e9 + 300 }, resumedAt + 1000).down, 300)
+    assert.notEqual(history.samples.at(-1).segment, before, 'the chart does not connect separate measurement periods')
+    assert.equal(history.feed({ uploadTotal: 0, downloadTotal: 0 }, resumedAt + 2000).down, 0, 'a restarted core resets totals')
+    assert.equal(history.feed({ uploadTotal: 100, downloadTotal: NaN }, resumedAt + 3000).down, 0)
+    assert.equal(history.feed({ uploadTotal: 100, downloadTotal: 300 }, resumedAt + 4000).down, 0, 'invalid input also needs a new baseline')
+    assert.equal(history.feed({ uploadTotal: 200, downloadTotal: 600 }, resumedAt + 5000).down, 300)
+})
+
+test('high frequency throughput is duration weighted and retains a bounded minute', () => {
+    const history = new ThroughputHistory()
+    history.feed({ uploadTotal: 0, downloadTotal: 0 }, 0)
+    history.feed({ uploadTotal: 200, downloadTotal: 400 }, 200)
+    history.feed({ uploadTotal: 800, downloadTotal: 1600 }, 800)
+    history.feed({ uploadTotal: 850, downloadTotal: 1700 }, 900)
+    assert.equal(history.samples.length, 1)
+    assert.equal(history.samples[0].span, 900)
+    assert.ok(Math.abs(history.samples[0].up - 850 / 0.9) < 1e-9)
+    for (let now = 1000; now <= 120000; now += 100) history.feed({ uploadTotal: now, downloadTotal: now * 2 }, now)
+    assert.ok(history.samples.length <= RATE_SAMPLE_LIMIT)
+    assert.ok(history.samples.length >= 59, 'a fast sender still retains the whole minute, not just its last 64 messages')
+    assert.ok(history.samples.every(sample => 120000 - sample.at <= RATE_WINDOW_MS))
+    pruneRateSamples(history.samples, 120000 + RATE_WINDOW_MS + 1)
+    assert.equal(history.samples.length, 0, 'paused history expires instead of retaining old samples indefinitely')
+})
+
+test('throughput time positions preserve irregular intervals and pause age', () => {
+    assert.ok(Math.abs(rateSampleX(0, 50000, 600) - 100) < 1e-9)
+    assert.ok(Math.abs(rateSampleX(10000, 50000, 600) - 200) < 1e-9)
+    assert.ok(Math.abs(rateSampleX(11000, 50000, 600) - 210) < 1e-9)
+    assert.equal(rateSampleX(50000, 50000, 600), 600)
+})
+
+test('a new controller never reuses another controller throughput baseline or history', () => {
+    const first = new ThroughputHistory()
+    first.feed({ uploadTotal: 0, downloadTotal: 0 }, 0)
+    first.feed({ uploadTotal: 100, downloadTotal: 200 }, 1000)
+    const second = new ThroughputHistory()
+    assert.deepEqual(second.feed({ uploadTotal: 1e9, downloadTotal: 2e9 }, 2000), { up: 0, down: 0, at: 2000 })
+    assert.equal(second.samples.length, 0)
+    assert.equal(second.feed({ uploadTotal: 1e9 + 100, downloadTotal: 2e9 + 200 }, 3000).down, 200)
+    assert.equal(first.samples.length, 1)
+})
 
 function connection(id, sourceIP = '192.0.2.1', download = 0) {
     return {

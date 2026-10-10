@@ -3,7 +3,7 @@ import classnames from 'classnames'
 import { Fragment, useMemo, useLayoutEffect, useRef, useState, useEffect } from 'react'
 import AutoSizer from 'react-virtualized-auto-sizer'
 
-import { Header, Checkbox, Modal, Icon, Drawer, Card, Button, LineBullet, useLineColor } from '@components'
+import { Header, Checkbox, Modal, Icon, Drawer, Card, Button, LineBullet, RollingBytes, useLineColor } from '@components'
 import { formatDateTime, fromNow } from '@lib/date'
 import { basePath, formatTraffic } from '@lib/helper'
 import { useObject, useVisible } from '@lib/hook'
@@ -12,10 +12,12 @@ import { useClient, useConnectionStreamReader, useI18n } from '@stores'
 
 import { Devices } from './Devices'
 import { ConnectionInfo } from './Info'
+import { ThroughputChart } from './Throughput'
 import { VirtualConnectionTable } from './VirtualTable'
 import { formatConnection } from './helper'
 import { ALL_CONNECTIONS, INTERNAL_CONNECTIONS } from './source'
 import { type Connection, type FormatConnection, useConnections } from './store'
+import { RATE_STALE_MS, ThroughputHistory, type RateReading, type RateSample } from './throughput-history'
 import './style.css'
 
 const Columns = {
@@ -50,6 +52,12 @@ function formatSpeed (upload: number, download: number) {
 const columnHelper = createColumnHelper<FormatConnection>()
 const EMPTY_CONNECTIONS: Connection[] = []
 
+// The lamp before each host: carrying traffic now, open and quiet, or closed.
+function hostState (row: FormatConnection) {
+    if (row.completed) return 'closed'
+    return row.speed.download + row.speed.upload > 0 ? 'flow' : 'open'
+}
+
 export default function Connections () {
     const { translation, lang } = useI18n()
     const t = useMemo(() => translation('Connections').t, [translation])
@@ -76,10 +84,61 @@ export default function Connections () {
     const selectedConnections = connectionsBySource.get(device) ?? EMPTY_CONNECTIONS
     const data = useMemo(() => selectedConnections.map(formatConnection), [selectedConnections])
 
+    // UI only: live rate from consecutive snapshot totals, the last minute of it for the chart,
+    // each source's share of the live traffic, and which rows just arrived.
+    const samples = useRef<RateSample[]>([])
+    const [rate, setRate] = useState<RateReading>({ up: 0, down: 0, at: 0 })
+    // A second, read-only listener on the same stream: it only turns totals into rates.
+    useLayoutEffect(() => {
+        const history = new ThroughputHistory()
+        samples.current = history.samples
+        setRate({ up: 0, down: 0, at: 0 })
+        let stale: ReturnType<typeof setTimeout> | undefined
+        function sample (snapshots: API.Snapshot[]) {
+            for (const snapshot of snapshots) {
+                setRate(history.feed(snapshot, performance.now()))
+            }
+            if (snapshots.length === 0) return
+            clearTimeout(stale)
+            stale = setTimeout(() => setRate({ up: 0, down: 0, at: performance.now() }), RATE_STALE_MS)
+        }
+        connStreamReader?.subscribe('data', sample)
+        return () => {
+            connStreamReader?.unsubscribe('data', sample)
+            clearTimeout(stale)
+        }
+    }, [connStreamReader])
+    const sourceRates = useMemo(() => {
+        const rates = new Map<string, number>()
+        let total = 0
+        for (const [key, bucket] of connectionsBySource) {
+            if (key === ALL_CONNECTIONS) continue
+            let sum = 0
+            for (const connection of bucket) sum += connection.downloadSpeed + connection.uploadSpeed
+            rates.set(key, sum)
+            total += sum
+        }
+        rates.set(ALL_CONNECTIONS, total)
+        return rates
+    }, [connectionsBySource])
+    const seenIDs = useRef<Set<string>>()
+    const freshIDs = useMemo(() => {
+        const previous = seenIDs.current
+        const fresh = new Set<string>()
+        for (const connection of connections) {
+            if (previous === undefined || !previous.has(connection.id)) fresh.add(connection.id)
+        }
+        return fresh
+    }, [connections])
+    useEffect(() => {
+        seenIDs.current = new Set(connections.map(connection => connection.id))
+    }, [connections])
+    const activeCount = useMemo(() => connections.reduce((count, connection) => connection.completed === true ? count : count + 1, 0), [connections])
+
     // table
     const columns = useMemo(
         () => [
-            columnHelper.accessor(Columns.Host, { minSize: 260, size: 260, header: t(`columns.${Columns.Host}`) }),
+            columnHelper.accessor(Columns.Host, { minSize: 260, size: 260, header: t(`columns.${Columns.Host}`), cell: cell => <span className="connections-host" data-state={hostState(cell.row.original)}>{cell.getValue()}</span> }),
             columnHelper.accessor(Columns.Network, { minSize: 80, size: 80, header: t(`columns.${Columns.Network}`) }),
             columnHelper.accessor(Columns.Type, { minSize: 100, size: 100, header: t(`columns.${Columns.Type}`), cell: cell => <span className={classnames('connections-type', { dns: cell.getValue() === 'DNS' })}>{cell.getValue()}</span> }),
             columnHelper.accessor(Columns.Chains, {
@@ -242,29 +301,66 @@ export default function Connections () {
 
     const totals = (
         <span className="connections-traffic" title={t('total.text')}>
-            <span className="connections-traffic-item" title={t('total.upload')}>
-                <Icon type="arrow-up" size={12} className="connections-flow" replay={traffic.uploadTotal} />
-                <span className="reading">{formatTraffic(traffic.uploadTotal)}</span>
-            </span>
+            <span className="connections-traffic-label">{t('rates.total')}</span>
             <span className="connections-traffic-item" title={t('total.download')}>
                 <Icon type="arrow-down" size={12} className="connections-flow" replay={traffic.downloadTotal} />
                 <span className="reading">{formatTraffic(traffic.downloadTotal)}</span>
             </span>
+            <span className="connections-traffic-item" title={t('total.upload')}>
+                <Icon type="arrow-up" size={12} className="connections-flow" replay={traffic.uploadTotal} />
+                <span className="reading">{formatTraffic(traffic.uploadTotal)}</span>
+            </span>
         </span>
     )
 
+    const sourceCount = devices.length
+    const summary = <span className="connections-summary">
+        <span><span className="reading">{activeCount}</span> {t('summary.active')}</span>
+        <span><span className="reading">{sourceCount}</span> {t('summary.sources')}</span>
+    </span>
+
     return (
         <div className="connections-page page">
-            <Header title={t('title')} meta={totals}>
+            <Header title={t('title')} meta={summary}>
                 <Checkbox className="connections-keep" checked={save} onChange={toggleSave}>{t('keepClosed')}</Checkbox>
                 <Button className="connections-close-all" icon="close-all" onClick={show}>{t('closeAll.action')}</Button>
             </Header>
+            <div className="connections-top">
+                <section className="connections-rates connections-panel">
+                    <div className="connections-panel-head">
+                        <h2>{t('rates.title')}</h2>
+                        <span className="connections-panel-tag">{t('rates.chart')}</span>
+                        <span className="connections-legend" aria-hidden="true">
+                            <span><i className="is-down" />{t('rates.download')}</span>
+                            <span><i className="is-up" />{t('rates.upload')}</span>
+                        </span>
+                    </div>
+                    <div className="connections-rate-row">
+                        <div className="connections-rate is-down">
+                            <span className="connections-rate-label">↓ {t('rates.download')}</span>
+                            <RollingBytes className="connections-rate-value" value={rate.down} rate />
+                        </div>
+                        <div className="connections-rate is-up">
+                            <span className="connections-rate-label">↑ {t('rates.upload')}</span>
+                            <RollingBytes className="connections-rate-value" value={rate.up} rate />
+                        </div>
+                        {totals}
+                    </div>
+                    <ThroughputChart samples={samples} updatedAt={rate.at} label={t('rates.chartLabel')} now={t('rates.now')} names={['↓', '↑']} />
+                </section>
+                <section className="connections-sources connections-panel" aria-label={t('filter.sources')}>
+                    <div className="connections-panel-head">
+                        <h2>{t('sourcesTitle')}</h2>
+                        <span className="connections-panel-tag">{t('sourcesHint')}</span>
+                    </div>
+                    <Devices devices={devices} total={connections.length} internalCount={connectionsBySource.get(INTERNAL_CONNECTIONS)?.length ?? 0} selected={device} onChange={setDevice} rates={sourceRates} />
+                </section>
+            </div>
             {save && <div className="connections-history-note" role="status">
                 <Icon type="info" size={14} className="connections-history-icon" />
                 <span>{t('historyLimit')}: <span className="reading">{historyLimit}</span>. {t('retainedOnly')}{discarded > 0 && ' ' + t('historyDiscarded') + ': ' + discarded}</span>
                 <Button type="ghost" size="sm" icon="trash" onClick={clearHistory}>{t('clearHistory')}</Button>
             </div>}
-            <Devices devices={devices} total={connections.length} internalCount={connectionsBySource.get(INTERNAL_CONNECTIONS)?.length ?? 0} selected={device} onChange={setDevice} />
             <Card ref={cardRef} className="connections-card">
                 <div className="connections-viewport">
                     <AutoSizer>
@@ -276,6 +372,7 @@ export default function Connections () {
                             totalWidth={instance.getTotalSize()}
                             centeredColumns={shouldCenter}
                             selectedID={drawerState.visible ? drawerState.selectedID : ''}
+                            freshIDs={freshIDs}
                             onSelect={id => setDrawerState({ visible: true, selectedID: id })} />}
                     </AutoSizer>
                     {data.length === 0 && <div className="connections-empty" role="status">

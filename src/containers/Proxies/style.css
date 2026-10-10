@@ -1,17 +1,50 @@
-.proxy-section + .proxy-section {
-    margin-top: var(--sp-8);
+.proxies-page {
+    gap: var(--sp-5);
+}
+
+.proxies-page > .header-level-1 {
+    margin-bottom: 0;
+}
+
+.proxies-summary {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+}
+
+.proxies-summary .reading {
+    color: var(--text);
+    font-size: var(--t-xs);
+}
+
+.proxies-summary .reading.status-good {
+    color: var(--good);
+}
+
+.proxy-section {
+    margin-top: var(--sp-2);
 }
 
 .proxy-section > .header-level-2 {
     margin-top: 0;
 }
 
-.proxy-groups {
-    overflow: hidden;
+.proxy-section-hint {
+    margin-left: 10px;
+    color: var(--faint);
+    font-family: var(--font-sans);
+    font-size: var(--t-xs);
+    letter-spacing: 0;
 }
 
-.proxy-group-list > li + li {
-    border-top: 1px solid var(--hair);
+.proxy-groups {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: var(--sp-4);
+}
+
+.proxy-groups > li {
+    min-width: 0;
 }
 
 .proxy-break-connections {
@@ -20,26 +53,40 @@
 
 .proxy-provider-list {
     display: grid;
-    gap: var(--sp-3);
+    gap: var(--sp-4);
 }
 
 .proxies-list {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(164px, 1fr));
-    gap: var(--sp-2);
+    grid-template-columns: repeat(auto-fill, minmax(196px, 1fr));
+    gap: var(--sp-3);
 }
 
 .proxies-list > li {
     min-width: 0;
 }
 
+/* Arriving from the traffic map: the tile lights up once. */
+.proxy-item.is-flash {
+    animation: group-flash 1.2s var(--ease-out);
+}
+
 @media (max-width: 768px) {
-    .proxy-section + .proxy-section {
-        margin-top: var(--sp-6);
+    .proxies-page {
+        gap: var(--sp-4);
+    }
+
+    .proxy-groups {
+        grid-template-columns: minmax(0, 1fr);
+        gap: var(--sp-3);
     }
 
     .proxies-list {
-        grid-template-columns: minmax(0, 1fr);
-        gap: 6px;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: var(--sp-2);
+    }
+
+    .proxy-section-hint {
+        display: none;
     }
 }

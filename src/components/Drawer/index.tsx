@@ -6,7 +6,7 @@ import { createPortal } from 'react-dom'
 import { type BaseComponentProps } from '@models/BaseProps'
 
 import '../Card/style.css'
-import { springs } from '../Motion'
+import { springs, useIsPhone } from '../Motion'
 import './style.css'
 
 interface DrawerProps extends BaseComponentProps {
@@ -19,6 +19,8 @@ interface DrawerProps extends BaseComponentProps {
 
 export function Drawer (props: DrawerProps) {
     const portalRef = useRef<HTMLElement>(document.createElement('div'))
+    // Phones get a sheet that rises from the bottom edge; wider screens a panel from the right.
+    const phone = useIsPhone()
 
     useLayoutEffect(() => {
         const current = portalRef.current
@@ -27,7 +29,7 @@ export function Drawer (props: DrawerProps) {
     }, [])
 
     const container = (
-        <div className={classnames(props.className, 'drawer-layer')}>
+        <div className={classnames(props.className, 'drawer-layer', { 'is-open': props.visible })}>
             <motion.div
                 className={classnames(
                     'card drawer',
@@ -37,8 +39,10 @@ export function Drawer (props: DrawerProps) {
                 style={{ width: props.width ?? 400, maxWidth: '100%' }}
                 initial={false}
                 animate={props.visible
-                    ? { x: 0, visibility: 'visible' }
-                    : { x: '110%', transitionEnd: { visibility: 'hidden' } }}
+                    ? { x: 0, y: 0, visibility: 'visible' }
+                    : phone
+                        ? { x: 0, y: '110%', transitionEnd: { visibility: 'hidden' } }
+                        : { x: '110%', y: 0, transitionEnd: { visibility: 'hidden' } }}
                 transition={springs.sheet}
             >
                 <section className="drawer-inner" aria-label={props.label} aria-hidden={!props.visible}>

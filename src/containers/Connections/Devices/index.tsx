@@ -2,7 +2,7 @@ import classnames from 'classnames'
 import { AnimatePresence, LayoutGroup, motion, useIsPresent } from 'motion/react'
 import { forwardRef, useId, useMemo } from 'react'
 
-import { springs } from '@components'
+import { formatRate, springs } from '@components'
 import { type BaseComponentProps } from '@models'
 import { useI18n } from '@stores'
 
@@ -15,6 +15,8 @@ interface DevicesProps extends BaseComponentProps {
     selected: string
     total: number
     internalCount: number
+    // UI only: live traffic per source key, and the total under ALL_CONNECTIONS
+    rates?: ReadonlyMap<string, number>
     onChange?: (label: string) => void
 }
 
@@ -23,7 +25,19 @@ interface SourceButtonProps {
     label: string
     count: number
     selected: boolean
+    rate?: number
+    total?: number
     onChange?: (key: string) => void
+}
+
+// The share ring and live rate carry no text nodes and stay out of the
+// accessible name, so a source still reads as "label (count)".
+function ShareMark ({ rate = 0, total = 0 }: { rate?: number, total?: number }) {
+    const share = total > 0 ? Math.min(1, rate / total) : 0
+    return <>
+        <span className="device-ring" aria-hidden="true" style={{ '--share': share } as React.CSSProperties} />
+        <span className="device-rate" aria-hidden="true" data-rate={rate >= 1 ? `${Math.round(share * 100)}% · ${formatRate(rate)}` : '—'} />
+    </>
 }
 
 const SourceButton = forwardRef<HTMLButtonElement, SourceButtonProps>(function SourceButton (props, ref) {
@@ -47,6 +61,7 @@ const SourceButton = forwardRef<HTMLButtonElement, SourceButtonProps>(function S
             className={classnames('connections-devices-item', { selected })}
             onClick={() => { if (isPresent) props.onChange?.(props.sourceKey) }}>
             {selected && <motion.span className="device-highlight" layoutId="device-highlight" transition={springs.snap} />}
+            <ShareMark rate={props.rate} total={props.total} />
             <span className="device-label">{ props.label }</span> <span className="device-count">({ props.count })</span>
         </motion.button>
     )
@@ -59,6 +74,7 @@ export function Devices (props: DevicesProps) {
 
     const { className, style } = props
     const classname = classnames('connections-source-filters', className)
+    const totalRate = props.rates?.get(ALL_CONNECTIONS) ?? 0
     function label (device: ConnectionDevice) {
         if (device.key === UNKNOWN_CONNECTIONS) return t('filter.unknown')
         return device.label
@@ -69,14 +85,15 @@ export function Devices (props: DevicesProps) {
             <div className={classname} style={style} role="group" aria-label={t('filter.sources')}>
                 <button type="button" aria-pressed={props.selected === ALL_CONNECTIONS} className={classnames('connections-devices-item', { selected: props.selected === ALL_CONNECTIONS })} onClick={() => props.onChange?.(ALL_CONNECTIONS)}>
                     {props.selected === ALL_CONNECTIONS && <motion.span className="device-highlight" layoutId="device-highlight" transition={springs.snap} />}
+                    <ShareMark rate={totalRate} total={totalRate} />
                     <span className="device-label">{ t('filter.all') }</span> <span className="device-count">({ props.total })</span>
                 </button>
                 <AnimatePresence initial={false} mode="popLayout">
-                    {props.internalCount > 0 && <SourceButton key={INTERNAL_CONNECTIONS} sourceKey={INTERNAL_CONNECTIONS} label="mihomo" count={props.internalCount} selected={props.selected === INTERNAL_CONNECTIONS} onChange={props.onChange} />}
+                    {props.internalCount > 0 && <SourceButton key={INTERNAL_CONNECTIONS} sourceKey={INTERNAL_CONNECTIONS} label="mihomo" count={props.internalCount} selected={props.selected === INTERNAL_CONNECTIONS} rate={props.rates?.get(INTERNAL_CONNECTIONS)} total={totalRate} onChange={props.onChange} />}
                     {
                         props.devices.map(
                             device => device.key !== INTERNAL_CONNECTIONS && (
-                                <SourceButton key={device.key} sourceKey={device.key} label={label(device)} count={device.number} selected={props.selected === device.key} onChange={props.onChange} />
+                                <SourceButton key={device.key} sourceKey={device.key} label={label(device)} count={device.number} selected={props.selected === device.key} rate={props.rates?.get(device.key)} total={totalRate} onChange={props.onChange} />
                             ),
                         )
                     }

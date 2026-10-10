@@ -3,6 +3,11 @@
     min-height: 0;
 }
 
+.logs-count .reading {
+    color: var(--text);
+    font-size: var(--t-xs);
+}
+
 .logs-level-label {
     color: var(--text-3);
     font-size: var(--t-xs);
@@ -19,6 +24,17 @@
     flex-direction: column;
     min-height: 320px;
     overflow: hidden;
+    transition: border-color var(--dur-3) var(--ease-out), box-shadow var(--dur-3) var(--ease-out);
+}
+
+.logs-card.card {
+    background: var(--panel-solid);
+}
+
+/* Paused: the console holds its breath, edged in amber. */
+.logs-card.is-paused {
+    border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+    box-shadow: var(--shadow-card), 0 0 40px -18px color-mix(in srgb, var(--warn) 60%, transparent);
 }
 
 .logs-panel {
@@ -29,15 +45,25 @@
     overflow-y: auto;
     font-family: var(--font-mono);
     font-size: var(--t-xs);
-    line-height: 1.6;
+    font-stretch: var(--mono-dense);
+    line-height: 1.65;
+    transition: opacity 220ms var(--ease-out), filter 220ms var(--ease-out), transform 220ms var(--ease-out);
+}
+
+/* Clearing: the lines sweep up and away before the view empties. */
+.logs-card.is-clearing .logs-panel {
+    opacity: 0;
+    filter: blur(4px);
+    transform: translateY(-12px);
 }
 
 .log-line {
+    position: relative;
     display: grid;
     grid-template-columns: max-content 58px minmax(0, 1fr);
-    gap: 12px;
+    gap: 14px;
     align-items: baseline;
-    padding: 3px var(--sp-4);
+    padding: 3px 18px;
     color: var(--text-2);
 }
 
@@ -45,19 +71,48 @@
     background: var(--row-hover);
 }
 
-.log-line:last-child {
-    animation: fade-up var(--dur-2) var(--ease-out);
+/* The newest line arrives with a short lit edge. */
+@media (prefers-reduced-motion: no-preference) {
+    .log-line:last-child {
+        animation: log-in 420ms var(--ease-out);
+    }
+
+    .log-line:last-child::before {
+        content: '';
+        position: absolute;
+        top: 4px;
+        bottom: 4px;
+        left: 0;
+        width: 2px;
+        border-radius: 0 2px 2px 0;
+        background: var(--accent);
+        box-shadow: 0 0 8px var(--accent);
+        animation: log-lamp 1.2s var(--ease-out) forwards;
+    }
+}
+
+@keyframes log-in {
+    from {
+        opacity: 0;
+        transform: translateY(6px);
+    }
+}
+
+@keyframes log-lamp {
+    to {
+        opacity: 0;
+    }
 }
 
 .log-time {
-    color: var(--text-3);
+    color: var(--faint);
     font-variant-numeric: tabular-nums;
 }
 
 .log-level {
     font-size: 10px;
-    font-weight: 640;
-    letter-spacing: 0.04em;
+    font-weight: 600;
+    letter-spacing: 0.06em;
 }
 
 .log-payload {
@@ -66,12 +121,16 @@
 }
 
 .log-debug .log-level { color: var(--text-3); }
-.log-info .log-level { color: var(--link); }
+.log-info .log-level { color: var(--accent); }
 .log-warning .log-level { color: var(--warn); }
 .log-error .log-level { color: var(--bad); }
 
 .log-error {
-    background: color-mix(in srgb, var(--bad-bg) 55%, transparent);
+    background: color-mix(in srgb, var(--bad-bg) 60%, transparent);
+}
+
+.log-warning .log-payload {
+    color: color-mix(in srgb, var(--warn) 30%, var(--text));
 }
 
 .logs-empty {
@@ -91,7 +150,76 @@
     height: 8px;
     border-radius: var(--r-round);
     background: var(--good);
-    animation: live-pulse 1.6s var(--ease-out) infinite;
+}
+
+/* Pause notice: floats over the bottom of the log, counts held lines, offers to resume. */
+.logs-paused {
+    position: absolute;
+    right: 16px;
+    bottom: 14px;
+    z-index: 2;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 12px;
+    max-width: calc(100% - 32px);
+    padding: 6px 6px 6px 14px;
+    border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+    border-radius: var(--r-round);
+    background: color-mix(in srgb, var(--panel-solid) 92%, transparent);
+    box-shadow: var(--shadow-pop);
+    color: var(--text-2);
+    font-size: var(--t-xs);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+}
+
+.logs-paused-lamp {
+    width: 7px;
+    height: 7px;
+    border-radius: 2px;
+    background: var(--warn);
+    box-shadow: 0 0 8px var(--warn);
+    animation: soft-blink 1.4s ease-in-out infinite;
+}
+
+.logs-paused-text {
+    color: var(--warn);
+    font-weight: 600;
+}
+
+.logs-paused-count b {
+    display: inline-block;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    animation: flip-in var(--dur-3) var(--ease-out);
+}
+
+.logs-paused-resume {
+    height: 28px;
+    padding: 0 12px;
+    border-radius: var(--r-round);
+    background: var(--accent-grad);
+    color: var(--on-accent);
+    font-weight: 600;
+    box-shadow: 0 0 18px -6px var(--glow);
+    transition: transform var(--dur-1) var(--ease-out), filter var(--dur-2) var(--ease-out);
+}
+
+.logs-paused-resume:hover {
+    filter: brightness(1.08);
+}
+
+.logs-paused-resume:active {
+    transform: scale(0.96);
+}
+
+.logs-pause[aria-pressed='true'] {
+    --btn-bg: linear-gradient(var(--panel-solid), var(--panel-solid)) padding-box, linear-gradient(var(--warn), var(--warn)) border-box;
+    --btn-fg: var(--warn);
+
+    box-shadow: 0 0 20px -8px var(--warn);
 }
 
 @media (max-width: 768px) {
@@ -112,5 +240,16 @@
 
     .log-payload {
         grid-column: 2;
+    }
+
+    .logs-paused {
+        right: 10px;
+        bottom: 10px;
+        left: 10px;
+        max-width: none;
+    }
+
+    .logs-paused-resume {
+        margin-left: auto;
     }
 }

@@ -30,9 +30,16 @@
 
 .header-title {
     color: var(--text);
-    font-weight: 640;
-    letter-spacing: -0.012em;
+    font-weight: 600;
+    letter-spacing: -0.015em;
     line-height: 1.2;
+}
+
+/* Page titles carry their readings on a line beneath. */
+.header-level-1 .header-heading {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
 }
 
 .header-level-1 .header-title {
@@ -40,7 +47,7 @@
 }
 
 .header-level-2 .header-title {
-    font-size: var(--t-lg);
+    font-size: 1.0625rem;
 }
 
 .header-meta {
@@ -50,6 +57,12 @@
     gap: var(--sp-1) var(--sp-3);
     color: var(--text-3);
     font-size: var(--t-sm);
+}
+
+.header-level-2 .header-meta {
+    font-family: var(--font-mono);
+    font-size: var(--t-2xs);
+    letter-spacing: 0.04em;
 }
 
 .header-actions {

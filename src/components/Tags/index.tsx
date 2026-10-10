@@ -12,7 +12,7 @@ import { delayStatus } from '../Route'
 import './style.css'
 
 interface TagsProps extends BaseComponentProps {
-    // identifies the line, so its "you are here" marker can travel between stations
+    // identifies the group, so its lit outline can glide between members
     id?: string
     data: string[]
     onClick: (name: string) => void | Promise<void>
@@ -22,19 +22,21 @@ interface TagsProps extends BaseComponentProps {
     select: string
     rowHeight: number
     canClick: boolean
+    // rows shown while collapsed
+    rows?: number
 }
 
-// A policy group drawn as a transit line: every member is a station on it and
-// the selected node carries the "you are here" marker.
+// A policy group's members as chips. The current member carries a lit gradient
+// outline that glides to whichever member is chosen next.
 export function Tags (props: TagsProps) {
-    const { id, className, data, onClick, select, canClick, errSet, readings, line, rowHeight } = props
+    const { id, className, data, onClick, select, canClick, errSet, readings, line, rowHeight, rows = 2 } = props
 
     const { translation } = useI18n()
     const { t } = translation('Proxies')
     const [expand, setExpand] = useState(false)
     const [fullHeight, setFullHeight] = useState(rowHeight)
     const [currentRow, setCurrentRow] = useState(0)
-    // UI only: the station just chosen, until the controller confirms it.
+    // UI only: the member just chosen, until the controller confirms it.
     const [pending, setPending] = useState<string>()
 
     const ulRef = useRef<HTMLUListElement>(null)
@@ -43,7 +45,7 @@ export function Tags (props: TagsProps) {
         if (ul == null) return
         const measure = () => {
             setFullHeight(ul.offsetHeight)
-            const current = ul.querySelector<HTMLElement>('.station.is-current')
+            const current = ul.querySelector<HTMLElement>('.chip.is-current')
             setCurrentRow(current == null ? 0 : Math.round(current.offsetTop / rowHeight))
         }
         measure()
@@ -56,11 +58,12 @@ export function Tags (props: TagsProps) {
         if (pending !== undefined && pending === select) setPending(undefined)
     }, [pending, select])
 
-    const showExtend = fullHeight > rowHeight + 2
+    const collapsedHeight = rows * rowHeight
+    const showExtend = fullHeight > collapsedHeight + 2
     const collapsed = showExtend && !expand
-    const height = collapsed ? rowHeight : fullHeight
-    // Collapsed, the line shows the row that holds "you are here".
-    const shift = collapsed ? currentRow * rowHeight : 0
+    const height = collapsed ? collapsedHeight : fullHeight
+    // Collapsed, the window keeps the row that holds the current member in view.
+    const shift = collapsed ? Math.max(0, currentRow - rows + 1) * rowHeight : 0
     const handleClick = canClick ? onClick : noop
 
     function choose (name: string) {
@@ -68,52 +71,49 @@ export function Tags (props: TagsProps) {
         Promise.resolve(handleClick(name)).finally(() => setPending(value => value === name ? undefined : value))
     }
 
-    function toggleExtend () {
-        setExpand(!expand)
-    }
-
-    const stations = data.map(name => {
+    const chips = data.map(name => {
         const current = select === name
         const failed = errSet?.has(name) ?? false
         const delay = readings?.get(name) ?? 0
         const status = failed ? 'bad' : delayStatus(delay)
         const content = <>
-            <span className="station-dot" aria-hidden="true">
-                {current && <motion.span className="station-here" layoutId={id ? `here-${id}` : undefined} transition={springs.glide} />}
-            </span>
-            <span className="station-name">{name}</span>
-            {delay > 0 && !failed && <span className={classnames('station-reading num', `status-${status}`)} key={delay}>{delay}</span>}
+            {current && <motion.span className="chip-here" layoutId={id ? `here-${id}` : undefined} transition={springs.glide} aria-hidden="true" />}
+            <span className="chip-dot" aria-hidden="true" />
+            <span className="chip-name">{name}</span>
+            {failed
+                ? <span className="chip-reading status-bad">{t('timeout')}</span>
+                : delay > 0 && <span className={classnames('chip-reading num', `status-${status}`)} key={delay}>{delay}</span>}
         </>
         return (
-            <li className={classnames('station', { 'is-current': current, 'is-failed': failed, 'is-pending': pending === name })} key={name}>
+            <li className={classnames('chip', { 'is-current': current, 'is-failed': failed, 'is-pending': pending === name })} key={name}>
                 {canClick
                     ? <motion.button
                         type="button"
-                        className="station-body"
+                        className="chip-body"
                         aria-pressed={current}
                         aria-busy={pending === name || undefined}
                         title={name}
-                        whileTap={{ scale: 0.95 }}
+                        whileTap={{ scale: 0.94 }}
                         transition={springs.snap}
                         onClick={() => choose(name)}>{content}</motion.button>
-                    : <span className="station-body" aria-current={current ? 'true' : undefined} title={name}>{content}</span>}
+                    : <span className="chip-body" aria-current={current ? 'true' : undefined} title={name}>{content}</span>}
             </li>
         )
     })
 
     return (
-        <div className={classnames('stations-wrap', className)} style={{ '--line': line ?? 'var(--idle)', '--row': `${rowHeight}px` } as React.CSSProperties}>
-            <motion.div className="stations-viewport" initial={false} animate={{ height }} transition={springs.snap}>
-                <motion.ul ref={ulRef} className={classnames('stations', { expand, 'is-static': !canClick })} initial={false} animate={{ y: -shift }} transition={springs.glide}>
-                    { stations }
+        <div className={classnames('chips-wrap', className)} style={{ '--line': line ?? 'var(--accent)', '--row': `${rowHeight}px` } as React.CSSProperties}>
+            <motion.div className="chips-viewport" initial={false} animate={{ height }} transition={springs.snap}>
+                <motion.ul ref={ulRef} className={classnames('chips', { expand, 'is-static': !canClick })} initial={false} animate={{ y: -shift }} transition={springs.glide}>
+                    { chips }
                 </motion.ul>
             </motion.div>
             {
                 showExtend &&
-                <button type="button" className="stations-toggle" aria-expanded={expand} onClick={toggleExtend}>
+                <button type="button" className="chips-toggle" aria-expanded={expand} onClick={() => setExpand(!expand)}>
                     <span>{ expand ? t('collapseText') : t('expandText') }</span>
-                    <span className="stations-count num">{ data.length }</span>
-                    <motion.span className="stations-caret" animate={{ rotate: expand ? 180 : 0 }} transition={springs.snap}>
+                    <span className="chips-count num">{ data.length }</span>
+                    <motion.span className="chips-caret" animate={{ rotate: expand ? 180 : 0 }} transition={springs.snap}>
                         <Icon type="triangle-down" size={12} />
                     </motion.span>
                 </button>

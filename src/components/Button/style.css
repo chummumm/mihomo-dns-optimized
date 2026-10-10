@@ -2,38 +2,44 @@
     --btn-bg: var(--panel);
     --btn-fg: var(--text);
     --btn-border: var(--hair-2);
-    --btn-hover: var(--sunken);
+    --btn-hover: var(--panel);
+    --btn-hover-border: color-mix(in srgb, var(--accent) 45%, transparent);
 
     position: relative;
     display: inline-flex;
     flex-shrink: 0;
     align-items: center;
     justify-content: center;
-    gap: 6px;
+    gap: 8px;
     height: var(--ctl-h);
-    padding: 0 12px;
+    padding: 0 14px;
+    overflow: hidden;
     border: 1px solid var(--btn-border);
     border-radius: var(--r-ctl);
     background: var(--btn-bg);
     color: var(--btn-fg);
     font-size: var(--t-sm);
-    font-weight: 520;
+    font-weight: 560;
     line-height: 1;
     white-space: nowrap;
     user-select: none;
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
     transition:
-        background-color var(--dur-1) var(--ease-out),
-        border-color var(--dur-1) var(--ease-out),
-        color var(--dur-1) var(--ease-out),
+        background-color var(--dur-2) var(--ease-out),
+        border-color var(--dur-2) var(--ease-out),
+        box-shadow var(--dur-3) var(--ease-out),
+        color var(--dur-2) var(--ease-out),
         transform var(--dur-1) var(--ease-out);
 }
 
 .button:hover:not(:disabled) {
+    border-color: var(--btn-hover-border);
     background: var(--btn-hover);
 }
 
 .button:active:not(:disabled) {
-    transform: translateY(1px) scale(0.98);
+    transform: scale(0.97);
 }
 
 .button:disabled,
@@ -49,8 +55,10 @@
 }
 
 .button-sm {
+    gap: 6px;
     height: var(--ctl-h-sm);
-    padding: 0 10px;
+    padding: 0 11px;
+    border-radius: 9px;
     font-size: var(--t-xs);
 }
 
@@ -63,48 +71,75 @@
     width: var(--ctl-h-sm);
 }
 
+/* Primary: the flow gradient, with a sheen that keeps passing while it works. */
 .button-primary {
-    --btn-bg: var(--ink);
-    --btn-fg: var(--on-ink);
-    --btn-border: var(--ink);
-    --btn-hover: var(--ink-hover);
+    --btn-bg: var(--accent-grad);
+    --btn-fg: var(--on-accent);
+    --btn-border: transparent;
+    --btn-hover: var(--accent-grad);
+    --btn-hover-border: transparent;
+
+    font-weight: 640;
+    box-shadow: 0 0 26px -6px var(--glow);
+}
+
+.button-primary:hover:not(:disabled) {
+    box-shadow: 0 0 32px -4px var(--glow);
+    filter: brightness(1.06);
+}
+
+.button-primary::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(100deg, transparent 30%, rgb(255 255 255 / 45%) 50%, transparent 70%);
+    transform: translateX(-120%);
+    pointer-events: none;
+}
+
+.button-primary.button-loading::after {
+    animation: sheen 1.1s linear infinite;
+}
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+    .button-primary:not(.button-loading):hover::after {
+        animation: sheen 900ms var(--ease-out) 1;
+    }
 }
 
 .button-danger {
-    --btn-bg: var(--bad);
-    --btn-fg: #fff;
-    --btn-border: var(--bad);
-    --btn-hover: color-mix(in srgb, var(--bad) 86%, #000);
+    --btn-bg: color-mix(in srgb, var(--bad) 14%, transparent);
+    --btn-fg: var(--bad);
+    --btn-border: color-mix(in srgb, var(--bad) 40%, transparent);
+    --btn-hover: color-mix(in srgb, var(--bad) 22%, transparent);
+    --btn-hover-border: var(--bad);
 }
 
 .button-success {
-    --btn-bg: var(--good);
-    --btn-fg: #fff;
-    --btn-border: var(--good);
-    --btn-hover: color-mix(in srgb, var(--good) 86%, #000);
+    --btn-bg: color-mix(in srgb, var(--good) 14%, transparent);
+    --btn-fg: var(--good);
+    --btn-border: color-mix(in srgb, var(--good) 40%, transparent);
+    --btn-hover: color-mix(in srgb, var(--good) 22%, transparent);
+    --btn-hover-border: var(--good);
 }
 
 .button-warning {
-    --btn-bg: var(--warn);
-    --btn-fg: #fff;
-    --btn-border: var(--warn);
-    --btn-hover: color-mix(in srgb, var(--warn) 86%, #000);
-}
-
-@media (prefers-color-scheme: dark) {
-    .button-danger,
-    .button-success,
-    .button-warning {
-        --btn-fg: #0a0d12;
-        --btn-hover: color-mix(in srgb, var(--btn-bg) 86%, #fff);
-    }
+    --btn-bg: color-mix(in srgb, var(--warn) 14%, transparent);
+    --btn-fg: var(--warn);
+    --btn-border: color-mix(in srgb, var(--warn) 40%, transparent);
+    --btn-hover: color-mix(in srgb, var(--warn) 22%, transparent);
+    --btn-hover-border: var(--warn);
 }
 
 .button-ghost {
     --btn-bg: transparent;
     --btn-fg: var(--text-2);
     --btn-border: transparent;
-    --btn-hover: var(--sunken);
+    --btn-hover: var(--hover);
+    --btn-hover-border: transparent;
+
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
 }
 
 .button-ghost:hover:not(:disabled) {
@@ -112,10 +147,12 @@
 }
 
 .button[aria-pressed='true'] {
-    --btn-bg: var(--ink);
-    --btn-fg: var(--on-ink);
-    --btn-border: var(--ink);
-    --btn-hover: var(--ink-hover);
+    --btn-bg: linear-gradient(var(--panel-solid), var(--panel-solid)) padding-box, var(--accent-grad) border-box;
+    --btn-fg: var(--text);
+    --btn-border: transparent;
+    --btn-hover: var(--btn-bg);
+
+    box-shadow: 0 0 20px -6px var(--glow);
 }
 
 .button-spinner {
@@ -128,6 +165,7 @@
 }
 
 .button-label {
+    position: relative;
     overflow: hidden;
     line-height: 1.35;
     text-overflow: ellipsis;

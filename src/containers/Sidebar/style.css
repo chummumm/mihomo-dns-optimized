@@ -1,8 +1,9 @@
-/* The wayfinding rail: navigation drawn as a line with stations. */
+/* The rail: a column of glowing tiles; a lit tile glides to the current page. */
 
 .sidebar {
-    --item-h: 44px;
-    --station-x: 26px;
+    --item-h: 60px;
+    --item-w: 64px;
+    --item-gap: 6px;
 
     position: fixed;
     top: 0;
@@ -11,32 +12,42 @@
     z-index: var(--z-rail);
     display: flex;
     flex-direction: column;
+    align-items: center;
     width: var(--rail-w);
-    padding: var(--sp-5) var(--sp-3) var(--sp-4);
+    padding: var(--sp-4) 0 var(--sp-4);
     border-right: 1px solid var(--rail-edge);
     background: var(--rail);
     color: var(--rail-text);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+    backdrop-filter: blur(16px) saturate(140%);
     user-select: none;
 }
 
 .sidebar-brand {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    height: 40px;
-    padding-left: 8px;
-    margin-bottom: var(--sp-6);
+    display: grid;
+    place-items: center;
+    margin-bottom: var(--sp-5);
 }
 
 .sidebar-logo {
-    width: 34px;
-    height: 34px;
+    width: 38px;
+    height: 38px;
+    filter: drop-shadow(0 0 10px var(--glow));
+    transition: transform var(--dur-spring) var(--ease-spring), filter var(--dur-3) var(--ease-out);
+}
+
+.sidebar-brand:hover .sidebar-logo {
+    filter: drop-shadow(0 0 16px var(--glow));
+    transform: rotate(-6deg) scale(1.06);
 }
 
 .sidebar-name {
-    font-size: var(--t-lg);
-    font-weight: 680;
-    letter-spacing: -0.01em;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
 }
 
 .sidebar-route {
@@ -45,38 +56,33 @@
     min-height: 0;
 }
 
-/* The line through every station */
 .sidebar-menu {
     position: relative;
-}
-
-.sidebar-menu::before {
-    content: '';
-    position: absolute;
-    top: calc(var(--item-h) / 2);
-    bottom: calc(var(--item-h) / 2);
-    left: calc(var(--station-x) - 1.5px);
-    width: 3px;
-    border-radius: 2px;
-    background: var(--rail-line);
+    display: grid;
+    gap: var(--item-gap);
 }
 
 .sidebar-menu .item {
     position: relative;
+    z-index: 1;
+    width: var(--item-w);
     height: var(--item-h);
 }
 
 .item-link {
     display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 10px;
+    justify-content: center;
+    gap: 5px;
     height: 100%;
-    padding: 0 10px 0 calc(var(--station-x) + 16px);
-    border-radius: var(--r-ctl);
+    padding-top: 2px;
+    border-radius: 14px;
     color: var(--rail-text-2);
-    font-size: var(--t-md);
+    font-size: var(--t-2xs);
     font-weight: 500;
-    transition: color var(--dur-2) var(--ease-out), background-color var(--dur-2) var(--ease-out);
+    letter-spacing: 0.01em;
+    transition: color var(--dur-3) var(--ease-out), background-color var(--dur-2) var(--ease-out);
 }
 
 .item-link:hover {
@@ -85,43 +91,69 @@
 }
 
 .item-link.active {
-    color: var(--rail-text);
-    font-weight: 620;
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.item-link.active:hover {
+    background: transparent;
 }
 
 .item-link:focus-visible {
-    outline-color: var(--signal);
+    outline-color: var(--focus);
     outline-offset: -2px;
 }
 
-.item-station {
-    position: absolute;
-    top: calc(50% - 5px);
-    left: calc(var(--station-x) - 5px);
-    width: 10px;
-    height: 10px;
-    border: 2px solid var(--rail-line);
-    border-radius: var(--r-round);
-    background: var(--rail);
-    transition: border-color var(--dur-2) var(--ease-out);
-}
-
-.item-link:hover .item-station {
-    border-color: var(--rail-text-2);
-}
-
 .item-icon {
-    opacity: 0.85;
+    transition: filter var(--dur-3) var(--ease-out);
 }
 
 .item-link.active .item-icon {
-    color: var(--signal);
-    opacity: 1;
+    filter: drop-shadow(0 0 6px var(--glow));
+}
+
+.item-label {
+    max-width: 100%;
+    overflow: hidden;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* The lit tile: glides to the current page. */
+.sidebar-marker {
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 0;
+    width: var(--item-w);
+    height: var(--item-h);
+    border-radius: 14px;
+    background: linear-gradient(160deg, color-mix(in srgb, var(--accent) 18%, transparent), color-mix(in srgb, var(--accent-2) 8%, transparent));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 34%, transparent), 0 0 26px -6px var(--glow);
+    pointer-events: none;
+}
+
+/* A short bar on the rail edge marks the tile, like an indicator lamp. */
+.sidebar-marker::before {
+    content: '';
+    position: absolute;
+    top: 18px;
+    bottom: 18px;
+    left: -10px;
+    width: 3px;
+    border-radius: 2px;
+    background: var(--accent-grad);
+    box-shadow: 0 0 10px var(--accent);
+}
+
+.sidebar-marker-mobile {
+    display: none;
 }
 
 /*
  * Each destination has its own small gesture: a pose on hover and an arrival when it becomes
- * the current page. The arrival runs as the marker glides in, so the two read as one move.
+ * the current page. The arrival runs as the tile glides in, so the two read as one move.
  */
 .icon-nav-rules > svg {
     transform-origin: 50% 94%;
@@ -159,9 +191,17 @@
     .item-link.active .icon-nav-settings > svg {
         animation-name: nav-arrive-settings;
     }
+
+    .item-link.active .item-label {
+        animation: label-arrive 420ms var(--ease-out) 40ms backwards;
+    }
 }
 
 @media (hover: hover) and (prefers-reduced-motion: no-preference) {
+    .item-link .item-icon > svg {
+        transition: transform var(--dur-icon) var(--ease-icon);
+    }
+
     .item-link:hover .icon-nav-proxies > svg {
         transform: translateX(2px);
     }
@@ -190,6 +230,13 @@
 @keyframes nav-arrive {
     from {
         transform: scale(0.6);
+    }
+}
+
+@keyframes label-arrive {
+    from {
+        opacity: 0.4;
+        transform: translateY(3px);
     }
 }
 
@@ -256,94 +303,72 @@
     }
 }
 
-/* You are here: slides along the line to the current page */
-.sidebar-marker {
-    position: absolute;
-    top: calc(var(--item-h) / 2 - 9px);
-    left: calc(var(--station-x) - 9px);
-    z-index: 1;
-    width: 18px;
-    height: 18px;
-    border: 4px solid var(--signal);
-    border-radius: var(--r-round);
-    background: var(--rail);
-    box-shadow: 0 0 0 3px var(--rail);
-    pointer-events: none;
+/* Controller status at the foot of the rail */
+.sidebar-version {
+    display: grid;
+    justify-items: center;
+    gap: 4px;
+    width: 100%;
+    padding: var(--sp-3) 6px 0;
+    font-size: var(--t-2xs);
 }
 
-.sidebar-marker-mobile {
+.sidebar-live {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--rail-text-2);
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.sidebar-live-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: var(--r-round);
+    background: var(--good);
+}
+
+.sidebar-version.is-offline .sidebar-live-dot {
+    background: var(--bad);
+    animation: soft-blink 1.4s ease-in-out infinite;
+}
+
+.sidebar-version.is-offline .sidebar-live-dot::after {
     display: none;
 }
 
-.sidebar-version {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: var(--sp-3) 8px 0;
-    border-top: 1px solid var(--rail-line);
-    font-size: var(--t-xs);
-}
-
-.sidebar-version-label {
-    color: var(--rail-text-2);
-}
-
 .sidebar-version-text {
-    color: var(--rail-text);
+    max-width: 100%;
+    overflow: hidden;
+    color: var(--faint);
     font-family: var(--font-mono);
-    font-size: var(--t-2xs);
-    overflow-wrap: anywhere;
+    font-size: 8.5px;
+    font-stretch: var(--mono-dense);
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .sidebar-version-premium {
-    align-self: flex-start;
-    margin-top: 4px;
-    padding: 1px 6px;
-    border-radius: var(--r-chip);
-    background: var(--signal);
-    color: #141e2f;
+    padding: 1px 5px;
+    border-radius: 5px;
+    background: var(--accent-grad);
+    color: var(--on-accent);
+    font-size: 9px;
     font-weight: 600;
 }
 
-/* Compact rail on small laptops and tablets */
-@media (max-width: 1023px) and (min-width: 769px) {
-    .sidebar {
-        --station-x: 26px;
-
-        padding-right: var(--sp-2);
-        padding-left: var(--sp-2);
-    }
-
-    .sidebar-brand {
-        justify-content: center;
-        padding-left: 0;
-    }
-
-    .sidebar-name,
-    .item-label,
-    .sidebar-version {
-        position: absolute;
-        width: 1px;
-        height: 1px;
-        overflow: hidden;
-        clip: rect(0, 0, 0, 0);
-        white-space: nowrap;
-    }
-
-    .item-link {
-        padding-left: 36px;
-    }
-}
-
-/* Phones: a bottom bar of stops */
+/* Phones: a frosted bar of tiles along the bottom edge */
 @media (max-width: 768px) {
     .sidebar {
         top: auto;
         right: 0;
+        flex-direction: row;
         width: 100%;
         height: calc(var(--bar-h) + env(safe-area-inset-bottom));
-        flex-direction: row;
-        padding: 0 4px env(safe-area-inset-bottom);
+        padding: 5px 6px calc(5px + env(safe-area-inset-bottom));
         border-top: 1px solid var(--rail-edge);
         border-right: 0;
     }
@@ -355,55 +380,19 @@
     }
 
     .sidebar-route {
+        width: 100%;
         height: 100%;
     }
 
     .sidebar-menu {
         display: flex;
+        gap: 0;
         height: 100%;
-    }
-
-    /* The line runs across the top of the bar, one station per stop. */
-    .sidebar-menu::before {
-        top: 0;
-        right: calc(50% / var(--count-m));
-        bottom: auto;
-        left: calc(50% / var(--count-m));
-        width: auto;
-        height: 3px;
-    }
-
-    .item-station {
-        top: -3.5px;
-        left: calc(50% - 5px);
-    }
-
-    .sidebar-marker-mobile {
-        position: absolute;
-        top: -7.5px;
-        left: 0;
-        z-index: 1;
-        display: block;
-        width: calc(100% / var(--count-m));
-        height: 18px;
-        pointer-events: none;
-    }
-
-    .sidebar-marker-mobile::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: calc(50% - 9px);
-        width: 18px;
-        height: 18px;
-        border: 4px solid var(--signal);
-        border-radius: var(--r-round);
-        background: var(--rail);
-        box-shadow: 0 0 0 3px var(--rail);
     }
 
     .sidebar-menu .item {
         flex: 1;
+        width: auto;
         min-width: 0;
         height: 100%;
     }
@@ -413,23 +402,32 @@
     }
 
     .item-link {
-        position: relative;
-        flex-direction: column;
-        justify-content: center;
         gap: 3px;
-        padding: 6px 2px 0;
-        border-radius: 0;
-        font-size: var(--t-2xs);
+        padding: 0 2px;
+        border-radius: 14px;
     }
 
     .item-link:hover {
         background: transparent;
     }
 
-    .item-label {
-        max-width: 100%;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+    .sidebar-marker-mobile {
+        position: absolute;
+        top: 0;
+        left: 0;
+        z-index: 0;
+        display: block;
+        width: calc(100% / var(--count-m));
+        height: 100%;
+        pointer-events: none;
+    }
+
+    .sidebar-marker-mobile::before {
+        content: '';
+        position: absolute;
+        inset: 0 4px;
+        border-radius: 14px;
+        background: linear-gradient(160deg, color-mix(in srgb, var(--accent) 18%, transparent), color-mix(in srgb, var(--accent-2) 8%, transparent));
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 34%, transparent), 0 0 22px -6px var(--glow);
     }
 }

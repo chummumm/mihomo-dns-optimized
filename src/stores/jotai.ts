@@ -201,6 +201,14 @@ export function useProxy () {
     }
 }
 
+// Shared once per proxy state, including GLOBAL, for presentation of nested groups.
+export const proxyGroupMapping = atom((get) => {
+    const { groups, global } = get(proxies)
+    const mapping = new Map(groups.map(group => [group.name, group]))
+    mapping.set(global.name, global)
+    return mapping
+})
+
 export const proxyMapping = atom((get) => {
     const ps = get(proxies)
     const providers = get(proxyProvider)
@@ -281,7 +289,7 @@ export function useLogsStreamReader () {
     return item
 }
 
-export function useConnectionStreamReader () {
+export function useConnectionStreamReader (enabled = true) {
     const apiInfo = useAPIInfo()
 
     const protocol = apiInfo.protocol === 'http:' ? 'ws:' : 'wss:'
@@ -290,9 +298,12 @@ export function useConnectionStreamReader () {
     const connection = useMemo(() => ({ url, reader: new StreamReader<API.Snapshot>({ bufferLength: 0 }) }), [url])
 
     useEffect(() => {
-        connection.reader.connect(connection.url)
-        return () => { connection.reader.destory() }
-    }, [connection])
+        connection.reader.connect(enabled ? connection.url : '')
+    }, [connection, enabled])
+
+    // Pause the transport without removing listeners during an animated exit.
+    // A quick return reuses those listeners; full teardown only happens on unmount.
+    useEffect(() => () => { connection.reader.destory() }, [connection])
 
     return connection.reader
 }

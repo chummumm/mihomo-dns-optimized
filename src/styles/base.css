@@ -33,8 +33,8 @@ body {
 }
 
 ::selection {
-    background: var(--signal);
-    color: #141e2f;
+    background: color-mix(in srgb, var(--accent) 32%, transparent);
+    color: var(--text);
 }
 
 h1,
@@ -160,18 +160,17 @@ samp {
 .status-bad { color: var(--bad); }
 .status-idle { color: var(--text-3); }
 
-/* Departures-board update: a reading flips down into place. */
+/* A new reading rises into place out of a soft blur. */
 @keyframes flip-in {
     from {
         opacity: 0;
-        transform: perspective(240px) rotateX(-85deg);
-    }
-
-    55% {
-        opacity: 1;
+        filter: blur(3px);
+        transform: translateY(45%);
     }
 
     to {
+        opacity: 1;
+        filter: none;
         transform: none;
     }
 }
@@ -204,14 +203,71 @@ samp {
     }
 }
 
-@keyframes live-pulse {
-    0% {
-        box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 55%, transparent);
+/* A highlight sweeps across a surface that is working. */
+@keyframes sheen {
+    from {
+        transform: translateX(-120%);
     }
 
-    70%,
-    100% {
-        box-shadow: 0 0 0 6px color-mix(in srgb, var(--good) 0%, transparent);
+    to {
+        transform: translateX(120%);
+    }
+}
+
+@keyframes soft-blink {
+    50% {
+        opacity: 0.3;
+    }
+}
+
+/* Panels arrive out of a short blur, the console's page change. */
+@keyframes panel-in {
+    from {
+        opacity: 0;
+        filter: blur(6px);
+        transform: translateY(10px) scale(0.995);
+    }
+
+    to {
+        opacity: 1;
+        filter: none;
+        transform: none;
+    }
+}
+
+/*
+ * Live lamps: a ring expands from the dot and fades. Only transform and opacity move,
+ * so the many lamps on screen cost the compositor, not the main thread.
+ */
+.sidebar-live-dot,
+.topology-live-dot,
+.logs-empty-pulse,
+.dns-live-dot {
+    position: relative;
+}
+
+.sidebar-live-dot::after,
+.topology-live-dot::after,
+.logs-empty-pulse::after,
+.dns-live-dot::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: inherit;
+    animation: live-ping 1.8s var(--ease-out) infinite;
+    pointer-events: none;
+}
+
+@keyframes live-ping {
+    from {
+        opacity: 0.6;
+        transform: scale(1);
+    }
+
+    to {
+        opacity: 0;
+        transform: scale(2.6);
     }
 }
 

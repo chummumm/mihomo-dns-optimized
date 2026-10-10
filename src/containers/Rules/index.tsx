@@ -51,7 +51,7 @@ export default function Rules () {
 
     return (
         <div className="page rules-page">
-            <Header title={t('title')} meta={<span className="reading">{rules.length}</span>} />
+            <Header title={t('title')} meta={<span className="rules-count"><span className="reading">{rules.length}</span> {t('countUnit')}</span>} />
             <RuleProviders />
             <Card className="rules-card">
                 <div className="rule-head" aria-hidden="true">

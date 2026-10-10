@@ -1,14 +1,14 @@
 import { motion } from 'motion/react'
 import { useMemo } from 'react'
 
-import { Button, Card, Header, Checkbox, springs } from '@components'
+import { Button, Header, Checkbox, springs } from '@components'
 import EE from '@lib/event'
 import { useRound } from '@lib/hook'
 import type * as API from '@lib/request'
 import { useI18n, useConfig, useProxy, useProxyProviders, useGeneral } from '@stores'
 
-import { useTestsRunning } from './activity'
-import { Proxy, Group, Provider } from './components'
+import { useTestProgress, useTestsRunning } from './activity'
+import { Proxy, Group, Provider, Topology } from './components'
 import './style.css'
 
 enum sortType {
@@ -61,17 +61,15 @@ function ProxyGroups () {
                         {t('breakConnectionsText')}
                     </Checkbox>
                 </Header>
-                <Card className="proxy-groups">
-                    <ul className="proxy-group-list">
-                        {
-                            list.map(p => (
-                                <li key={p.name}>
-                                    <Group config={p} />
-                                </li>
-                            ))
-                        }
-                    </ul>
-                </Card>
+                <ul className="proxy-groups">
+                    {
+                        list.map(p => (
+                            <li key={p.name}>
+                                <Group config={p} />
+                            </li>
+                        ))
+                    }
+                </ul>
             </section>
         }
     </>
@@ -125,7 +123,7 @@ function Proxies () {
         {
             sortedProxies.length !== 0 &&
             <section className="proxy-section">
-                <Header level={2} title={t('nodesTitle')} meta={<span className="reading">{sortedProxies.length}</span>}>
+                <Header level={2} title={t('nodesTitle')} meta={<><span className="reading">{sortedProxies.length}</span><span className="proxy-section-hint">{t('nodesHint')}</span></>}>
                     <Button type="ghost" size="sm" icon={sortMap[sort]} onClick={handleSort} title={t(sortLabel[sort])}>{t(sortLabel[sort])}</Button>
                 </Header>
                 <ul className="proxies-list">
@@ -147,16 +145,35 @@ export default function ProxyContainer () {
     const { translation: useTranslation } = useI18n()
     const { t } = useTranslation('Proxies')
     const testing = useTestsRunning()
+    const progress = useTestProgress()
+    const { groups, proxies } = useProxy()
+    const { providers } = useProxyProviders()
 
     function handleNotitySpeedTest () {
         EE.notifySpeedTest()
     }
 
+    // Summary readings under the title, from the lists already on the page.
+    const summary = useMemo(() => {
+        const nodes = [...proxies, ...providers.flatMap(provider => provider.proxies as API.Proxy[])]
+        const available = nodes.filter(node => node.alive !== false && (node.history?.length ?? 0) > 0 && node.history[node.history.length - 1].delay > 0).length
+        return { groups: groups.length, nodes: nodes.length, available }
+    }, [groups, proxies, providers])
+
+    const meta = <span className="proxies-summary">
+        <span><span className="reading">{summary.groups}</span> {t('summary.groups')}</span>
+        <span><span className="reading">{summary.nodes}</span> {t('summary.nodes')}</span>
+        <span><span className="reading status-good">{summary.available}</span> {t('summary.available')}</span>
+    </span>
+
     return (
         <div className="page proxies-page">
-            <Header title={t('title')}>
-                <Button type="primary" icon="speed" loading={testing} onClick={handleNotitySpeedTest}>{t('speedTestText')}</Button>
+            <Header title={t('title')} meta={meta}>
+                <Button type="primary" icon="speed" loading={testing} onClick={handleNotitySpeedTest}>
+                    {testing ? <>{t('testing')} <span className="reading">{progress.done}/{progress.total}</span></> : t('speedTestText')}
+                </Button>
             </Header>
+            <Topology />
             <ProxyGroups />
             <ProxyProviders />
             <Proxies />

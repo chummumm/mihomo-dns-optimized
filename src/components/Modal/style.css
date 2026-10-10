@@ -7,6 +7,8 @@
     justify-content: center;
     padding: var(--sp-4);
     background: var(--scrim);
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
     opacity: 0;
     pointer-events: none;
     visibility: hidden;
@@ -26,10 +28,10 @@
     max-width: 100%;
     max-height: calc(100dvh - 32px);
     padding: var(--sp-5) var(--sp-6) var(--sp-5);
-    border: 1px solid var(--hair);
-    border-radius: var(--r-panel);
-    background: var(--panel);
-    box-shadow: var(--shadow-pop);
+    border: 1px solid var(--hair-2);
+    border-radius: 18px;
+    background: color-mix(in srgb, var(--panel-solid) 94%, transparent);
+    box-shadow: var(--shadow-pop), 0 0 60px -30px var(--glow);
 }
 
 .modal-small {

@@ -18,18 +18,18 @@
 }
 
 .input:hover:not(:disabled) {
-    border-color: var(--text-3);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
 .input:focus,
 .input:focus-visible {
-    border-color: var(--ink);
+    border-color: var(--accent);
     outline: none;
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ink) 16%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent), 0 0 18px -6px var(--glow);
 }
 
 .input:disabled {
-    background: var(--sunken);
+    background: var(--hover);
     color: var(--text-3);
     cursor: not-allowed;
 }

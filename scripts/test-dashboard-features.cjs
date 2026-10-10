@@ -21,6 +21,12 @@ const reloadTargets = []
 const externalRequests = []
 const pageErrors = []
 const reactWarnings = []
+const connectionSockets = new Set()
+const topologyConnection = {
+    id: 'flux-topology-fixture', start: '2026-01-01T00:00:00Z',
+    metadata: { network: 'tcp', type: 'Socks5', sourceIP: '192.0.2.2', sourcePort: '40000', destinationIP: '198.51.100.20', destinationPort: '443', host: 'fixture.test' },
+    upload: 0, download: 0, chains: ['node-a', 'select-group'], rule: 'Match', rulePayload: '',
+}
 let reloadMode = 'hold'
 let heldReload
 let onReload
@@ -94,6 +100,8 @@ const wss = new WebSocketServer({ server })
 const secondWss = new WebSocketServer({ server: secondServer })
 function handleSocket(socket, req) {
     if (new URL(req.url, 'http://127.0.0.1').pathname === '/connections') {
+        connectionSockets.add(socket)
+        socket.on('close', () => connectionSockets.delete(socket))
         socket.send(JSON.stringify({ connections: [], uploadTotal: 0, downloadTotal: 0 }))
     }
 }
@@ -150,6 +158,54 @@ async function main() {
         assert.deepEqual(delayRequests.slice(previous), [{ name: 'node-a', url: expectedURL, timeout: '5000' }], 'only the real node is tested, with the configured URL')
     }
     await speedTest(defaultURL)
+    const topology = page.locator('.topology-canvas')
+    const groupCard = page.locator('.proxy-group[data-group="select-group"]')
+    assert.equal(await groupCard.count(), 1, 'Card forwards the topology navigation target')
+    await page.waitForFunction(() => document.querySelector('.topology-canvas')?.width > 0)
+    // A tap can arrive before a pointer-move animation frame; click coordinates
+    // must identify the group independently of the last hovered node.
+    await topology.evaluate(canvas => {
+        const rect = canvas.getBoundingClientRect()
+        canvas.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: rect.left + rect.width / 2, clientY: rect.top + 26 + (rect.height - 30) / 2 }))
+    })
+    await page.waitForFunction(() => document.querySelector('.proxy-group[data-group="select-group"]')?.classList.contains('is-flash'))
+    const toggle = page.locator('.topology-toggle')
+    await toggle.scrollIntoViewIfNeeded()
+    const originalCanvas = await topology.elementHandle()
+    const closeSeen = new Promise(resolve => {
+        const sockets = [...connectionSockets]
+        if (sockets.length === 0) return resolve()
+        let remaining = sockets.length
+        for (const socket of sockets) socket.once('close', () => { if (--remaining === 0) resolve() })
+    })
+    const closing = await toggle.evaluate(button => {
+        button.click()
+        return { bodyPresent: document.querySelector('.topology-body') !== null }
+    })
+    assert.equal(closing.bodyPresent, true, 'collapse keeps the animated visual layer')
+    await Promise.race([closeSeen, new Promise((_, reject) => setTimeout(() => reject(new Error('Topology connection did not close')), 1500))])
+    assert.equal(await originalCanvas.evaluate(canvas => canvas.isConnected), true, 'transport closes while the original exit animation is still mounted')
+    // Reopen before the exit necessarily finishes. The reconnected transport must
+    // still have data listeners, and only one live connection may exist.
+    await toggle.evaluate(button => button.click())
+    await page.waitForFunction(() => document.querySelector('.topology-toggle')?.getAttribute('aria-expanded') === 'true')
+    assert.equal(await topology.evaluate((canvas, previous) => canvas === previous, originalCanvas), true, 'quick reopen preserves the original animated component')
+    const socketReady = Date.now() + 3000
+    while (connectionSockets.size !== 1 && Date.now() < socketReady) await new Promise(resolve => setTimeout(resolve, 10))
+    assert.equal(connectionSockets.size, 1)
+    for (const socket of connectionSockets) socket.send(JSON.stringify({ connections: [topologyConnection], uploadTotal: 0, downloadTotal: 0 }))
+    await page.waitForFunction(() => document.querySelector('.topology-pill-count b')?.textContent === '1')
+    await originalCanvas.dispose()
+    await toggle.click()
+    await page.waitForFunction(() => document.querySelector('.topology-body') === null)
+    assert.equal(connectionSockets.size, 0, 'collapsed topology releases its transport')
+    await toggle.click()
+    await page.waitForFunction(() => {
+        const body = document.querySelector('.topology-body')
+        return body && body.clientHeight > 150 && Math.abs(body.scrollHeight - body.clientHeight) <= 1
+    })
+    await page.evaluate(() => document.querySelector('.page-container').scrollTo({ top: 0, behavior: 'instant' }))
+    await page.screenshot({ path: '/tmp/flux-proxies-desktop.png', fullPage: true })
     await navigate('Setting')
     await probe.fill(customURL)
     await page.getByRole('button', { name: 'Save', exact: true }).click()
@@ -240,7 +296,7 @@ async function main() {
     assert.deepEqual(pageErrors, [])
     assert.deepEqual(reactWarnings, [])
     assert.deepEqual(externalRequests, [], 'fonts and icons are local; fixture and speed-test URLs are not contacted directly by the browser')
-    console.log(JSON.stringify({ passed: true, browser: browser.version(), delayRequests, reloadCount: reloadRequests.length, controllerSwitchCancelsOldProbe: true, reloadMatchesDisplayedURLController: true, messageRootsAfterClose: 0, mobileWidth: 320, localeSwitch: true, pageErrors, reactWarnings }, null, 2))
+    console.log(JSON.stringify({ passed: true, browser: browser.version(), delayRequests, reloadCount: reloadRequests.length, topologyGroupNavigation: true, topologyRapidReopenReceivesData: true, topologyCollapseClosesTransport: true, controllerSwitchCancelsOldProbe: true, reloadMatchesDisplayedURLController: true, messageRootsAfterClose: 0, mobileWidth: 320, localeSwitch: true, pageErrors, reactWarnings }, null, 2))
 }
 
 main().catch(error => { console.error(error.stack); process.exitCode = 1 }).finally(async () => {

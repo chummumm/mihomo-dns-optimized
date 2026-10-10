@@ -17,15 +17,16 @@
 }
 
 .select:hover:not(:disabled) {
-    border-color: var(--text-3);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
 .select.open {
-    border-color: var(--ink);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 .select:disabled {
-    background: var(--sunken);
+    background: var(--hover);
     color: var(--text-3);
     cursor: not-allowed;
 }
@@ -52,10 +53,12 @@
     max-height: 300px;
     padding: 4px;
     overflow: auto;
-    border: 1px solid var(--hair);
-    border-radius: var(--r-ctl);
-    background: var(--panel);
+    border: 1px solid var(--hair-2);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--panel-solid) 88%, transparent);
     box-shadow: var(--shadow-pop);
+    -webkit-backdrop-filter: blur(18px);
+    backdrop-filter: blur(18px);
     opacity: 0;
     pointer-events: none;
     transform: translateY(-4px) scale(0.98);
@@ -99,11 +102,16 @@
     cursor: pointer;
 }
 
+.select-list .option {
+    transition: background-color var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out);
+}
+
 .select-list .option.active {
-    background: var(--sunken);
+    background: var(--hover);
 }
 
 .select-list .option.selected {
+    color: var(--accent);
     font-weight: 600;
 }
 
@@ -121,7 +129,7 @@
 .option-check {
     --icon-stroke: 26;
 
-    color: var(--text-2);
+    color: var(--accent);
 }
 
 /* The chosen option's tick draws itself each time the list opens. */

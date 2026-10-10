@@ -5,8 +5,8 @@
     max-width: 100%;
     padding: 2px;
     border: 1px solid var(--hair);
-    border-radius: var(--r-ctl);
-    background: var(--sunken);
+    border-radius: 12px;
+    background: var(--panel);
     isolation: isolate;
 }
 
@@ -14,8 +14,10 @@
     position: absolute;
     inset: 0;
     z-index: 0;
-    border-radius: 4px;
-    background: var(--ink);
+    border: 1px solid transparent;
+    border-radius: 9px;
+    background: linear-gradient(var(--panel-solid), var(--panel-solid)) padding-box, var(--accent-grad) border-box;
+    box-shadow: 0 0 18px -6px var(--glow);
 }
 
 .button-select-label {
@@ -25,9 +27,9 @@
 
 .button-select-options {
     position: relative;
-    height: 26px;
-    padding: 0 12px;
-    border-radius: 4px;
+    height: 30px;
+    padding: 0 14px;
+    border-radius: 9px;
     color: var(--text-2);
     font-size: var(--t-sm);
     font-weight: 520;
@@ -40,5 +42,6 @@
 }
 
 .button-select-options.actived {
-    color: var(--on-ink);
+    color: var(--text);
+    font-weight: 600;
 }

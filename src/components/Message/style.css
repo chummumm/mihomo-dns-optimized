@@ -17,10 +17,13 @@
     width: max-content;
     max-width: min(420px, calc(100vw - 32px));
     padding: 12px 14px;
-    border: 1px solid var(--hair);
-    border-radius: var(--r-ctl);
-    background: var(--panel);
+    overflow: hidden;
+    border: 1px solid var(--hair-2);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--panel-solid) 90%, transparent);
     box-shadow: var(--shadow-pop);
+    -webkit-backdrop-filter: blur(18px);
+    backdrop-filter: blur(18px);
     opacity: 0;
     pointer-events: auto;
     transform: translateY(-8px) scale(0.98);
@@ -46,7 +49,18 @@
     overflow-wrap: anywhere;
 }
 
-.message-info .message-icon { color: var(--link); }
+/* The toast takes a faint tint and glow of its kind; the icon says the rest. */
+.message {
+    border-color: color-mix(in srgb, var(--message-tone, var(--accent)) 35%, var(--hair-2));
+    box-shadow: var(--shadow-pop), 0 0 36px -16px var(--message-tone, var(--accent));
+}
+
+.message-info { --message-tone: var(--accent); }
+.message-success { --message-tone: var(--good); }
+.message-warning { --message-tone: var(--warn); }
+.message-error { --message-tone: var(--bad); }
+
+.message-info .message-icon { color: var(--accent); }
 .message-success .message-icon { color: var(--good); }
 .message-warning .message-icon { color: var(--warn); }
 .message-error .message-icon { color: var(--bad); }

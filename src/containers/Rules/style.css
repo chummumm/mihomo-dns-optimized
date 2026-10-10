@@ -1,3 +1,8 @@
+.rules-count .reading {
+    color: var(--text);
+    font-size: var(--t-xs);
+}
+
 .rules-page {
     height: 100%;
     min-height: 0;
@@ -9,6 +14,11 @@
 
 .rule-providers {
     overflow: hidden;
+}
+
+.rules-card.card,
+.rule-providers.card {
+    background: var(--panel-solid);
 }
 
 .rules-card {
@@ -36,10 +46,13 @@
 .rule-head {
     height: 34px;
     border-bottom: 1px solid var(--hair);
-    background: var(--sunken);
-    color: var(--text-3);
-    font-size: var(--t-xs);
-    font-weight: 560;
+    background: var(--panel-solid);
+    color: var(--faint);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-stretch: var(--mono-dense);
+    font-weight: 500;
+    letter-spacing: 0.06em;
 }
 
 .rule-item {
@@ -63,13 +76,14 @@
 .rule-type-tag {
     display: inline-block;
     max-width: 100%;
-    padding: 2px 6px;
+    padding: 1px 7px;
     overflow: hidden;
-    border-radius: var(--r-chip);
-    background: var(--sunken);
-    color: var(--text-2);
+    border: 1px solid var(--hair-2);
+    border-radius: 6px;
+    color: var(--text-3);
     font-family: var(--font-mono);
-    font-size: var(--t-2xs);
+    font-size: 10px;
+    font-stretch: var(--mono-dense);
     text-overflow: ellipsis;
     vertical-align: middle;
     white-space: nowrap;
@@ -80,6 +94,7 @@
     color: var(--text);
     font-family: var(--font-mono);
     font-size: var(--t-xs);
+    font-stretch: var(--mono-dense);
     text-overflow: ellipsis;
     white-space: nowrap;
 }

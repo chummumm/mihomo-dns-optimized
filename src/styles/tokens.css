@@ -1,45 +1,43 @@
 /*
  * Clash Dashboard design tokens.
- * World: metro wayfinding. An ink rail carries navigation, each policy group
- * owns a line colour, and status colours are reserved for latency and health.
- * Light and dark follow the operating system.
+ * World: a network operations console. Navigation is a glowing rail, traffic
+ * flows as light from cyan to blue, panels float over a faint measuring grid,
+ * and readings roll, slide and glow as they change.
+ * Status colours are reserved for latency and health. Light and dark follow
+ * the operating system; dark is the native look.
  */
 
 /*
- * Overpass descends from Highway Gothic, the lettering of road and transit
- * signage; its mono cut sets readings (IPs, ports, latency). Self-hosted Latin
- * subsets, SIL OFL 1.1 (src/assets/fonts/OFL-Overpass.txt). CJK text falls back
- * to the system face.
+ * Sora sets the interface, Martian Mono sets readings (rates, latency, IPs).
+ * Self-hosted Latin subsets, SIL OFL 1.1 (public/licenses/). CJK text falls
+ * back to the system face.
  */
 @font-face {
-    font-family: 'Overpass';
-    src: url('../assets/fonts/Overpass-Variable.woff') format('woff');
-    /* Balance the tall ascender so caps sit centred in fixed-height controls. */
-    ascent-override: 92%;
-    descent-override: 32%;
-    line-gap-override: 0%;
-    font-weight: 100 900;
+    font-family: 'Sora';
+    src: url('../assets/fonts/Sora-Variable-latin.woff2') format('woff2');
+    font-weight: 100 800;
     font-style: normal;
     font-display: swap;
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
 @font-face {
-    font-family: 'Overpass Mono';
-    src: url('../assets/fonts/OverpassMono-Variable.woff') format('woff');
-    /* Balance the tall ascender so caps sit centred in fixed-height controls. */
-    ascent-override: 92%;
-    descent-override: 32%;
-    line-gap-override: 0%;
-    font-weight: 300 700;
+    font-family: 'Martian Mono';
+    src: url('../assets/fonts/MartianMono-Variable-latin.woff2') format('woff2');
+    font-weight: 100 800;
+    font-stretch: 75% 112.5%;
     font-style: normal;
     font-display: swap;
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
 :root {
     color-scheme: light dark;
 
-    --font-sans: 'Overpass', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', 'Segoe UI', sans-serif;
-    --font-mono: 'Overpass Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, 'PingFang SC', 'Microsoft YaHei', monospace;
+    --font-sans: 'Sora', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', 'Segoe UI', sans-serif;
+    --font-mono: 'Martian Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, 'PingFang SC', 'Microsoft YaHei', monospace;
+    /* Dense tables and log lines use the condensed cut of the same mono. */
+    --mono-dense: 80%;
 
     /* Type: fixed rem steps, ratio about 1.15 to 1.2 */
     --t-2xs: 0.6875rem;
@@ -48,7 +46,7 @@
     --t-md: 0.875rem;
     --t-lg: 1rem;
     --t-xl: 1.25rem;
-    --t-2xl: 1.5rem;
+    --t-2xl: 1.625rem;
 
     --sp-1: 4px;
     --sp-2: 8px;
@@ -59,26 +57,26 @@
     --sp-8: 32px;
     --sp-10: 40px;
 
-    /* Shape rule: chips 4px, controls 6px, panels 10px; only stations, markers and switches are round. */
-    --r-chip: 4px;
-    --r-ctl: 6px;
-    --r-panel: 10px;
+    /* Shape rule: chips 8px, controls 10px, panels 16px; dots, rings and pills are round. */
+    --r-chip: 8px;
+    --r-ctl: 10px;
+    --r-panel: 16px;
     --r-round: 999px;
 
     --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
     --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
     --dur-1: 120ms;
-    --dur-2: 180ms;
-    --dur-3: 260ms;
+    --dur-2: 200ms;
+    --dur-3: 280ms;
     --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
-    --dur-spring: 380ms;
+    --dur-spring: 420ms;
     --ease-icon: cubic-bezier(0.22, 1, 0.36, 1);
     --dur-icon: 420ms;
 
-    --rail-w: 184px;
-    --bar-h: 60px;
-    --ctl-h: 32px;
-    --ctl-h-sm: 28px;
+    --rail-w: 84px;
+    --bar-h: 62px;
+    --ctl-h: 36px;
+    --ctl-h-sm: 30px;
 
     --z-sticky: 10;
     --z-rail: 20;
@@ -87,61 +85,75 @@
     --z-modal: 50;
     --z-toast: 60;
 
-    /* The wayfinding rail */
-    --rail: #141e2f;
-    --rail-hover: #1f2a3d;
-    --rail-text: #f3f5f8;
-    --rail-text-2: #a3abb8;
-    --rail-line: #3c485b;
-    --rail-edge: transparent;
-    --signal: #f8cc2f;
-    --switch-on: #141e2f;
+    /* Ground and surfaces (light) */
+    --ground: #eef2f9;
+    --panel: rgb(255 255 255 / 78%);
+    --panel-solid: #ffffff;
+    --sunken: #f3f6fb;
+    --hover: rgb(30 60 130 / 4.5%);
+    --hair: rgb(30 60 130 / 11%);
+    --hair-2: rgb(30 60 130 / 22%);
+    --row-hover: rgb(30 60 130 / 4%);
+    --row-selected: rgb(0 144 196 / 10%);
+    --grid: rgb(30 60 130 / 6%);
+    --amb-1: rgb(50 86 236 / 10%);
+    --amb-2: rgb(0 144 196 / 8%);
 
-    /* Ground and surfaces */
-    --ground: #f3f6f9;
-    --panel: #fcfdff;
-    --sunken: #edf0f4;
-    --hair: #dce0e5;
-    --hair-2: #ccd2d7;
-    --row-hover: #f0f4f7;
-    --row-selected: #e1eaf7;
+    --text: #0d1730;
+    --text-2: #34415c;
+    --text-3: #56637d;
+    --faint: #8a95aa;
 
-    --text: #192029;
-    --text-2: #4c535e;
-    --text-3: #656c76;
+    /* Flow: traffic and the current choice travel from cyan to blue. */
+    --accent: #0090c4;
+    --accent-2: #3256ec;
+    --accent-grad: linear-gradient(135deg, var(--accent), var(--accent-2));
+    --glow: rgb(0 144 196 / 26%);
+    --on-accent: #ffffff;
 
-    /* Ink: wayfinding panels. Primary actions and selection read as signs. */
-    --ink: #172232;
-    --ink-hover: #283345;
-    --on-ink: #fcfdff;
-    --focus: #172232;
-    --link: #1c62b6;
+    /* Ink: the solid form of the accent, for small selected fills and focus. */
+    --ink: #0a7fb4;
+    --ink-hover: #0a6f9d;
+    --on-ink: #ffffff;
+    --focus: #0090c4;
+    --link: #2156d8;
+
+    /* The rail */
+    --rail: rgb(255 255 255 / 70%);
+    --rail-hover: rgb(30 60 130 / 5%);
+    --rail-text: #0d1730;
+    --rail-text-2: #56637d;
+    --rail-line: rgb(30 60 130 / 11%);
+    --rail-edge: rgb(30 60 130 / 11%);
+    --signal: #0090c4;
+    --switch-on: #0a7fb4;
 
     /* Service status: only for latency, health and results */
-    --good: #21763c;
-    --good-bg: #dcf7e1;
-    --warn: #9a5a00;
-    --warn-bg: #ffedcf;
-    --bad: #c22826;
-    --bad-bg: #ffe6e3;
-    --idle: #8a919b;
+    --good: #0c8f5d;
+    --good-bg: rgb(12 154 100 / 11%);
+    --warn: #a86c00;
+    --warn-bg: rgb(180 116 0 / 12%);
+    --bad: #d42a53;
+    --bad-bg: rgb(220 47 88 / 10%);
+    --idle: #8a95aa;
 
-    /* Line colours for policy groups */
-    --line-0: #1c62b6;
-    --line-1: #c25500;
-    --line-2: #7945ab;
-    --line-3: #007974;
-    --line-4: #ae2c77;
-    --line-5: #647520;
-    --line-6: #4849a9;
-    --line-7: #8a542d;
-    --line-8: #127d9d;
+    /* Group hues: each policy group keeps one colour across pages. */
+    --line-0: #0090c4;
+    --line-1: #6d4ee6;
+    --line-2: #c23b9a;
+    --line-3: #0c9a7a;
+    --line-4: #c06a00;
+    --line-5: #3256ec;
+    --line-6: #9142d6;
+    --line-7: #0a8a96;
+    --line-8: #c93d3d;
     --on-line: #ffffff;
-    --line-system: #172232;
+    --line-system: #34415c;
 
-    --shadow-pop: 0 1px 2px rgb(20 30 47 / 8%), 0 12px 32px -8px rgb(20 30 47 / 22%);
-    --shadow-drawer: -12px 0 32px -16px rgb(20 30 47 / 28%);
-    --scrim: rgb(13 17 22 / 34%);
+    --shadow-card: 0 24px 48px -30px rgb(25 40 80 / 22%);
+    --shadow-pop: 0 1px 2px rgb(25 40 80 / 8%), 0 18px 44px -12px rgb(25 40 80 / 26%);
+    --shadow-drawer: 0 30px 80px -24px rgb(25 40 80 / 30%);
+    --scrim: rgb(13 23 48 / 30%);
 }
 
 /* A gently damped spring (about 2% settle) for CSS-driven motion; Motion drives the rest. */
@@ -157,54 +169,67 @@
 
 @media (prefers-color-scheme: dark) {
     :root {
-        --rail: #121b2a;
-        --rail-hover: #1b2638;
-        --rail-text: #eef1f5;
-        --rail-text-2: #a3adbd;
-        --rail-line: #33405a;
-        --rail-edge: transparent;
-        --switch-on: #3a4a68;
+        --ground: #050913;
+        --panel: rgb(12 20 37 / 74%);
+        --panel-solid: #0c1426;
+        --sunken: #081020;
+        --hover: rgb(160 190 255 / 6%);
+        --hair: rgb(120 160 255 / 12%);
+        --hair-2: rgb(120 160 255 / 24%);
+        --row-hover: rgb(160 190 255 / 5%);
+        --row-selected: rgb(52 225 255 / 10%);
+        --grid: rgb(120 160 255 / 5.5%);
+        --amb-1: rgb(91 132 255 / 18%);
+        --amb-2: rgb(52 225 255 / 9%);
 
-        --ground: #0d1116;
-        --panel: #14191f;
-        --sunken: #0a0d12;
-        --hair: #252930;
-        --hair-2: #333840;
-        --row-hover: #1a1e25;
-        --row-selected: #1b2737;
+        --text: #e7eefa;
+        --text-2: #b5c1d8;
+        --text-3: #8794ad;
+        --faint: #5a6680;
 
-        --text: #e9ebef;
-        --text-2: #b3b8bf;
-        --text-3: #9399a1;
+        --accent: #34e1ff;
+        --accent-2: #5b84ff;
+        --glow: rgb(52 225 255 / 42%);
+        --on-accent: #031019;
 
-        --ink: #d3d8de;
-        --ink-hover: #e9ebef;
-        --on-ink: #0d1116;
-        --focus: #f8cc2f;
-        --link: #67aaed;
+        --ink: #34d3f5;
+        --ink-hover: #6fe6ff;
+        --on-ink: #031019;
+        --focus: #34e1ff;
+        --link: #6cc8ff;
 
-        --good: #6fc884;
-        --good-bg: #1a3520;
-        --warn: #ebb25f;
-        --warn-bg: #3f2c10;
-        --bad: #f47b74;
-        --bad-bg: #47211e;
-        --idle: #737a84;
+        --rail: rgb(10 17 32 / 72%);
+        --rail-hover: rgb(160 190 255 / 6%);
+        --rail-text: #e7eefa;
+        --rail-text-2: #8794ad;
+        --rail-line: rgb(120 160 255 / 12%);
+        --rail-edge: rgb(120 160 255 / 12%);
+        --signal: #34e1ff;
+        --switch-on: #1fa9d6;
 
-        --line-0: #4386de;
-        --line-1: #ec7b38;
-        --line-2: #9d69d2;
-        --line-3: #3d9e98;
-        --line-4: #d8559b;
-        --line-5: #879947;
-        --line-6: #7a80dc;
-        --line-7: #b07750;
-        --line-8: #45a2c3;
-        --on-line: #0a0d12;
-        --line-system: #d3d8de;
+        --good: #33e9a0;
+        --good-bg: rgb(51 233 160 / 12%);
+        --warn: #ffc24d;
+        --warn-bg: rgb(255 194 77 / 12%);
+        --bad: #ff5d7d;
+        --bad-bg: rgb(255 93 125 / 13%);
+        --idle: #5a6680;
 
-        --shadow-pop: 0 1px 2px rgb(0 0 0 / 40%), 0 16px 40px -10px rgb(0 0 0 / 60%);
-        --shadow-drawer: -16px 0 40px -18px rgb(0 0 0 / 70%);
-        --scrim: rgb(3 5 8 / 55%);
+        --line-0: #34e1ff;
+        --line-1: #9b8cff;
+        --line-2: #ff7ad1;
+        --line-3: #33e9b0;
+        --line-4: #ffb547;
+        --line-5: #6b8fff;
+        --line-6: #c792ff;
+        --line-7: #4dd4e0;
+        --line-8: #ff7a7a;
+        --on-line: #031019;
+        --line-system: #b5c1d8;
+
+        --shadow-card: 0 24px 48px -30px rgb(0 0 0 / 55%);
+        --shadow-pop: 0 1px 2px rgb(0 0 0 / 40%), 0 22px 60px -18px rgb(0 0 0 / 75%);
+        --shadow-drawer: 0 30px 80px -24px rgb(0 0 0 / 70%);
+        --scrim: rgb(2 5 12 / 60%);
     }
 }

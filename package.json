@@ -1,6 +1,6 @@
 {
     "name": "clash-dashboard",
-    "version": "0.3.3",
+    "version": "0.3.4",
     "packageManager": "pnpm@8.15.9",
     "description": "Web port of clash.",
     "keywords": [
@@ -21,7 +21,7 @@
         "start": "vite",
         "build": "vite build",
         "typecheck": "tsc --noEmit",
-        "test:unit": "node --test src/containers/Connections/connections.test.cjs src/lib/probe.test.cjs",
+        "test:unit": "node --test src/containers/Connections/connections.test.cjs src/lib/probe.test.cjs src/containers/Proxies/resolve.test.cjs scripts/test-topology-renderer.cjs",
         "test:browser": "node scripts/test-connections.cjs && node scripts/test-dns.cjs && node scripts/test-dashboard-features.cjs && node scripts/test-logs.cjs",
         "lint": "pnpm lint:ts",
         "lint:ts": "eslint --ext=jsx,ts,tsx --fix src",

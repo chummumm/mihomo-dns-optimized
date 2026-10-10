@@ -1,11 +1,12 @@
 import classnames from 'classnames'
-import { useAtom } from 'jotai'
+import { useAtomValue } from 'jotai'
 import { useMemo, useRef } from 'react'
 
-import { Tags, Tag, Icon, useLineColor, delayStatus } from '@components'
+import { Card, Ring, SlideText, Tags, Tag, TweenNumber, latencyQuality, useLineColor, delayStatus } from '@components'
 import { type Group as IGroup } from '@lib/request'
-import { useProxy, useConfig, proxyMapping, useClient } from '@stores'
+import { useProxy, useConfig, proxyMapping, proxyGroupMapping, useClient, useI18n } from '@stores'
 
+import { resolveProxyExit } from '../../resolve'
 import './style.css'
 
 interface GroupProps {
@@ -14,7 +15,10 @@ interface GroupProps {
 
 export function Group (props: GroupProps) {
     const { markProxySelected } = useProxy()
-    const [proxyMap] = useAtom(proxyMapping)
+    const { translation } = useI18n()
+    const { t } = translation('Proxies')
+    const proxyMap = useAtomValue(proxyMapping)
+    const groups = useAtomValue(proxyGroupMapping)
     const { data: Config } = useConfig()
     const client = useClient()
     const color = useLineColor()
@@ -64,27 +68,49 @@ export function Group (props: GroupProps) {
     }, [config.all, proxyMap])
 
     const line = color(config.name)
-    const nowDelay = config.now ? readings.get(config.now) ?? 0 : 0
-    const nowFailed = config.now ? errSet.has(config.now) : false
+
+    // Follow nested groups to the node that actually carries the traffic.
+    const exit = useMemo(() => resolveProxyExit(config.now, groups), [config.now, groups])
+    const exitProxy = exit === undefined ? undefined : proxyMap.get(exit)
+    const exitHistory = exitProxy?.history
+    const nowDelay = exitHistory?.length ? exitHistory.slice(-1)[0].delay : 0
+    const nowFailed = exitProxy?.alive === false || (exitHistory?.length ? nowDelay === 0 : false)
     const nowStatus = nowFailed ? 'bad' : delayStatus(nowDelay)
+    const tone = nowStatus === 'good' ? 'flow' : nowStatus
+
+    let via = ''
+    if (exit === 'DIRECT') via = t('directExit')
+    else if (exit === 'REJECT' || exit === 'REJECT-DROP') via = t('reject')
+    else if (exit !== undefined && exit !== config.now) via = `${t('via')} ${config.now} → ${exit}`
+    else if (exitProxy != null) via = `${exitProxy.type}${exitProxy.udp ? ' · UDP' : ''}`
+    if (config.type !== 'Selector' && via) via += ` · ${t('autoSelect')}`
 
     const canClick = config.type === 'Selector'
     return (
-        <div className="proxy-group" style={{ '--line': line } as React.CSSProperties}>
+        <Card className="proxy-group" data-group={config.name} style={{ '--line': line } as React.CSSProperties}>
             <div className="proxy-group-head">
-                <div className="proxy-group-title">
-                    <span className="proxy-group-badge" title={config.name}>{ config.name }</span>
-                    <Tag>{ config.type }</Tag>
+                <span className="proxy-group-hue" aria-hidden="true" />
+                <span className="proxy-group-name" title={config.name}>{ config.name }</span>
+                <Tag>{ config.type }</Tag>
+                <span className="proxy-group-count"><span className="reading">{config.all.length}</span> {t('exits')}</span>
+            </div>
+            <div className="proxy-group-now">
+                <Ring value={latencyQuality(nowDelay, nowFailed)} tone={tone} size={64}>
+                    {nowDelay > 0 && !nowFailed
+                        ? <TweenNumber className={classnames('proxy-group-ms', `status-${nowStatus}`)} value={nowDelay} />
+                        : <span className={classnames('proxy-group-ms', { 'status-bad': nowFailed })}>{nowFailed ? '✕' : '—'}</span>}
+                    <small>ms</small>
+                </Ring>
+                <div className="proxy-group-now-text">
+                    {config.now
+                        ? <SlideText className={classnames('proxy-group-now-name', { 'is-new': nowSeen.current.moved })} text={config.now} />
+                        : <span className="proxy-group-now-name">—</span>}
+                    {via && <small className="proxy-group-via" title={via}>{via}</small>}
                 </div>
-                {config.now && <div className="proxy-group-now" title={config.now}>
-                    <Icon type="arrow-right" size={12} className="proxy-group-now-arrow" replay={config.now} />
-                    <span className={classnames('proxy-group-now-name', { 'is-new': nowSeen.current.moved })} key={config.now}>{config.now}</span>
-                    {nowDelay > 0 && !nowFailed && <span className={classnames('reading', `status-${nowStatus}`)} key={nowDelay}>{nowDelay}ms</span>}
-                </div>}
             </div>
             <Tags
                 id={config.name}
-                className="proxy-group-stations"
+                className="proxy-group-chips"
                 data={config.all}
                 onClick={handleChangeProxySelected}
                 errSet={errSet}
@@ -92,7 +118,7 @@ export function Group (props: GroupProps) {
                 line={line}
                 select={config.now}
                 canClick={canClick}
-                rowHeight={40} />
-        </div>
+                rowHeight={36} />
+        </Card>
     )
 }

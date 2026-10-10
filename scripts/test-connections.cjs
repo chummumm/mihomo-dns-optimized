@@ -154,7 +154,8 @@ async function main() {
             const scroll = document.querySelector('.connections-scroll')
             const rect = scroll.getBoundingClientRect()
             const rows = [...document.querySelectorAll('.connections-row')]
-            const visible = rows.filter(row => row.getBoundingClientRect().bottom > rect.top + 30 && row.getBoundingClientRect().top < rect.top + scroll.clientHeight)
+            const headerBottom = document.querySelector('.connections-header').getBoundingClientRect().bottom
+            const visible = rows.filter(row => row.getBoundingClientRect().bottom > headerBottom && row.getBoundingClientRect().top < rect.top + scroll.clientHeight)
             const first = visible[0]
             const last = visible[visible.length - 1]
             return {
@@ -302,7 +303,13 @@ async function main() {
     for (const [id, expected] of [[host.id, 'explicit.example.test:443'], [sniff.id, 'sniff.example.test:443'], [ip.id, '198.51.100.123:443']]) {
         assert.equal((await page.locator('[data-connection-id="' + id + '"] .connections-block').first().textContent()).trim(), expected)
     }
-    if (process.env.CONNECTIONS_SCREENSHOT) await page.screenshot({ path: process.env.CONNECTIONS_SCREENSHOT, fullPage: true })
+    if (process.env.CONNECTIONS_SCREENSHOT) {
+        await page.waitForFunction(() => [...document.querySelectorAll('.connections-row, .connections-devices-item:not([aria-hidden="true"])')].every(element => {
+            const style = getComputedStyle(element)
+            return Number(style.opacity) >= 0.999 && style.filter === 'none'
+        }))
+        await page.screenshot({ path: process.env.CONNECTIONS_SCREENSHOT, fullPage: true })
+    }
     await page.getByText('Keep closed connections', { exact: true }).click()
     await page.locator('[data-connection-id="' + sniff.id + '"] .connections-block').first().click()
     const details = page.locator('.connections-card .card.translate-x-0')
@@ -414,6 +421,7 @@ async function main() {
     await bottom('mobile_mihomo_bottom')
     await send([...mobileRows, ordinary53], () => 200)
     stillBottom(await position('mobile_mihomo_refresh'), 'mobile selected internal bottom')
+    if (process.env.CONNECTIONS_MOBILE_SCREENSHOT) await page.screenshot({ path: process.env.CONNECTIONS_MOBILE_SCREENSHOT, fullPage: true })
     await page.locator('[data-connection-id="' + mobileRows[0].id + '"] .connections-block').first().click()
     await details.getByText(mobileRows[0].id, { exact: true }).waitFor()
     await page.waitForFunction(() => {

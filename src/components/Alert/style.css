@@ -3,8 +3,9 @@
     align-items: flex-start;
     gap: var(--sp-3);
     padding: var(--sp-3) var(--sp-4);
-    border-radius: var(--r-ctl);
-    background: var(--sunken);
+    border: 1px solid var(--hair);
+    border-radius: 12px;
+    background: var(--hover);
     color: var(--text-2);
     font-size: var(--t-sm);
     line-height: 1.6;
@@ -19,7 +20,7 @@
     max-width: 68ch;
 }
 
-.alert-info .alert-icon { color: var(--link); }
+.alert-info .alert-icon { color: var(--accent); }
 .alert-success { background: var(--good-bg); }
 .alert-success .alert-icon { color: var(--good); }
 .alert-warning { background: var(--warn-bg); }

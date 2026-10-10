@@ -1,29 +1,183 @@
+/* Connections, in the console's own language: live throughput and sources on top, the table beneath. */
+
 .connections-page {
+    gap: 14px;
     height: 100%;
     min-height: 0;
     padding-bottom: var(--sp-6);
 }
 
-.connections-traffic {
+.connections-page > .header-level-1 {
+    margin-bottom: 0;
+}
+
+.connections-summary {
     display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+}
+
+.connections-summary .reading {
+    color: var(--text);
+    font-size: var(--t-xs);
+}
+
+/* Floating console panels, the same as the proxies page. */
+.connections-panel {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    border: 1px solid var(--hair);
+    border-radius: var(--r-panel);
+    background: var(--panel);
+    box-shadow: var(--shadow-card);
+    -webkit-backdrop-filter: blur(16px);
+    backdrop-filter: blur(16px);
+    transition: border-color var(--dur-3) var(--ease-out);
+}
+
+.connections-panel:hover {
+    border-color: var(--hair-2);
+}
+
+.connections-panel-head {
+    display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: var(--sp-3);
+    gap: 6px 12px;
+    min-width: 0;
+}
+
+.connections-panel-head h2 {
+    color: var(--text);
+    font-size: var(--t-md);
+    font-weight: 600;
+}
+
+.connections-panel-tag {
+    color: var(--text-3);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+}
+
+.connections-legend {
+    display: inline-flex;
+    gap: 14px;
+    margin-left: auto;
+    color: var(--text-3);
+    font-size: var(--t-xs);
+}
+
+.connections-legend i {
+    display: inline-block;
+    width: 18px;
+    height: 3px;
+    margin-right: 6px;
+    border-radius: 2px;
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent);
+    vertical-align: 3px;
+}
+
+.connections-legend i.is-up {
+    background: var(--accent-2);
+    box-shadow: 0 0 8px var(--accent-2);
+}
+
+.connections-top {
+    display: grid;
+    flex-shrink: 0;
+    grid-template-columns: minmax(0, 1.8fr) minmax(280px, 1fr);
+    gap: 16px;
+    height: 264px;
+}
+
+/* Live throughput: two large readings over the last minute of traffic. */
+.connections-rates {
+    display: grid;
+    grid-template-rows: auto auto minmax(0, 1fr);
+    gap: 10px;
+    padding: 14px 18px 8px;
+}
+
+.connections-rate-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 8px 36px;
+    min-width: 0;
+}
+
+.connections-rate {
+    display: grid;
+    gap: 3px;
+}
+
+.connections-rate-label {
+    color: var(--text-3);
+    font-size: var(--t-xs);
+}
+
+.connections-rate-value {
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 1.75rem;
+    font-weight: 500;
+    letter-spacing: -0.03em;
+    line-height: 1.05;
+    white-space: nowrap;
+}
+
+.connections-rate.is-down .connections-rate-value {
+    text-shadow: 0 0 18px var(--glow);
+}
+
+.connections-rate-value .rolling-bytes-unit {
+    color: var(--text-3);
+    font-size: 0.75rem;
+    font-weight: 400;
+    opacity: 1;
+}
+
+.connections-traffic {
+    display: grid;
+    gap: 3px;
+    margin-left: auto;
+    padding-left: 14px;
+    border-left: 1px solid var(--hair);
     color: var(--text-2);
-    font-size: var(--t-sm);
+    font-size: var(--t-xs);
+}
+
+.connections-traffic-label {
+    color: var(--text-3);
 }
 
 .connections-traffic-item {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
+    gap: 6px;
+}
+
+.connections-traffic-item .reading {
+    font-size: var(--t-xs);
 }
 
 .connections-traffic-item .icon {
     overflow: hidden;
+    color: var(--accent);
 }
 
-.connections-traffic-item .icon {
-    color: var(--text-3);
+.connections-traffic-item:last-child .icon {
+    color: var(--accent-2);
+}
+
+.connections-chart {
+    display: block;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
 }
 
 /* Each time a total moves, its arrow travels once in the direction of the traffic. */
@@ -90,6 +244,19 @@
     }
 }
 
+/* Sources */
+.connections-sources {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px 12px 10px;
+    overflow: hidden;
+}
+
+.connections-sources > .connections-panel-head {
+    padding: 0 6px;
+}
+
 .connections-keep {
     margin-right: var(--sp-2);
 }
@@ -100,25 +267,26 @@
 
 .connections-close-all:hover:not(:disabled) {
     --btn-hover: var(--bad-bg);
-    --btn-border: var(--bad);
+    --btn-hover-border: var(--bad);
 }
 
 .connections-history-note {
     display: flex;
+    flex-shrink: 0;
     flex-wrap: wrap;
     align-items: center;
     gap: 6px var(--sp-2);
-    margin: 0 0 var(--sp-3);
     padding: 6px 6px 6px 12px;
-    border-radius: var(--r-ctl);
-    background: var(--sunken);
+    border: 1px solid var(--hair);
+    border-radius: 12px;
+    background: var(--panel);
     color: var(--text-2);
     font-size: var(--t-xs);
-    animation: fade-up var(--dur-2) var(--ease-out);
+    animation: panel-in var(--dur-3) var(--ease-out);
 }
 
 .connections-history-icon {
-    color: var(--text-3);
+    color: var(--accent);
 }
 
 .connections-history-note > span {
@@ -126,14 +294,18 @@
     min-width: 0;
 }
 
-/* Table */
+/* Table: a solid panel so the pinned host column matches every row behind it. */
 .connections-card {
     position: relative;
     display: flex;
     flex: 1;
     flex-direction: column;
-    min-height: 0;
+    min-height: 240px;
     overflow: hidden;
+}
+
+.connections-card.card {
+    background: var(--panel-solid);
 }
 
 .connections-viewport {
@@ -153,9 +325,9 @@
     top: 0;
     z-index: 3;
     display: flex;
-    height: 30px;
+    height: 34px;
     border-bottom: 1px solid var(--hair);
-    background: var(--sunken);
+    background: var(--panel-solid);
     white-space: nowrap;
     /* react-window disables pointer events on the inner list while it scrolls; headers stay clickable. */
     pointer-events: auto;
@@ -165,13 +337,14 @@
     position: relative;
     display: inline-block;
     flex-shrink: 0;
-    height: 30px;
-    background: var(--sunken);
-    color: var(--text-3);
-    font-size: var(--t-xs);
-    font-weight: 560;
-    letter-spacing: 0.01em;
-    line-height: 29px;
+    height: 34px;
+    background: var(--panel-solid);
+    color: var(--faint);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-stretch: var(--mono-dense);
+    letter-spacing: 0.06em;
+    line-height: 33px;
     text-align: center;
     user-select: none;
     -webkit-user-select: none;
@@ -194,7 +367,7 @@
 }
 
 .connections-th.fixed .connections-th-label {
-    padding-left: 16px;
+    padding-left: 18px;
 }
 
 .connections-th-label:hover {
@@ -204,15 +377,15 @@
 .connections-sort {
     display: inline-flex;
     margin-left: 4px;
-    color: var(--text);
+    color: var(--accent);
     vertical-align: -1px;
 }
 
 .connections-resizer {
     position: absolute;
-    top: 7px;
+    top: 8px;
     right: -6px;
-    bottom: 7px;
+    bottom: 8px;
     z-index: 4;
     width: 12px;
     opacity: 0;
@@ -237,28 +410,55 @@
 }
 
 .connections-th.resizing .connections-resizer::before {
-    background: var(--ink);
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent);
 }
 
 .connections-row {
+    --row-tint: transparent;
+
     display: flex;
     border-bottom: 1px solid var(--hair);
-    background: var(--panel);
+    background: var(--row-tint);
     white-space: nowrap;
     cursor: default;
     user-select: none;
+    transition: background-color var(--dur-2) var(--ease-out);
+}
+
+.connections-row:hover {
+    --row-tint: var(--row-hover);
+}
+
+.connections-row.selected {
+    --row-tint: var(--row-selected);
+}
+
+/* Rows that just arrived come in out of a soft blur, a few at a time. */
+@media (prefers-reduced-motion: no-preference) {
+    .connections-row.is-fresh {
+        animation: row-in 560ms var(--ease-out) backwards;
+        animation-delay: calc(var(--i, 0) * 16ms);
+    }
+}
+
+@keyframes row-in {
+    from {
+        opacity: 0;
+        filter: blur(6px);
+    }
 }
 
 .connections-block {
     display: inline-block;
     flex-shrink: 0;
-    height: 35px;
+    height: 39px;
     padding: 0 10px;
     overflow: hidden;
-    background: inherit;
+    background: transparent;
     color: var(--text);
     font-size: var(--t-sm);
-    line-height: 35px;
+    line-height: 39px;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
@@ -267,50 +467,71 @@
     text-align: center;
 }
 
+/* The host column stays put while the rest scrolls sideways, so it carries its own ground. */
 .connections-block.fixed {
     position: sticky;
     left: 0;
     z-index: 1;
-    padding-left: 16px;
-    font-weight: 520;
+    padding-left: 18px;
+    background: linear-gradient(var(--row-tint), var(--row-tint)), var(--panel-solid);
+    font-weight: 500;
+}
+
+.connections-row.selected .connections-block.fixed {
+    box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .connections-scroll.horizontally-scrolled .fixed {
-    box-shadow: 6px 0 8px -6px rgb(20 30 47 / 22%);
+    box-shadow: 8px 0 12px -10px rgb(0 0 0 / 45%);
 }
 
-.connections-row:hover {
-    background: var(--row-hover);
+.connections-scroll.horizontally-scrolled .connections-row.selected .fixed {
+    box-shadow: inset 2px 0 0 var(--accent), 8px 0 12px -10px rgb(0 0 0 / 45%);
 }
 
-.connections-row.selected {
-    background: var(--row-selected);
+/* A lamp before each host: lit while traffic flows, steady while open, hollow once closed. */
+.connections-host::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    margin-right: 11px;
+    border-radius: var(--r-round);
+    background: var(--good);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--good) 70%, transparent);
+    vertical-align: 2px;
+    transition: background-color var(--dur-3) var(--ease-out), box-shadow var(--dur-3) var(--ease-out);
+}
+
+.connections-host[data-state='flow']::before {
+    background: var(--accent);
+    box-shadow: 0 0 10px var(--accent);
+}
+
+.connections-host[data-state='closed']::before {
+    background: transparent;
+    box-shadow: inset 0 0 0 1.5px var(--idle);
 }
 
 .connections-block.completed {
     color: var(--text-3);
 }
 
-.connections-row.completed .connections-block.fixed::before {
-    content: '';
-    display: inline-block;
-    width: 6px;
-    height: 6px;
-    margin-right: 8px;
-    border: 1.5px solid var(--idle);
-    border-radius: var(--r-round);
-    vertical-align: 1px;
+.connections-row.completed .connections-host {
+    text-decoration: line-through;
+    text-decoration-color: color-mix(in srgb, var(--text-3) 60%, transparent);
 }
 
 .connections-type {
     font-family: var(--font-mono);
-    font-size: var(--t-xs);
+    font-size: var(--t-2xs);
+    font-stretch: var(--mono-dense);
 }
 
 .connections-type.dns {
-    padding: 2px 6px;
-    border-radius: var(--r-chip);
-    background: var(--sunken);
+    padding: 2px 7px;
+    border: 1px solid var(--hair-2);
+    border-radius: 6px;
     color: var(--text-2);
 }
 
@@ -327,19 +548,26 @@
     flex: 0 4 auto;
     min-width: 0;
     overflow: hidden;
+    color: var(--text-2);
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
 .connections-hop:last-child {
     flex: 0 1 auto;
+    color: var(--accent);
+    font-weight: 500;
+}
+
+.connections-row.completed .connections-hop:last-child {
+    color: var(--text-3);
 }
 
 .connections-route .line-bullet {
-    width: 9px;
-    height: 9px;
-    margin: 0 5px 0 0;
-    border-width: 2.5px;
+    width: 8px;
+    height: 8px;
+    margin: 0 6px 0 0;
+    border-width: 2px;
     vertical-align: 0;
 }
 
@@ -347,7 +575,7 @@
 .connections-hop + .connections-hop-dot,
 .connections-hop + .sr-only + .line-bullet,
 .connections-hop + .sr-only + .connections-hop-dot {
-    margin-left: 8px;
+    margin-left: 10px;
 }
 
 .connections-hop-dot {
@@ -355,20 +583,28 @@
     flex-shrink: 0;
     width: 5px;
     height: 5px;
-    margin-right: 5px;
+    margin-right: 6px;
     border-radius: var(--r-round);
-    background: var(--idle);
+    background: var(--accent);
+    box-shadow: 0 0 6px var(--accent);
     vertical-align: 2px;
 }
 
+.connections-row.completed .connections-hop-dot {
+    background: var(--idle);
+    box-shadow: none;
+}
+
 .connections-speed {
+    color: var(--accent);
     font-family: var(--font-mono);
-    font-size: var(--t-xs);
+    font-size: var(--t-2xs);
+    font-stretch: var(--mono-dense);
     font-variant-numeric: tabular-nums;
 }
 
 .connections-speed.idle {
-    color: var(--text-3);
+    color: var(--faint);
 }
 
 .connections-block:nth-child(n + 6) {
@@ -377,7 +613,7 @@
 
 .connections-empty {
     position: absolute;
-    inset: 30px 0 0;
+    inset: 34px 0 0;
     display: grid;
     place-content: center;
     justify-items: center;
@@ -387,24 +623,37 @@
     pointer-events: none;
 }
 
-/* Detail drawer */
-.connections-drawer {
-    background: var(--panel);
+.connections-empty .icon {
+    color: var(--accent);
+    filter: drop-shadow(0 0 10px var(--glow));
+}
+
+/* Detail panel: floats inside the table panel and draws the connection's path. */
+.connections-card .drawer.connections-drawer {
+    top: 10px;
+    right: 10px;
+    height: calc(100% - 20px);
+    max-width: calc(100% - 20px) !important;
+    overflow: hidden;
+    border: 1px solid var(--hair-2);
+    border-radius: var(--r-panel);
+    background: var(--panel-solid);
+    box-shadow: var(--shadow-drawer), 0 0 60px -30px var(--glow);
 }
 
 .connections-drawer-head {
     display: flex;
     flex-shrink: 0;
     align-items: center;
-    justify-content: space-between;
-    height: 48px;
-    padding: 0 8px 0 20px;
+    gap: 10px;
+    height: 52px;
+    padding: 0 10px 0 18px;
     border-bottom: 1px solid var(--hair);
 }
 
 .connections-drawer-title {
     font-size: var(--t-md);
-    font-weight: 640;
+    font-weight: 600;
 }
 
 .connections-drawer-close {
@@ -413,19 +662,32 @@
     justify-content: center;
     width: 32px;
     height: 32px;
-    border-radius: var(--r-ctl);
+    margin-left: auto;
+    border: 1px solid var(--hair);
+    border-radius: var(--r-chip);
     color: var(--text-2);
+    transition: color var(--dur-2) var(--ease-out), border-color var(--dur-2) var(--ease-out);
 }
 
 .connections-drawer-close:hover {
-    background: var(--sunken);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
     color: var(--text);
+}
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+    .connections-drawer-close .icon > svg {
+        transition: transform var(--dur-icon) var(--ease-icon);
+    }
+
+    .connections-drawer-close:hover .icon > svg {
+        transform: rotate(90deg);
+    }
 }
 
 .connections-info {
     flex: 1;
     min-height: 0;
-    padding: var(--sp-4) var(--sp-5);
+    padding: var(--sp-4) 18px;
     overflow-y: auto;
 }
 
@@ -433,7 +695,7 @@
     display: flex;
     flex-shrink: 0;
     justify-content: flex-end;
-    padding: var(--sp-3) var(--sp-5);
+    padding: var(--sp-3) 18px;
     border-top: 1px solid var(--hair);
 }
 
@@ -448,9 +710,9 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    height: 22px;
-    padding: 0 8px;
-    border-radius: var(--r-chip);
+    height: 24px;
+    padding: 0 10px;
+    border-radius: var(--r-round);
     font-size: var(--t-xs);
     font-weight: 600;
 }
@@ -469,82 +731,119 @@
 }
 
 .connection-state.is-open::before {
-    animation: live-pulse 1.6s var(--ease-out) infinite;
+    animation: soft-blink 1.6s ease-in-out infinite;
 }
 
 .connection-state.is-closed {
-    background: var(--sunken);
+    background: var(--hover);
     color: var(--text-3);
 }
 
 .connection-network {
     color: var(--text-3);
-    font-size: var(--t-xs);
+    font-family: var(--font-mono);
+    font-size: 10px;
     text-transform: uppercase;
 }
 
-/* The journey: a vertical route through each hop */
+/* The path: a bead per hop on a thread lit from cyan to blue, light travelling down it. */
 .journey {
     position: relative;
     display: grid;
     gap: 0;
-    margin-bottom: var(--sp-5);
+    margin-bottom: var(--sp-4);
 }
 
-/* Segment from each stop down to the next; the routed part takes the group's line colour. */
 .journey-stop:not(:last-child)::before {
     content: '';
     position: absolute;
-    top: 17px;
-    bottom: -17px;
-    left: 5px;
-    width: 2px;
-    background: var(--idle);
+    top: 24px;
+    bottom: -8px;
+    left: 6.5px;
+    width: 1px;
+    background: var(--hair-2);
 }
 
-.journey-stop.is-routed:not(:last-child)::before {
-    left: 4.5px;
-    width: 3px;
-    background: var(--line);
+.journey-stop.is-routed:not(:last-child)::before,
+.journey-stop.is-routed + .journey-stop:not(:last-child)::before {
+    left: 6px;
+    width: 2px;
+    background: linear-gradient(var(--accent), var(--accent-2));
+    opacity: 0.6;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .journey-stop:not(:last-child)::after {
+        content: '';
+        position: absolute;
+        top: 24px;
+        left: 4.5px;
+        width: 5px;
+        height: 5px;
+        border-radius: var(--r-round);
+        background: var(--accent);
+        box-shadow: 0 0 8px var(--accent);
+        animation: journey-travel 1.4s linear infinite;
+        animation-delay: calc(var(--step, 0) * 240ms);
+    }
+
+    .journey-stop:nth-child(2) { --step: 1; }
+    .journey-stop:nth-child(3) { --step: 2; }
+    .journey-stop:nth-child(4) { --step: 3; }
+    .journey-stop:nth-child(5) { --step: 4; }
+}
+
+@keyframes journey-travel {
+    from {
+        opacity: 1;
+        transform: translateY(0);
+    }
+
+    to {
+        opacity: 0;
+        transform: translateY(18px);
+    }
 }
 
 .journey-stop {
     position: relative;
     display: grid;
-    grid-template-columns: 12px 72px minmax(0, 1fr);
+    grid-template-columns: 14px 64px minmax(0, 1fr);
     gap: 12px;
     align-items: start;
-    padding: 7px 0;
+    padding: 8px 0;
     line-height: 20px;
 }
 
 .journey-dot {
     position: relative;
     z-index: 1;
-    width: 12px;
-    height: 12px;
-    border: 2.5px solid var(--text-3);
+    width: 14px;
+    height: 14px;
+    margin-top: 3px;
+    border: 1.5px solid var(--hair-2);
     border-radius: var(--r-round);
-    background: var(--panel);
+    background: var(--panel-solid);
     align-self: start;
-    margin-top: 4px;
 }
 
 .journey-dot.line-bullet {
-    width: 12px;
-    height: 12px;
-    border-width: 3px;
+    width: 14px;
+    height: 14px;
+    border-width: 2.5px;
+    border-radius: var(--r-round);
     border-color: var(--line);
+    box-shadow: 0 0 8px var(--line);
 }
 
-.journey-origin .journey-dot,
-.journey-end .journey-dot {
-    border-color: var(--ink);
-    background: var(--ink);
+.journey-origin .journey-dot {
+    border-color: var(--text-3);
 }
 
 .journey-end .journey-dot {
-    background: var(--signal);
+    border-color: transparent;
+    background: var(--accent-grad);
+    box-shadow: 0 0 12px var(--glow);
 }
 
 .journey-label {
@@ -563,47 +862,101 @@
     font-weight: 600;
 }
 
+.journey-value .mono {
+    font-size: var(--t-xs);
+    font-stretch: var(--mono-dense);
+}
+
+.journey-chains {
+    color: var(--accent);
+}
+
 .connection-facts {
     display: grid;
-    gap: 2px;
-    padding-top: var(--sp-3);
+    grid-template-columns: 1fr 1fr;
+    gap: 12px 14px;
+    padding-top: 14px;
     border-top: 1px solid var(--hair);
 }
 
 .connection-facts > div:not(.connection-facts-pair),
 .connection-facts-pair > div {
     display: grid;
-    grid-template-columns: 84px minmax(0, 1fr);
-    gap: 12px;
-    padding: 6px 0;
-    font-size: var(--t-sm);
+    gap: 3px;
+    min-width: 0;
+}
+
+.connection-facts > div:not(.connection-facts-pair) {
+    grid-column: 1 / -1;
 }
 
 .connection-facts-pair {
     display: grid;
+    grid-column: 1 / -1;
     grid-template-columns: 1fr 1fr;
-    gap: 12px;
+    gap: 14px;
 }
 
 .connection-facts dt {
-    color: var(--text-3);
-    font-size: var(--t-xs);
-    line-height: 20px;
+    color: var(--faint);
+    font-size: var(--t-2xs);
 }
 
 .connection-facts dd {
     min-width: 0;
     color: var(--text);
+    font-size: var(--t-xs);
     overflow-wrap: anywhere;
+}
+
+.connection-facts dd.mono,
+.connection-facts dd .mono {
+    font-stretch: var(--mono-dense);
+}
+
+/* Below wide screens the sources become a row of pills above the table. */
+@media (max-width: 1099px) {
+    .connections-top {
+        grid-template-columns: minmax(0, 1fr);
+        height: auto;
+        gap: 12px;
+    }
+
+    .connections-rates {
+        height: 230px;
+    }
+
+    .connections-sources {
+        padding: 0;
+        overflow: visible;
+        border: 0;
+        background: none;
+        box-shadow: none;
+        -webkit-backdrop-filter: none;
+        backdrop-filter: none;
+    }
+
+    .connections-sources > .connections-panel-head {
+        display: none;
+    }
+}
+
+@media (max-height: 760px) and (min-width: 1100px) {
+    .connections-top {
+        height: 220px;
+    }
+}
+
+@media (max-height: 760px) and (min-width: 769px) and (max-width: 1099px) {
+    .connections-rates {
+        height: 196px;
+    }
 }
 
 @media (max-width: 768px) {
     .connections-page {
+        gap: 12px;
         padding-bottom: var(--sp-3);
-    }
-
-    .connections-traffic {
-        font-size: var(--t-xs);
     }
 
     .connections-page .header-actions {
@@ -614,12 +967,65 @@
         margin-left: auto;
     }
 
-    .connections-info {
-        padding: var(--sp-3) var(--sp-4);
+    .connections-rates {
+        height: auto;
+        grid-template-rows: auto auto 60px;
+        gap: 8px;
+        padding: 12px 14px 8px;
     }
 
-    .connection-facts-pair {
-        grid-template-columns: 1fr;
-        gap: 0;
+    .connections-legend {
+        display: none;
+    }
+
+    .connections-rate-row {
+        gap: 6px 22px;
+    }
+
+    .connections-rate-value {
+        font-size: 1.25rem;
+    }
+
+    .connections-traffic {
+        margin-left: 0;
+        padding-left: 0;
+        border-left: 0;
+    }
+
+    .connections-card {
+        min-height: 200px;
+    }
+
+    /* Lets the detail sheet below position against the screen. */
+    .connections-card.card {
+        -webkit-backdrop-filter: none;
+        backdrop-filter: none;
+    }
+
+    /* The details rise as a sheet over the page, above the tab bar. */
+    .connections-card .drawer-layer {
+        position: fixed;
+        inset: 0 0 calc(var(--bar-h) + env(safe-area-inset-bottom));
+        border-radius: 0;
+        background: transparent;
+        transition: background-color var(--dur-3) var(--ease-out);
+    }
+
+    .connections-card .drawer-layer.is-open {
+        background: var(--scrim);
+    }
+
+    .connections-card .drawer.connections-drawer {
+        top: auto;
+        right: 8px;
+        bottom: 8px;
+        left: 8px;
+        width: auto !important;
+        height: min(76%, 640px);
+        max-width: none !important;
+    }
+
+    .connections-info {
+        padding: var(--sp-3) var(--sp-4);
     }
 }

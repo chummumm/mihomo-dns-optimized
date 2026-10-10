@@ -6,7 +6,14 @@
 .dns-page h2 {
     color: var(--text);
     font-size: var(--t-md);
-    font-weight: 640;
+    font-weight: 600;
+}
+
+/* Section readings beside a heading speak in the same mono tag as the other pages. */
+.dns-section-heading > .dns-muted {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.04em;
 }
 
 .dns-muted {
@@ -74,7 +81,8 @@
     position: absolute;
     inset: 0 auto 0 0;
     border-radius: 2px;
-    background: var(--text-3);
+    background: var(--accent-grad);
+    box-shadow: 0 0 6px var(--accent);
 }
 
 /* Tabs */
@@ -106,13 +114,15 @@
     right: 10px;
     bottom: -1px;
     left: 10px;
-    height: 3px;
-    border-radius: 3px 3px 0 0;
-    background: var(--ink);
+    height: 2px;
+    border-radius: 2px 2px 0 0;
+    background: var(--accent-grad);
+    box-shadow: 0 0 12px var(--accent);
 }
 
 .dns-tab.active {
-    color: var(--text);
+    color: var(--accent);
+    font-weight: 600;
 }
 
 .dns-tab:focus-visible {
@@ -120,7 +130,7 @@
 }
 
 .dns-panel {
-    animation: fade-up var(--dur-2) var(--ease-out);
+    animation: panel-in var(--dur-3) var(--ease-out);
 }
 
 /* Empty / unsupported states */
@@ -169,7 +179,8 @@
     inset: 0 auto 0 0;
     width: 40%;
     border-radius: 2px;
-    background: var(--ink);
+    background: var(--accent-grad);
+    box-shadow: 0 0 8px var(--accent);
     animation: run 1.1s var(--ease-in-out) infinite;
 }
 
@@ -230,9 +241,9 @@
 }
 
 .dns-metric-label {
-    color: var(--text-2);
+    color: var(--text-3);
     font-size: var(--t-xs);
-    font-weight: 540;
+    font-weight: 500;
 }
 
 .dns-metric > strong {
@@ -240,7 +251,7 @@
     font-family: var(--font-mono);
     font-size: 1.625rem;
     font-variant-numeric: tabular-nums;
-    font-weight: 560;
+    font-weight: 500;
     letter-spacing: -0.02em;
     line-height: 1.15;
     overflow-wrap: anywhere;
@@ -264,11 +275,12 @@
 }
 
 .dns-cache-split .is-fresh {
-    background: var(--line-3);
+    background: var(--accent-grad);
+    box-shadow: 0 0 6px var(--accent);
 }
 
 .dns-cache-split .is-stale {
-    background: color-mix(in srgb, var(--line-3) 45%, var(--panel));
+    background: color-mix(in srgb, var(--accent-2) 55%, transparent);
 }
 
 .dns-definition {
@@ -296,29 +308,102 @@
 .dns-trend text {
     fill: var(--text-3);
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: 9.5px;
+    font-stretch: var(--mono-dense);
 }
 
 .dns-grid-line {
     stroke: var(--hair);
     stroke-width: 1;
     stroke-dasharray: 2 4;
+    vector-effect: non-scaling-stroke;
 }
 
 .dns-line {
     fill: none;
-    stroke-width: 1.75;
+    stroke-width: 2;
+    stroke-linecap: round;
     stroke-linejoin: round;
+    stroke-dasharray: 1 1;
     vector-effect: non-scaling-stroke;
 }
 
-.dns-area-queries {
-    fill: color-mix(in srgb, var(--line-0) 10%, transparent);
+.dns-line-queries {
+    stroke: var(--accent);
+    stroke-width: 2.2;
+    filter: drop-shadow(0 0 4px var(--glow));
 }
 
-.dns-line-queries { stroke: var(--line-0); }
-.dns-line-cache { stroke: var(--line-3); }
-.dns-line-errors { stroke: var(--bad); }
+.dns-line-cache { stroke: var(--accent-2); stroke-width: 1.8; }
+.dns-line-errors { stroke: var(--bad); stroke-width: 1.5; }
+
+/* Each bin's quietest and busiest minute, so short spikes stay visible behind the smoothed line. */
+.dns-band-queries {
+    fill: color-mix(in srgb, var(--accent) 9%, transparent);
+    stroke: none;
+}
+
+.dns-fill-top {
+    stop-color: var(--accent);
+    stop-opacity: 0.22;
+}
+
+.dns-fill-bottom {
+    stop-color: var(--accent);
+    stop-opacity: 0;
+}
+
+/* Lines draw themselves in once, then morph smoothly as each refresh shifts the window. */
+@media (prefers-reduced-motion: no-preference) {
+    .dns-line {
+        animation: dns-draw 1.2s var(--ease-out) backwards;
+    }
+
+    .dns-line-cache {
+        animation-delay: 120ms;
+    }
+
+    .dns-line-errors {
+        animation-delay: 240ms;
+    }
+
+    .dns-band-queries,
+    .dns-area-queries {
+        animation: dns-fill-in 900ms var(--ease-out) 300ms backwards;
+    }
+
+    .dns-trend path {
+        transition: d 700ms var(--ease-out);
+    }
+
+    .dns-cursor {
+        transition: transform 140ms var(--ease-out);
+    }
+
+    .dns-cursor circle {
+        transition: cy 140ms var(--ease-out);
+    }
+
+    .dns-readout {
+        transition: left 140ms var(--ease-out);
+    }
+}
+
+@keyframes dns-draw {
+    from {
+        stroke-dashoffset: 1;
+    }
+
+    to {
+        stroke-dashoffset: 0;
+    }
+}
+
+@keyframes dns-fill-in {
+    from {
+        opacity: 0;
+    }
+}
 
 .dns-hit-area {
     fill: transparent;
@@ -326,19 +411,20 @@
 }
 
 .dns-cursor line {
-    stroke: var(--text-3);
+    stroke: var(--hair-2);
     stroke-width: 1;
+    stroke-dasharray: 3 3;
     vector-effect: non-scaling-stroke;
 }
 
 .dns-cursor circle {
-    stroke: var(--panel);
+    stroke: var(--panel-solid);
     stroke-width: 2;
     vector-effect: non-scaling-stroke;
 }
 
-.dns-cursor-queries { fill: var(--line-0); }
-.dns-cursor-cache { fill: var(--line-3); }
+.dns-cursor-queries { fill: var(--accent); }
+.dns-cursor-cache { fill: var(--accent-2); }
 
 .dns-readout {
     position: absolute;
@@ -375,7 +461,7 @@
 }
 
 .dns-readout {
-    animation: fade-up var(--dur-1) var(--ease-out);
+    animation: dns-fill-in var(--dur-2) var(--ease-out);
 }
 
 .dns-readout.is-flipped {
@@ -410,8 +496,8 @@
     display: none;
 }
 
-.dns-legend-queries::before { background: var(--line-0); }
-.dns-legend-cache::before { background: var(--line-3); }
+.dns-legend-queries::before { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.dns-legend-cache::before { background: var(--accent-2); }
 .dns-legend-errors::before { background: var(--bad); }
 
 /* Top lists */
@@ -440,7 +526,7 @@
 }
 
 .dns-top-rank {
-    color: var(--text-3);
+    color: var(--faint);
     font-family: var(--font-mono);
     font-size: var(--t-2xs);
 }
@@ -458,11 +544,25 @@
     height: 6px;
 }
 
+.dns-top-bar {
+    border-radius: 3px;
+    background: var(--hover);
+}
+
 .dns-top-bar > span {
     min-width: 2px;
-    border-radius: 0 3px 3px 0;
-    background: color-mix(in srgb, var(--line-0) 70%, var(--panel));
-    transition: width var(--dur-3) var(--ease-out);
+    border-radius: 3px;
+    background: linear-gradient(90deg, var(--accent-2), var(--accent));
+    box-shadow: 0 0 8px -2px var(--accent);
+    transition: width 700ms var(--ease-spring);
+}
+
+.dns-top-list li {
+    transition: background-color var(--dur-2) var(--ease-out);
+}
+
+.dns-top-list li:hover {
+    background: var(--row-hover);
 }
 
 .dns-top-name {
@@ -516,14 +616,14 @@
 }
 
 .dns-input:hover {
-    border-color: var(--text-3);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
 .dns-input:focus,
 .dns-input:focus-visible {
-    border-color: var(--ink);
+    border-color: var(--accent);
     outline: none;
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ink) 16%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent), 0 0 18px -6px var(--glow);
 }
 
 select.dns-input {
@@ -561,7 +661,6 @@ select.dns-input {
     height: 8px;
     border-radius: var(--r-round);
     background: var(--good);
-    animation: live-pulse 1.6s var(--ease-out) infinite;
 }
 
 .dns-live-controls.is-live .dns-live-dot {
@@ -571,6 +670,11 @@ select.dns-input {
 .dns-query-card {
     margin-top: var(--sp-3);
     overflow: hidden;
+}
+
+.dns-query-card.card,
+.dns-upstream-card.card {
+    background: var(--panel-solid);
 }
 
 /* Tables */
@@ -598,10 +702,13 @@ select.dns-input {
     position: sticky;
     top: 0;
     z-index: 1;
-    background: var(--sunken);
-    color: var(--text-3);
-    font-size: var(--t-xs);
-    font-weight: 560;
+    background: var(--panel-solid);
+    color: var(--faint);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-stretch: var(--mono-dense);
+    font-weight: 500;
+    letter-spacing: 0.06em;
 }
 
 .dns-table tbody tr {
@@ -626,7 +733,7 @@ select.dns-input {
 }
 
 .dns-domain-button:hover {
-    color: var(--link);
+    color: var(--accent);
     text-decoration: underline;
     text-underline-offset: 3px;
 }
@@ -641,12 +748,12 @@ select.dns-input {
     align-items: center;
     gap: 6px;
     height: 22px;
-    padding: 0 8px;
-    border-radius: var(--r-chip);
-    background: var(--sunken);
+    padding: 0 9px;
+    border-radius: var(--r-round);
+    background: var(--hover);
     color: var(--text-2);
     font-size: var(--t-xs);
-    font-weight: 540;
+    font-weight: 500;
 }
 
 .dns-outcome::before {
@@ -670,8 +777,8 @@ select.dns-input {
 }
 
 .dns-outcome-upstream {
-    background: color-mix(in srgb, var(--line-0) 12%, var(--panel));
-    color: var(--line-0);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
 }
 
 .dns-outcome-error,
@@ -694,7 +801,7 @@ select.dns-input {
     justify-content: space-between;
     gap: var(--sp-3);
     padding: 10px 14px;
-    background: var(--panel);
+    border-top: 1px solid var(--hair);
 }
 
 .dns-pagination-info {
@@ -877,11 +984,20 @@ select.dns-input {
         grid-template-columns: 84px minmax(0, 1fr);
     }
 
-    .dns-readout {
-        display: none;
+    /* On phones the reading for the touched minute sits under the chart instead of floating. */
+    .dns-readout,
+    .dns-readout.is-flipped {
+        position: static;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 14px;
+        min-width: 0;
+        margin-top: var(--sp-2);
+        transform: none;
+        transition: none;
     }
 
     .dns-trend text {
-        font-size: 26px;
+        font-size: 24px;
     }
 }

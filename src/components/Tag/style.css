@@ -3,22 +3,24 @@
     flex-shrink: 0;
     align-items: center;
     height: 20px;
-    padding: 0 6px;
+    padding: 0 7px;
     border: 1px solid var(--hair-2);
-    border-radius: var(--r-chip);
-    background: var(--panel);
-    color: var(--text-2);
-    font-size: var(--t-2xs);
-    font-weight: 560;
-    letter-spacing: 0.01em;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-3);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-stretch: var(--mono-dense);
+    font-weight: 500;
+    letter-spacing: 0.02em;
     line-height: 1;
     white-space: nowrap;
 }
 
 .tag-ink {
-    border-color: var(--ink);
-    background: var(--ink);
-    color: var(--on-ink);
+    border-color: transparent;
+    background: var(--accent-grad);
+    color: var(--on-accent);
 }
 
 .tag-good {

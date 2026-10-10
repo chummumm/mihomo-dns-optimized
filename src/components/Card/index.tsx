@@ -1,17 +1,16 @@
 import classnames from 'classnames'
 import { forwardRef } from 'react'
 
-import { type BaseComponentProps } from '@models/BaseProps'
 import './style.css'
 
-interface CardProps extends BaseComponentProps {
+interface CardProps extends React.HTMLAttributes<HTMLDivElement> {
     ref?: React.ForwardedRef<HTMLDivElement>
 }
 
 export const Card = forwardRef<HTMLDivElement, CardProps>((props: CardProps, ref) => {
-    const { className, style, children } = props
+    const { className, style, children, ...attributes } = props
     return (
-        <div className={classnames('card', className)} style={style} ref={ref}>
+        <div {...attributes} className={classnames('card', className)} style={style} ref={ref}>
             { children }
         </div>
     )

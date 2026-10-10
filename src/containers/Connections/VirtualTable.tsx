@@ -5,8 +5,8 @@ import { FixedSizeList, type ListChildComponentProps } from 'react-window'
 
 import { type FormatConnection } from './store'
 
-const ROW_HEIGHT = 36
-const HEADER_HEIGHT = 30
+const ROW_HEIGHT = 40
+const HEADER_HEIGHT = 34
 
 interface TableProps {
     rows: Array<Row<FormatConnection>>
@@ -16,6 +16,8 @@ interface TableProps {
     totalWidth: number
     centeredColumns: Set<string>
     selectedID?: string
+    // UI only: rows that arrived with the latest snapshot fade in once
+    freshIDs?: ReadonlySet<string>
     onSelect: (id: string) => void
 }
 
@@ -70,9 +72,9 @@ function ConnectionRow ({ index, style, data }: ListChildComponentProps<TablePro
         <div
             role="row"
             aria-rowindex={index + 2}
-            className={classnames('connections-row', { selected: data.selectedID === row.original.id, completed: row.original.completed })}
+            className={classnames('connections-row', { selected: data.selectedID === row.original.id, completed: row.original.completed, 'is-fresh': data.freshIDs?.has(row.original.id) })}
             data-connection-id={row.original.id}
-            style={{ ...style, top: Number(style.top ?? 0) + HEADER_HEIGHT, width: data.totalWidth }}
+            style={{ ...style, top: Number(style.top ?? 0) + HEADER_HEIGHT, width: data.totalWidth, '--i': index % 16 } as CSSProperties}
             onClick={() => data.onSelect(row.original.id)}>
             {row.getAllCells().map(cell => (
                 <div

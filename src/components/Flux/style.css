@@ -1,0 +1,104 @@
+.tween-number,
+.rolling-bytes {
+    font-variant-numeric: tabular-nums;
+}
+
+.rolling-bytes-unit {
+    margin-left: 0.3em;
+    font-size: 0.42em;
+    font-weight: 500;
+    letter-spacing: 0;
+    opacity: 0.6;
+}
+
+/* Names slide within a fixed line box; the outgoing and incoming names share one cell. */
+.slide-text {
+    position: relative;
+    display: grid;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.slide-text-item {
+    grid-area: 1 / 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.sparkline {
+    display: block;
+    width: 100%;
+    overflow: visible;
+}
+
+.sparkline-line {
+    stroke: var(--spark, var(--accent));
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.sparkline-stop-top {
+    stop-color: var(--spark, var(--accent));
+    stop-opacity: 0.3;
+}
+
+.sparkline-stop-bottom {
+    stop-color: var(--spark, var(--accent));
+    stop-opacity: 0;
+}
+
+.sparkline-accent-2 { --spark: var(--accent-2); }
+.sparkline-good { --spark: var(--good); }
+.sparkline-warn { --spark: var(--warn); }
+.sparkline-bad { --spark: var(--bad); }
+
+@media (prefers-reduced-motion: no-preference) {
+    .sparkline path {
+        transition: d 900ms var(--ease-out);
+    }
+}
+
+.ring {
+    position: relative;
+    display: inline-grid;
+    flex-shrink: 0;
+    place-items: center;
+}
+
+.ring > svg {
+    position: absolute;
+    inset: 0;
+    transform: rotate(-90deg);
+}
+
+.ring circle {
+    fill: none;
+}
+
+.ring-track {
+    stroke: var(--hair);
+}
+
+.ring-value {
+    stroke-linecap: round;
+    transition: stroke-dashoffset 900ms var(--ease-spring), stroke var(--dur-3) var(--ease-out);
+}
+
+.ring-stop-a { stop-color: var(--accent); }
+.ring-stop-b { stop-color: var(--accent-2); }
+
+.ring-flow .ring-value { filter: drop-shadow(0 0 4px var(--glow)); }
+.ring-good .ring-value { stroke: var(--good); }
+.ring-warn .ring-value { stroke: var(--warn); }
+.ring-bad .ring-value { stroke: var(--bad); }
+.ring-idle .ring-value { stroke: var(--idle); }
+
+.ring-center {
+    position: relative;
+    display: grid;
+    justify-items: center;
+    line-height: 1.1;
+}

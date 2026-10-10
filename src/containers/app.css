@@ -1,9 +1,36 @@
-/* Shell: the ink wayfinding rail on the left, work area on the right. */
+/* Shell: the glowing rail on the left, the work area over a faint measuring grid. */
 
 .app {
+    position: relative;
     min-height: 100vh;
     padding-left: var(--rail-w);
     background: var(--ground);
+    isolation: isolate;
+}
+
+/* Ambient light and the measuring grid stay put while pages scroll over them. */
+.app::before,
+.app::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+}
+
+.app::before {
+    background:
+        radial-gradient(1100px 560px at 78% -12%, var(--amb-1), transparent 62%),
+        radial-gradient(900px 520px at -8% 108%, var(--amb-2), transparent 60%);
+}
+
+/* The grid is strongest under the top of the work area and fades out into the room. */
+.app::after {
+    background:
+        linear-gradient(var(--grid) 1px, transparent 1px) 0 0 / 32px 32px,
+        linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0 / 32px 32px;
+    -webkit-mask-image: radial-gradient(140% 90% at 60% 0%, #000 30%, transparent 85%);
+    mask-image: radial-gradient(140% 90% at 60% 0%, #000 30%, transparent 85%);
 }
 
 .page-container {
@@ -20,25 +47,33 @@
     display: flex;
     flex-direction: column;
     min-height: 100%;
-    animation: fade-up var(--dur-2) var(--ease-out);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .route-view {
+        animation: panel-in 380ms var(--ease-out);
+    }
 }
 
 .page {
+    position: relative;
     display: flex;
     flex: 1;
     flex-direction: column;
     width: 100%;
-    max-width: 1680px;
+    max-width: 1440px;
     min-width: 0;
     margin: 0 auto;
-    padding: var(--sp-6) 28px var(--sp-10);
+    padding: 22px 28px var(--sp-10);
 }
 
-/* Shared panel heading inside a page section */
+/* Shared floating panel */
 .panel {
     border: 1px solid var(--hair);
     border-radius: var(--r-panel);
     background: var(--panel);
+    box-shadow: var(--shadow-card);
+    backdrop-filter: blur(16px);
 }
 
 .empty-state {
@@ -62,17 +97,12 @@
     }
 }
 
-@media (max-width: 1023px) and (min-width: 769px) {
-    .app {
-        --rail-w: 76px;
-    }
-}
-
 @media (max-width: 768px) {
     .app {
         padding-left: 0;
         padding-bottom: calc(var(--bar-h) + env(safe-area-inset-bottom));
     }
+
 
     .page-container {
         height: calc(100vh - var(--bar-h));

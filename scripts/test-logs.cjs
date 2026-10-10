@@ -57,7 +57,7 @@ wss.on('connection', (socket, req) => {
     if (url.pathname === '/logs') {
         const level = url.searchParams.get('level') || 'info'
         assert(Object.hasOwn(rank, level), `invalid log subscription: ${level}`)
-        subscriptions.push({ level, socket })
+        subscriptions.push({ level, socket, token: url.searchParams.get('token') || '' })
     } else if (url.pathname === '/connections') {
         socket.send(JSON.stringify({ connections: [], uploadTotal: 0, downloadTotal: 0 }))
     }
@@ -132,6 +132,9 @@ async function main() {
     }, { port })
     const page = await context.newPage()
     page.setDefaultTimeout(6000)
+    // The clear animation's boundary is advanced explicitly in its race tests.
+    // The clock runs normally for the existing menu, scrolling and mobile tests.
+    await page.clock.install()
     page.on('pageerror', error => pageErrors.push(String(error)))
     page.on('console', message => {
         if (message.type() === 'error' || /unmounted component|synchronously unmount|ReactDOM\.render/.test(message.text())) consoleErrors.push(message.text())
@@ -261,12 +264,97 @@ async function main() {
     await emit([event('phone-debug')])
     await bounded('phone-debug')
 
+    // Pause holds at most one history window without mutating the core or the
+    // shared stream buffer. Resume preserves order and keeps the same bound.
+    const pause = page.locator('.logs-pause')
+    const clear = page.locator('.logs-clear')
+    const beforePause = await payloads.allTextContents()
+    await pause.click()
+    await emit(batch('paused-cap', 245))
+    await until(async () => await page.locator('.logs-paused-count b').textContent().catch(() => '') === String(limit), 'paused buffer reaches its bound')
+    await frames()
+    assert.deepEqual(await payloads.allTextContents(), beforePause, 'pause leaves visible logs stable')
+    await pause.click()
+    await bounded('paused-cap-244')
+    assert.equal(await payloads.first().textContent(), marker + 'paused-cap-45', 'pause evicts its oldest held entries')
+
+    // Reduced motion clears immediately. Clearing while paused discards only
+    // entries already received; later held entries remain available on resume.
+    await pause.click()
+    await emit([event('paused-before-clear')])
+    await until(async () => await page.locator('.logs-paused-count b').textContent().catch(() => '') === '1', 'one held log before clear')
+    await clear.click()
+    assert.equal(await payloads.count(), 0, 'reduced-motion clear empties the view immediately')
+    assert.equal(await page.locator('.logs-paused-count').count(), 0, 'clear also empties the old paused buffer')
+    assert.equal(await pause.getAttribute('aria-pressed'), 'true', 'clear does not resume a paused view')
+    await emit([event('paused-after-clear')])
+    await until(async () => await page.locator('.logs-paused-count b').textContent().catch(() => '') === '1', 'one new held log after clear')
+    await pause.click()
+    await last('paused-after-clear')
+    assert.deepEqual(await payloads.allTextContents(), [marker + 'paused-after-clear'])
+
+    // Pause only the test clock, not log delivery. New records arrive over a real
+    // WebSocket while the original 220ms exit animation is still in progress.
+    await page.emulateMedia({ reducedMotion: 'no-preference' })
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000))
+    const isClearing = () => page.locator('.logs-card').evaluate(element => element.classList.contains('is-clearing'))
+    await clear.evaluate(button => button.click())
+    assert.equal(await isClearing(), true, 'the exit animation remains enabled')
+    assert.equal(await clear.isDisabled(), true, 'repeated clear cannot schedule another delayed erase')
+    await emit([event('during-clear-animation')])
+    await page.clock.runFor(200)
+    assert.equal(await isClearing(), true, 'the old rows keep their 220ms exit animation')
+    await page.clock.runFor(21)
+    await last('during-clear-animation')
+    assert.deepEqual(await payloads.allTextContents(), [marker + 'during-clear-animation'], 'new entries survive the clear animation')
+    assert.equal(await isClearing(), false)
+
+    // Leave and return before the exit timer would fire. The cursor must already
+    // be committed at the click, and the unmounted page must cancel its timer.
+    await clear.evaluate(button => { button.click(); window.location.hash = '#/proxies' })
+    await page.locator('.proxies-page').waitFor()
+    await page.evaluate(() => { window.location.hash = '#/logs' })
+    await page.locator('.logs-page').waitFor()
+    assert.equal(await payloads.count(), 0, 'a fast remount never resurrects the cleared stream buffer')
+    await emit([event('after-clear-remount')])
+    await page.clock.runFor(240)
+    await last('after-clear-remount')
+    assert.deepEqual(await payloads.allTextContents(), [marker + 'after-clear-remount'], 'the old page cannot clear a remounted view')
+
+    // Distinct fixture credentials represent another controller identity on the
+    // same local origin. Old visible/held rows and pending clear callbacks must
+    // not cross that boundary. No real controller or private config is used.
+    await pause.evaluate(button => button.click())
+    await emit([event('controller-a-held')])
+    await until(async () => await page.locator('.logs-paused-count b').textContent().catch(() => '') === '1', 'old controller has a held entry')
+    await clear.evaluate(button => { button.click(); window.location.hash = '#/logs?secret=controller-b' })
+    await until(() => currentSubscription()?.token === 'controller-b', 'new controller log subscription')
+    await waitLevel('debug')
+    assert.equal(await payloads.count(), 0, 'controller switch does not expose old visible logs')
+    assert.equal(await pause.getAttribute('aria-pressed'), 'false', 'old pause state and held records are reset')
+    assert.equal(await isClearing(), false, 'old exit animation does not carry to the new controller')
+    await emit([event('controller-b-new')])
+    await last('controller-b-new')
+    await page.clock.runFor(240)
+    assert.deepEqual(await payloads.allTextContents(), [marker + 'controller-b-new'], 'an old controller clear timer cannot erase new controller logs')
+    await page.evaluate(() => { window.location.hash = '#/logs' })
+    await until(() => currentSubscription()?.token === '', 'original controller log subscription')
+    await waitLevel('debug')
+    assert.equal(await payloads.count(), 0, 'returning to the original controller cannot carry the other controller records')
+    await emit([event('controller-a-new')])
+    await last('controller-a-new')
+    await page.clock.resume()
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+
     const storage = await page.evaluate(() => Object.fromEntries(Object.entries(localStorage)))
     assert.equal(JSON.parse(storage.profile).logLevel, 'debug', 'the chosen filter is a persisted preference')
     assert.equal(JSON.parse(storage.profile).breakConnections, true, 'other preferences survive')
     assert(Object.keys(JSON.parse(storage.profile)).every(key => ['breakConnections', 'logLevel', 'probeURL'].includes(key)), 'profile contains only preferences')
     assert.equal(JSON.stringify(storage).includes(marker), false, 'log payloads never enter localStorage')
     assert(Object.keys(storage).every(key => ['language', 'externalControllers', 'externalControllerIndex', 'profile'].includes(key)), `unexpected persisted state: ${Object.keys(storage)}`)
+    assert.deepEqual(await page.evaluate(() => Object.keys(sessionStorage)), [], 'log payloads and pause/clear state never enter sessionStorage')
+    assert.deepEqual(await page.evaluate(async () => indexedDB.databases()), [], 'log records never enter IndexedDB')
+    assert.deepEqual(await page.evaluate(async () => caches.keys()), [], 'log records never enter CacheStorage')
     assert.deepEqual(requests.filter(request => request.method !== 'GET'), [], 'no configuration writes or other HTTP mutations')
     assert.equal(requests.some(request => /flush|clear|restart|reload|\/dns\//i.test(request.path)), false, 'no DNS clear/reload endpoint is contacted')
     assert.equal(config['log-level'], 'silent', 'the controller global log level remains untouched')
@@ -274,7 +362,7 @@ async function main() {
     assert.deepEqual(externalRequests, [], 'all fonts, assets and controller requests stay local')
     assert.deepEqual(pageErrors, [])
     assert.deepEqual(consoleErrors, [])
-    console.log(JSON.stringify({ passed: true, browser: browser.version(), subscriptionLevels: subscriptions.map(entry => entry.level), globalLevel: config['log-level'], silentHasNoSubscription: true, retainedRows: limit, keyboard: true, mobileWidth: 320, menuSurvivesLogAndOptionScrolling: true, backgroundBufferBounded: true, mutationRequests: 0, persistedLogPayloads: 0, externalRequests, pageErrors, consoleErrors }, null, 2))
+    console.log(JSON.stringify({ passed: true, browser: browser.version(), subscriptionLevels: subscriptions.map(entry => entry.level), globalLevel: config['log-level'], silentHasNoSubscription: true, retainedRows: limit, keyboard: true, mobileWidth: 320, menuSurvivesLogAndOptionScrolling: true, backgroundBufferBounded: true, pausedBufferBounded: true, clearAnimationMs: 220, clearPreservesNewLogs: true, clearSurvivesFastRemount: true, controllerLogsIsolated: true, mutationRequests: 0, persistedLogPayloads: 0, externalRequests, pageErrors, consoleErrors }, null, 2))
 }
 
 main().catch(error => { console.error(error.stack); process.exitCode = 1 }).finally(async () => {

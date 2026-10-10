@@ -39,7 +39,7 @@
 .settings-row-action {
     justify-content: flex-end;
     min-height: 52px;
-    background: var(--sunken);
+    background: var(--hover);
 }
 
 .settings-card .label {
@@ -87,13 +87,14 @@
     height: var(--ctl-h);
     padding: 0 10px;
     border-radius: var(--r-ctl);
-    color: var(--link);
+    color: var(--accent);
     font-size: var(--t-sm);
     font-weight: 560;
+    transition: background-color var(--dur-2) var(--ease-out);
 }
 
 .settings-card .external-controller:hover {
-    background: var(--sunken);
+    background: var(--hover);
 }
 
 .settings-hint {

@@ -25,7 +25,8 @@
     width: 38%;
     height: 100%;
     border-radius: var(--r-round);
-    background: var(--ink);
+    background: var(--accent-grad);
+    box-shadow: 0 0 10px var(--accent);
     animation: run 1.1s var(--ease-in-out) infinite;
 }
 
