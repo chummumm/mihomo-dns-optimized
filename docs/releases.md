@@ -12,7 +12,7 @@ mihomo-linux-arm64-v1.19.32-optimized-9.deb
 mihomo-windows-amd64-v1.19.32-optimized-9.zip
 ```
 
-Windows ZIP 内的执行文件相应为 `mihomo-<target>.exe`。新 Release 只发布这一套文件名，不同时附加 `mihomo-dns-` 旧名副本。已经发布的 v8 及更早版本保留原始文件和校验和；本次改名使用新的 v9 修订号，不覆盖既有 Release。
+Windows ZIP 内的执行文件相应为 `mihomo-<target>.exe`。新 Release 只发布这一套文件名，不同时附加 `mihomo-dns-` 旧名副本。已发布的 `v1.19.32-optimized-8` 继续使用原始文件名和校验和；本次改名使用新的 v9 修订号，不覆盖既有 Release。
 
 `SHA256SUMS` 覆盖全部 66 个二进制归档/安装包，以及 `BUILDINFO.json` 和 `version.txt`。`BUILDINFO.json` 记录完整提交号、各目标的 Go 架构参数、工具链、CGO、编译标签以及每个文件的大小和 SHA-256。每个目标缺少文件或校验不一致时，整个 Release 发布失败。已有同名 Release 的文件不被覆盖；重新发布时也必须验证其文件集合和摘要一致。
 
