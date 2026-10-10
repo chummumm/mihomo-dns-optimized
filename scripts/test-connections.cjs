@@ -99,6 +99,13 @@ async function main() {
     }
     const waitCount = count => page.waitForFunction(count => document.querySelector('.connections-devices-item')?.textContent.trim() === 'All (' + count + ')', count)
     const waitRows = count => page.waitForFunction(count => Number(document.querySelector('[role="table"]')?.getAttribute('aria-rowcount')) === count + 1, count)
+    const waitTableSize = () => page.waitForFunction(() => {
+        const viewport = document.querySelector('.connections-viewport')
+        const scroll = document.querySelector('.connections-scroll')
+        // AutoSizer commits after the controls' layout changes. Wait for that
+        // commit, then independently assert the scrolling and visible rows.
+        return viewport && scroll && scroll.offsetHeight === viewport.clientHeight && scroll.offsetWidth === viewport.clientWidth
+    })
     let expectedHorizontal = 0
     async function send(next = connections, rate) {
         connections = next
@@ -205,21 +212,28 @@ async function main() {
     const wide = await position('history_plus_active')
     stillBottom(wide, 'active connections are not capped')
     await page.setViewportSize({ width: 600, height: 900 })
-    await page.waitForTimeout(150)
+    await waitTableSize()
     const narrow = await position('narrow_after_resize')
     stillBottom(narrow, 'narrow viewport resize')
     assert.ok(narrow.historyNoteHeight > wide.historyNoteHeight, 'history note wraps in narrow viewport')
     const beforeNarrow = connections
-    await send(connections.map((item, index) => index === 0
-        ? { ...item, metadata: { ...item.metadata, sourceIP: '2001:db8:1234:5678::1234' } }
-        : item))
+    // Keep the two retained IPv4 groups and add three long IPv6 device groups
+    // so this fixture wraps with the different fonts used by local and CI browsers.
+    await send(connections.map((item, index) => ({
+        ...item,
+        metadata: { ...item.metadata, sourceIP: `2001:db8:1234:5678:9abc:def0:1234:111${index + 1}` },
+    })))
+    await page.waitForFunction(() => document.querySelectorAll('.connections-devices-item').length === 6)
+    await waitTableSize()
     const wrapped = await position('narrow_device_wrap')
     stillBottom(wrapped, 'device wrapping during refresh')
     assert.ok(wrapped.devicesHeight > narrow.devicesHeight, 'device controls wrap to another line')
     await send(beforeNarrow)
+    await page.waitForFunction(() => document.querySelectorAll('.connections-devices-item').length === 3)
+    await waitTableSize()
     stillBottom(await position('narrow_device_unwrap'), 'device unwrapping during refresh')
     await page.setViewportSize({ width: 1440, height: 900 })
-    await page.waitForTimeout(150)
+    await waitTableSize()
     stillBottom(await position('wide_after_resize'), 'restore wide viewport')
     await page.getByText('Clear closed records', { exact: true }).click()
     await waitCount(3); await waitRows(3)
