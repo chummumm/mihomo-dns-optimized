@@ -1,10 +1,10 @@
-import { useReactTable, getSortedRowModel, getFilteredRowModel, getCoreRowModel, flexRender, createColumnHelper } from '@tanstack/react-table'
+import { useReactTable, getSortedRowModel, getCoreRowModel, flexRender, createColumnHelper } from '@tanstack/react-table'
 import classnames from 'classnames'
 import { useMemo, useLayoutEffect, useRef, useState, useEffect } from 'react'
 import AutoSizer from 'react-virtualized-auto-sizer'
 
 import { Header, Checkbox, Modal, Icon, Drawer, Card, Button } from '@components'
-import { fromNow } from '@lib/date'
+import { formatDateTime, fromNow } from '@lib/date'
 import { basePath, formatTraffic } from '@lib/helper'
 import { useObject, useVisible } from '@lib/hook'
 import type * as API from '@lib/request'
@@ -14,6 +14,7 @@ import { Devices } from './Devices'
 import { ConnectionInfo } from './Info'
 import { VirtualConnectionTable } from './VirtualTable'
 import { formatConnection } from './helper'
+import { ALL_CONNECTIONS } from './source'
 import { type Connection, type FormatConnection, useConnections } from './store'
 import './style.scss'
 
@@ -47,6 +48,7 @@ function formatSpeed (upload: number, download: number) {
 }
 
 const columnHelper = createColumnHelper<FormatConnection>()
+const EMPTY_CONNECTIONS: Connection[] = []
 
 export default function Connections () {
     const { translation, lang } = useI18n()
@@ -68,8 +70,10 @@ export default function Connections () {
     }
 
     // connections
-    const { connections, devices, feed, save, toggleSave, clearHistory, getConnection, historyLimit, discarded } = useConnections(connStreamReader)
-    const data = useMemo(() => connections.map(formatConnection), [connections])
+    const { connections, connectionsBySource, devices, feed, save, toggleSave, clearHistory, getConnection, historyLimit, discarded } = useConnections(connStreamReader)
+    const [device, setDevice] = useState(ALL_CONNECTIONS)
+    const selectedConnections = connectionsBySource.get(device) ?? EMPTY_CONNECTIONS
+    const data = useMemo(() => selectedConnections.map(formatConnection), [selectedConnections])
 
     // table
     const columns = useMemo(
@@ -100,14 +104,14 @@ export default function Connections () {
             ),
             columnHelper.accessor(Columns.Upload, { minSize: 100, size: 100, header: t(`columns.${Columns.Upload}`), cell: cell => formatTraffic(cell.getValue()) }),
             columnHelper.accessor(Columns.Download, { minSize: 100, size: 100, header: t(`columns.${Columns.Download}`), cell: cell => formatTraffic(cell.getValue()) }),
-            columnHelper.accessor(Columns.SourceIP, { minSize: 140, size: 140, header: t(`columns.${Columns.SourceIP}`), filterFn: 'equals' }),
+            columnHelper.accessor(Columns.SourceIP, { minSize: 140, size: 140, header: t(`columns.${Columns.SourceIP}`) }),
             columnHelper.accessor(
                 Columns.Time,
                 {
                     minSize: 120,
                     size: 120,
                     header: t(`columns.${Columns.Time}`),
-                    cell: cell => fromNow(new Date(cell.getValue()), lang),
+                    cell: cell => <time dateTime={cell.row.original.original.start} title={formatDateTime(new Date(cell.getValue()), lang)}>{fromNow(new Date(cell.getValue()), lang)}</time>,
                     sortingFn: (rowA, rowB) => (rowB.original?.time ?? 0) - (rowA.original?.time ?? 0),
                 },
             ),
@@ -134,21 +138,16 @@ export default function Connections () {
         }
     }, [connStreamReader, feed, setTraffic])
 
-    const [device, setDevice] = useState('')
-    const selectedDevice = devices.some(item => item.label === device) ? device : ''
-    const columnFilters = useMemo(() => selectedDevice ? [{ id: Columns.SourceIP, value: selectedDevice }] : [], [selectedDevice])
     useEffect(() => {
-        if (device !== selectedDevice) setDevice(selectedDevice)
-    }, [device, selectedDevice])
+        setDevice(ALL_CONNECTIONS)
+    }, [connStreamReader])
 
     const instance = useReactTable({
         data,
         columns,
         getRowId: row => row.id,
-        state: { columnFilters },
         getCoreRowModel: getCoreRowModel(),
         getSortedRowModel: getSortedRowModel(),
-        getFilteredRowModel: getFilteredRowModel(),
         initialState: {
             sorting: [{ id: Columns.Time, desc: false }],
         },
@@ -210,9 +209,9 @@ export default function Connections () {
     const rows = instance.getRowModel().rows
 
     return (
-        <div className="page !h-full">
+        <div className="connections-page page !h-full">
             <Header title={t('title')}>
-                <span className="connections-filter flex-1 cursor-default">
+                <span className="connections-filter connections-traffic flex-1 cursor-default">
                     {`(${t('total.text')}: ${t('total.upload')} ${formatTraffic(traffic.uploadTotal)} ${t('total.download')} ${formatTraffic(traffic.downloadTotal)})`}
                 </span>
                 <Checkbox className="connections-filter" checked={save} onChange={toggleSave}>{t('keepClosed')}</Checkbox>
@@ -222,7 +221,7 @@ export default function Connections () {
                 <span>{t('historyLimit')}: {historyLimit}. {t('retainedOnly')}{discarded > 0 && ' ' + t('historyDiscarded') + ': ' + discarded}</span>
                 <Button className="ml-3 text-xs" onClick={clearHistory}>{t('clearHistory')}</Button>
             </div>}
-            <Devices devices={devices} total={connections.length} selected={selectedDevice} onChange={setDevice} />
+            <Devices devices={devices} total={connections.length} selected={device} selectedMissing={!connectionsBySource.has(device)} onChange={setDevice} />
             <Card ref={cardRef} className="connections-card relative">
                 <div className="connections-viewport">
                     <AutoSizer>
@@ -235,6 +234,7 @@ export default function Connections () {
                             centeredColumns={shouldCenter}
                             onSelect={id => setDrawerState({ visible: true, selectedID: id })} />}
                     </AutoSizer>
+                    {data.length === 0 && <div className="connections-empty" role="status">{t('empty')}</div>}
                 </div>
             </Card>
             <Modal title={t('closeAll.title')} show={visible} onClose={hide} onOk={handleCloseConnections}>{t('closeAll.content')}</Modal>
@@ -243,7 +243,7 @@ export default function Connections () {
                     <span className="pl-3 font-bold">{t('info.title')}</span>
                     <Icon type="close" size={16} className="cursor-pointer" onClick={() => setDrawerState('visible', false)} />
                 </div>
-                <ConnectionInfo className="mt-3 px-5" connection={drawerState.connection} />
+                <ConnectionInfo className="connections-info mt-3 px-4" connection={drawerState.connection} />
                 <div className="mt-3 flex justify-end pr-3">
                     <Button type="danger" disabled={drawerState.connection.completed} onClick={() => handleConnectionClosed()}>{ t('info.closeConnection') }</Button>
                 </div>

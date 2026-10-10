@@ -1,12 +1,15 @@
+import axios from 'axios'
 import classnames from 'classnames'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai'
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useLocation } from 'react-router-dom'
 
-import { Header, Card, Switch, ButtonSelect, type ButtonSelectOptions, Input, Select } from '@components'
+import { Header, Card, Switch, Button, ButtonSelect, type ButtonSelectOptions, Input, Select, success, error } from '@components'
 import { type Lang } from '@i18n'
 import { useObject } from '@lib/hook'
 import { jsBridge } from '@lib/jsBridge'
-import { useI18n, useClashXData, useGeneral, useVersion, useClient, identityAtom, hostSelectIdxStorageAtom, hostsStorageAtom, useAPIInfo } from '@stores'
+import { DEFAULT_PROBE_URL, normalizeProbeURL } from '@lib/probe'
+import { useI18n, useClashXData, useGeneral, useVersion, useClient, useConfig, identityAtom, hostSelectIdxStorageAtom, hostsStorageAtom, useAPIInfo } from '@stores'
 import './style.scss'
 
 const languageOptions: ButtonSelectOptions[] = [{ label: '中文', value: 'zh_CN' }, { label: 'English', value: 'en_US' }]
@@ -19,9 +22,19 @@ export default function Settings () {
     const [hostSelectIdx, setHostSelectIdx] = useAtom(hostSelectIdxStorageAtom)
     const hostsStorage = useAtomValue(hostsStorageAtom)
     const apiInfo = useAPIInfo()
+    const location = useLocation()
+    const controllerFromURL = useMemo(() => {
+        const query = new URLSearchParams(location.search)
+        return ['host', 'port', 'secret', 'protocol'].some(key => query.has(key))
+    }, [location.search])
     const { translation, setLang, lang } = useI18n()
     const { t } = translation('Settings')
     const client = useClient()
+    const { data: settings, set: setSettings } = useConfig()
+    const savedProbeURL = normalizeProbeURL(settings.probeURL) ?? DEFAULT_PROBE_URL
+    const [probeURL, setProbeURL] = useState(savedProbeURL)
+    const [reloading, setReloading] = useState(false)
+    const reloadRequest = useRef<AbortController | null>(null)
     const [info, set] = useObject({
         socks5ProxyPort: 7891,
         httpProxyPort: 7890,
@@ -33,6 +46,58 @@ export default function Settings () {
         set('httpProxyPort', general?.port ?? 0)
         set('mixedProxyPort', general?.mixedPort ?? 0)
     }, [general, set])
+
+    useEffect(() => { setProbeURL(savedProbeURL) }, [savedProbeURL])
+
+    useEffect(() => {
+        setReloading(false)
+        return () => {
+            reloadRequest.current?.abort()
+            reloadRequest.current = null
+        }
+    }, [client])
+
+    function saveProbeURL () {
+        const normalized = normalizeProbeURL(probeURL)
+        if (normalized === undefined) {
+            error(t('messages.invalidProbeURL'))
+            return
+        }
+        setSettings('probeURL', normalized)
+        setProbeURL(normalized)
+        success(t('messages.probeURLSaved'))
+    }
+
+    function resetProbeURL () {
+        setSettings('probeURL', DEFAULT_PROBE_URL)
+        setProbeURL(DEFAULT_PROBE_URL)
+    }
+
+    async function handleReloadConfig () {
+        if (reloadRequest.current) return
+        const request = new AbortController()
+        reloadRequest.current = request
+        setReloading(true)
+        try {
+            await client.reloadConfig(request.signal)
+            if (request.signal.aborted) return
+            success(t('messages.reloadOk'))
+            // Reload already succeeded; a failed read must not report that the
+            // configuration was rejected. SWR keeps its previous snapshot.
+            await fetchGeneral().catch(() => undefined)
+        } catch (reason) {
+            if (request.signal.aborted) return
+            const detail = axios.isAxiosError<{ message?: string }>(reason)
+                ? reason.response?.data?.message ?? reason.message
+                : reason instanceof Error ? reason.message : ''
+            error(`${t('messages.reloadErr')}${detail ? ': ' + String(detail).slice(0, 300) : ''}`)
+        } finally {
+            if (reloadRequest.current === request) {
+                reloadRequest.current = null
+                setReloading(false)
+            }
+        }
+    }
 
     async function handleProxyModeChange (mode: string) {
         await client.updateConfig({ mode })
@@ -97,11 +162,14 @@ export default function Settings () {
     }, [t, premium])
 
     const controllerOptions = hostsStorage.map(
-        (h, idx) => ({ value: idx, label: <span className="truncate text-right">{h.hostname}</span> }),
+        (h, idx) => ({ value: idx, label: <span className="truncate text-right">{h.hostname}:{h.port}</span> }),
     )
 
-    const controllers = isClashX
-        ? <span className="text-sm text-primary-darken">{`${externalControllerHost}:${externalControllerPort}`}</span>
+    const controllers = isClashX || controllerFromURL
+        ? <div className="min-w-0 text-right text-sm text-primary-darken">
+            <span className="controller-endpoint break-all">{`${apiInfo.protocol}//${externalControllerHost}:${externalControllerPort}`}</span>
+            {!isClashX && controllerFromURL && <p className="mt-1 text-xs">{t('controllerFromURL')}</p>}
+        </div>
         : (
             <>
                 <Select
@@ -113,7 +181,7 @@ export default function Settings () {
                 <span
                     className={classnames({ 'modify-btn': !isClashX }, 'external-controller')}
                     onClick={() => !isClashX && setIdentity(false)}>
-                    编辑
+                    {t('labels.edit')}
                 </span>
             </>
         )
@@ -198,8 +266,32 @@ export default function Settings () {
                             { controllers }
                         </div>
                     </div>
-                    <div className="w-1/2 px-8"></div>
+                    <div className="w-full flex items-center justify-between px-8 py-3 md:w-1/2">
+                        <Button disabled={reloading} onClick={handleReloadConfig}>{t(reloading ? 'labels.reloading' : 'labels.reloadConfig')}</Button>
+                    </div>
                 </div>
+            </Card>
+            <Card className="settings-card">
+                <form className="settings-probe-url" onSubmit={event => { event.preventDefault(); saveProbeURL() }}>
+                    <label className="label font-bold" htmlFor="probe-url">{t('labels.probeURL')}</label>
+                    <input
+                        id="probe-url"
+                        className="input text-left"
+                        value={probeURL}
+                        onChange={event => setProbeURL(event.target.value)}
+                        type="url"
+                        inputMode="url"
+                        spellCheck={false}
+                        autoCapitalize="off"
+                        maxLength={2048}
+                        disabled={isClashX}
+                        aria-describedby="probe-url-hint" />
+                    <div className="flex gap-3">
+                        <button className="button button-primary" type="submit" disabled={isClashX}>{t('labels.save')}</button>
+                        <button className="button button-normal" type="button" disabled={isClashX} onClick={resetProbeURL}>{t('labels.resetProbeURL')}</button>
+                    </div>
+                    <p id="probe-url-hint" className="text-primary-dark text-xs">{t('probeURLHint')}</p>
+                </form>
             </Card>
             {/* <Card className="clash-version hidden">
                 <span className="check-icon">

@@ -129,7 +129,21 @@ const EN = {
             httpProxyPort: 'HTTP proxy port',
             mixedProxyPort: 'Mixed proxy port',
             externalController: 'External controller',
+            edit: 'Edit',
+            reloadConfig: 'Reload configuration',
+            reloading: 'Reloading…',
+            probeURL: 'Speed test URL',
+            save: 'Save',
+            resetProbeURL: 'Use default',
         },
+        messages: {
+            reloadOk: 'Configuration reloaded',
+            reloadErr: 'Unable to reload configuration',
+            invalidProbeURL: 'Enter an HTTP or HTTPS URL without credentials or a fragment.',
+            probeURLSaved: 'Speed test URL saved',
+        },
+        probeURLHint: 'Used for manual node speed tests. Empty uses the default. ClashX native tests and provider health checks use their own settings.',
+        controllerFromURL: 'Controller specified by the current link.',
         values: {
             cn: '中文',
             en: 'English',
@@ -163,6 +177,7 @@ const EN = {
     },
     Connections: {
         title: 'Connections',
+        empty: 'No connections in this view.',
         keepClosed: 'Keep closed connections',
         historyLimit: 'Closed record limit',
         retainedOnly: 'Counts include retained active and closed records.',
@@ -179,6 +194,8 @@ const EN = {
         },
         filter: {
             all: 'All',
+            unknown: 'Unknown source',
+            sources: 'Connection sources',
         },
         columns: {
             host: 'Host',
@@ -196,6 +213,7 @@ const EN = {
         info: {
             title: 'Connection',
             id: 'ID',
+            start: 'Started',
             host: 'Host',
             hostEmpty: 'Empty',
             dstIP: 'IP',

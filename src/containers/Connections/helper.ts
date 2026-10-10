@@ -9,11 +9,7 @@ export function getConnectionHost (metadata?: Connections['metadata']) {
 }
 
 export function isDNSConnection (connection: Partial<Connections>) {
-    if (connection.dns === true) return true
-    const metadata = connection.metadata
-    // Older fork releases mark the dedicated resolver and its transports this
-    // way. Neither a destination port nor a user-named proxy inbound identifies DNS.
-    return metadata?.type === 'Inner' && (metadata.inboundName === 'DNS' || metadata.inboundName === 'DNS-TRANSPORT')
+    return connection.dns === true
 }
 
 export function getConnectionPresentation (connection: Partial<Connections>) {

@@ -2,7 +2,9 @@ import { useMemo, useSyncExternalStore } from 'react'
 
 import type * as API from '@lib/request'
 
-export type Connection = API.Connections & { completed?: boolean, uploadSpeed: number, downloadSpeed: number }
+import { ALL_CONNECTIONS, getConnectionSourceKey } from './source'
+
+export type Connection = API.Connections & { sourceKey: string, completed?: boolean, uploadSpeed: number, downloadSpeed: number }
 
 export interface FormatConnection {
     id: string
@@ -27,12 +29,14 @@ export interface FormatConnection {
 export const CLOSED_CONNECTION_LIMIT = 5000
 
 export interface ConnectionDevice {
+    key: string
     label: string
     number: number
 }
 
 interface ConnectionState {
     connections: Connection[]
+    connectionsBySource: ReadonlyMap<string, Connection[]>
     devices: ConnectionDevice[]
     save: boolean
     discarded: number
@@ -42,12 +46,7 @@ interface ConnectionState {
 export class ConnectionsStore {
     private active = new Map<string, Connection>()
     private readonly closed = new Map<string, Connection>()
-    private readonly deviceCounts = new Map<string, number>()
     private readonly listeners = new Set<() => void>()
-    private closedCache: Connection[] = []
-    private devicesCache: ConnectionDevice[] = []
-    private closedChanged = false
-    private devicesChanged = false
     private save = false
     private discarded = 0
     private receivedAt: number | undefined
@@ -57,29 +56,35 @@ export class ConnectionsStore {
         if (!Number.isInteger(historyLimit) || historyLimit < 0) {
             throw new RangeError('Invalid closed connection limit')
         }
-        this.state = { connections: [], devices: [], save: false, discarded: 0, historyLimit }
-    }
-
-    private changeDevice (sourceIP: string, delta: number) {
-        const count = (this.deviceCounts.get(sourceIP) ?? 0) + delta
-        if (count > 0) this.deviceCounts.set(sourceIP, count)
-        else this.deviceCounts.delete(sourceIP)
-        this.devicesChanged = true
+        const connections: Connection[] = []
+        this.state = { connections, connectionsBySource: new Map([[ALL_CONNECTIONS, connections]]), devices: [], save: false, discarded: 0, historyLimit }
     }
 
     private publish () {
-        if (this.closedChanged) {
-            this.closedCache = [...this.closed.values()]
-            this.closedChanged = false
+        const connections: Connection[] = []
+        const connectionsBySource = new Map<string, Connection[]>()
+        // Keep source buttons in stable order without sorting every snapshot.
+        for (const device of this.state.devices) connectionsBySource.set(device.key, [])
+        // Each record is visited once and shared by All and exactly one source.
+        // Counters and filters use these same buckets, never independent counts.
+        for (const collection of [this.active, this.closed]) {
+            for (const connection of collection.values()) {
+                connections.push(connection)
+                const bucket = connectionsBySource.get(connection.sourceKey)
+                if (bucket) bucket.push(connection)
+                else connectionsBySource.set(connection.sourceKey, [connection])
+            }
         }
-        if (this.devicesChanged) {
-            this.devicesCache = [...this.deviceCounts].map(([label, number]) => ({ label, number }))
-                .sort((a, b) => a.label.localeCompare(b.label))
-            this.devicesChanged = false
+        const devices: ConnectionDevice[] = []
+        for (const [key, bucket] of connectionsBySource) {
+            if (bucket.length === 0) connectionsBySource.delete(key)
+            else devices.push({ key, label: key.startsWith('device:') ? key.slice(7) : key, number: bucket.length })
         }
+        connectionsBySource.set(ALL_CONNECTIONS, connections)
         this.state = {
-            connections: [...this.active.values(), ...this.closedCache],
-            devices: this.devicesCache,
+            connections,
+            connectionsBySource,
+            devices,
             save: this.save,
             discarded: this.discarded,
             historyLimit: this.historyLimit,
@@ -99,15 +104,14 @@ export class ConnectionsStore {
             if (next.has(connection.id)) continue
             const previous = this.active.get(connection.id)
             const retained = previous ?? this.closed.get(connection.id)
-            if (retained === undefined) {
-                this.changeDevice(connection.metadata.sourceIP, 1)
-            } else if (retained.metadata.sourceIP !== connection.metadata.sourceIP) {
-                this.changeDevice(retained.metadata.sourceIP, -1)
-                this.changeDevice(connection.metadata.sourceIP, 1)
-            }
-            if (this.closed.delete(connection.id)) this.closedChanged = true
+            const sourceKey = retained !== undefined && retained.metadata?.sourceIP === connection.metadata?.sourceIP &&
+                retained.metadata?.type === connection.metadata?.type && (retained.dns === true) === (connection.dns === true)
+                ? retained.sourceKey
+                : getConnectionSourceKey(connection)
+            this.closed.delete(connection.id)
             next.set(connection.id, {
                 ...connection,
+                sourceKey,
                 completed: false,
                 uploadSpeed: previous !== undefined && elapsed > 0 ? Math.max(0, connection.upload - previous.upload) / elapsed : 0,
                 downloadSpeed: previous !== undefined && elapsed > 0 ? Math.max(0, connection.download - previous.download) / elapsed : 0,
@@ -120,27 +124,20 @@ export class ConnectionsStore {
             if (next.has(id)) continue
             if (this.save) {
                 this.closed.set(id, { ...connection, completed: true, uploadSpeed: 0, downloadSpeed: 0 })
-                this.closedChanged = true
-            } else {
-                this.changeDevice(connection.metadata.sourceIP, -1)
             }
         }
         this.active = next
 
         while (this.closed.size > this.historyLimit) {
-            const oldest = this.closed.entries().next().value as [string, Connection]
-            this.closed.delete(oldest[0])
-            this.changeDevice(oldest[1].metadata.sourceIP, -1)
-            this.closedChanged = true
+            const oldest = this.closed.keys().next().value as string
+            this.closed.delete(oldest)
             this.discarded++
         }
         this.publish()
     }
 
     clearHistory = () => {
-        for (const connection of this.closed.values()) this.changeDevice(connection.metadata.sourceIP, -1)
         this.closed.clear()
-        this.closedChanged = true
         this.discarded = 0
         this.publish()
     }

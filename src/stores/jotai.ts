@@ -14,6 +14,7 @@ import { Language, locales, type Lang, getDefaultLanguage, type LocalizedType } 
 import { partition } from '@lib/helper'
 import { useWarpImmerSetter, type WritableDraft } from '@lib/jotai'
 import { isClashX, jsBridge } from '@lib/jsBridge'
+import { DEFAULT_PROBE_URL } from '@lib/probe'
 import type * as API from '@lib/request'
 import { StreamReader } from '@lib/streamer'
 import { type Infer } from '@lib/type'
@@ -92,6 +93,7 @@ export function useRuleProviders () {
 export const configAtom = atomWithStorage('profile', {
     breakConnections: false,
     logLevel: '',
+    probeURL: DEFAULT_PROBE_URL,
 })
 
 export function useConfig () {
@@ -168,7 +170,7 @@ export function useProxy () {
         global.name = 'GLOBAL'
 
         const policyGroup = new Set(['Selector', 'URLTest', 'Fallback', 'LoadBalance'])
-        const unUsedProxy = new Set(['DIRECT', 'REJECT', 'GLOBAL'])
+        const unUsedProxy = new Set(['DIRECT', 'REJECT', 'PASS', 'GLOBAL'])
         const proxies = global.all
             .filter(key => !unUsedProxy.has(key))
             .map(key => ({ ...allProxies.data.proxies[key], name: key }))

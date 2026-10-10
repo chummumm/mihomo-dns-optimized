@@ -129,7 +129,21 @@ const CN = {
             httpProxyPort: 'HTTP 代理端口',
             mixedProxyPort: '混合代理端口',
             externalController: '外部控制设置',
+            edit: '编辑',
+            reloadConfig: '重新加载配置',
+            reloading: '正在重载…',
+            probeURL: '测速 URL',
+            save: '保存',
+            resetProbeURL: '恢复默认',
         },
+        messages: {
+            reloadOk: '配置已重新加载',
+            reloadErr: '配置重载失败',
+            invalidProbeURL: '请输入不带账户密码和片段标识的 HTTP 或 HTTPS URL。',
+            probeURLSaved: '测速 URL 已保存',
+        },
+        probeURLHint: '用于面板手动节点测速，留空使用默认地址。ClashX 原生测速与代理集健康检查使用各自设置。',
+        controllerFromURL: '控制器由当前链接指定。',
         values: {
             cn: '中文',
             en: 'English',
@@ -163,6 +177,7 @@ const CN = {
     },
     Connections: {
         title: '连接',
+        empty: '当前筛选下没有连接。',
         keepClosed: '保留关闭连接',
         historyLimit: '已关闭记录保留上限',
         retainedOnly: '数量包含当前保留的活跃与已关闭记录。',
@@ -179,6 +194,8 @@ const CN = {
         },
         filter: {
             all: '全部',
+            unknown: '未知来源',
+            sources: '连接来源',
         },
         columns: {
             host: '域名',
@@ -196,6 +213,7 @@ const CN = {
         info: {
             title: '连接信息',
             id: 'ID',
+            start: '开始时间',
             host: '域名',
             hostEmpty: '空',
             dstIP: 'IP',

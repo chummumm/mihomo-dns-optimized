@@ -2,6 +2,7 @@ import { atom, useAtom, useAtomValue } from 'jotai'
 import { atomWithStorage } from 'jotai/utils'
 import { useLocation } from 'react-router-dom'
 
+import { controllerProtocol } from '@lib/controller'
 import { isIP } from '@lib/ip'
 import { isClashX, jsBridge } from '@lib/jsBridge'
 import { Client } from '@lib/request'
@@ -82,7 +83,7 @@ export function useAPIInfo () {
     const hostname = qs.get('host') ?? hostsStorage?.[hostSelectIdxStorage]?.hostname ?? url?.hostname ?? '127.0.0.1'
     const port = qs.get('port') ?? hostsStorage?.[hostSelectIdxStorage]?.port ?? url?.port ?? '9090'
     const secret = qs.get('secret') ?? hostsStorage?.[hostSelectIdxStorage]?.secret ?? url?.username ?? ''
-    const protocol = qs.get('protocol') ?? hostname === '127.0.0.1' ? 'http:' : (url?.protocol ?? window.location.protocol)
+    const protocol = controllerProtocol(qs.get('protocol'), hostname, url?.protocol, window.location.protocol)
 
     return { hostname, port, secret, protocol }
 }

@@ -83,15 +83,14 @@
     }
 
     .sidebar-logo {
-        margin: 0 15px;
-        width: 36px;
-        height: 36px;
+        display: none;
     }
 
     .sidebar-menu {
         flex: 1;
         flex-direction: row;
-        justify-content: center;
+        justify-content: flex-start;
+        min-width: 0;
         margin-top: 0;
         overflow-x: scroll;
         padding: 10px;
@@ -102,9 +101,12 @@
 
         .item {
             margin: 0 3px;
+            flex-shrink: 0;
 
             > a {
-                width: 80px;
+                width: auto;
+                min-width: 64px;
+                padding: 0 10px;
                 height: 32px;
                 line-height: 32px;
             }

@@ -1,6 +1,6 @@
 {
     "name": "clash-dashboard",
-    "version": "0.3.1",
+    "version": "0.3.2",
     "packageManager": "pnpm@8.15.9",
     "description": "Web port of clash.",
     "keywords": [
@@ -11,18 +11,18 @@
     "license": "MIT",
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/Dreamacro/clash-dashboard.git"
+        "url": "git+https://github.com/chummumm/mihomo-dns-optimized.git"
     },
     "bugs": {
-        "url": "https://github.com/Dreamacro/clash-dashboard/issues"
+        "url": "https://github.com/chummumm/mihomo-dns-optimized/issues"
     },
-    "homepage": "https://github.com/Dreamacro/clash-dashboard",
+    "homepage": "https://github.com/chummumm/mihomo-dns-optimized/tree/clash-dashboard",
     "scripts": {
         "start": "vite",
         "build": "vite build",
         "typecheck": "tsc --noEmit",
-        "test:unit": "node --test src/containers/Connections/connections.test.cjs",
-        "test:browser": "node scripts/test-connections.cjs && node scripts/test-dns.cjs",
+        "test:unit": "node --test src/containers/Connections/connections.test.cjs src/lib/probe.test.cjs",
+        "test:browser": "node scripts/test-connections.cjs && node scripts/test-dns.cjs && node scripts/test-dashboard-features.cjs",
         "lint": "pnpm lint:ts",
         "lint:ts": "eslint --ext=jsx,ts,tsx --fix src",
         "contributors:add": "all-contributors add",

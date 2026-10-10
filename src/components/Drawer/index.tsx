@@ -29,7 +29,7 @@ export function Drawer (props: DrawerProps) {
                 cardStyle,
                 props.bodyClassName,
                 { 'translate-x-0': props.visible, 'translate-x-full': !props.visible },
-            )} style={{ width: props.width ?? 400 }}>{props.children}</Card>
+            )} style={{ width: props.width ?? 400, maxWidth: '100%' }}>{props.children}</Card>
         </div>
     )
 

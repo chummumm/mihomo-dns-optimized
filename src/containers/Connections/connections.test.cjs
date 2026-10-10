@@ -5,19 +5,28 @@ const { createRequire } = require('node:module')
 const { test } = require('node:test')
 const ts = require('typescript')
 
+const loadedSources = new Map()
 function loadSource(relative) {
     const filename = path.resolve(__dirname, relative)
+    if (loadedSources.has(filename)) return loadedSources.get(filename).exports
     const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
         compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true },
     }).outputText
     const module = { exports: {} }
-    new Function('require', 'module', 'exports', compiled)(createRequire(filename), module, module.exports)
+    loadedSources.set(filename, module)
+    const requireModule = createRequire(filename)
+    const localRequire = name => {
+        const local = path.resolve(path.dirname(filename), name + '.ts')
+        return name.startsWith('.') && fs.existsSync(local) ? loadSource(local) : requireModule(name)
+    }
+    new Function('require', 'module', 'exports', compiled)(localRequire, module, module.exports)
     return module.exports
 }
 
 const { ConnectionsStore } = loadSource('store.ts')
 const { StreamReader } = loadSource('../../lib/streamer.ts')
 const { formatConnection, getConnectionPresentation, isDNSConnection } = loadSource('helper.ts')
+const { getConnectionSourceKey, ALL_CONNECTIONS, INTERNAL_CONNECTIONS, UNKNOWN_CONNECTIONS } = loadSource('source.ts')
 
 function connection(id, sourceIP = '192.0.2.1', download = 0) {
     return {
@@ -36,6 +45,17 @@ function assertCounts(store, expected) {
     assert.deepEqual(Object.fromEntries(state.devices.map(value => [value.label, value.number])), expected)
     assert.equal(state.connections.length, Object.values(expected).reduce((total, count) => total + count, 0))
     assert.equal(new Set(state.connections.map(value => value.id)).size, state.connections.length)
+    assert.equal(state.connectionsBySource.get(ALL_CONNECTIONS), state.connections, 'All shares the published collection')
+    const grouped = []
+    for (const device of state.devices) {
+        const bucket = state.connectionsBySource.get(device.key)
+        assert.equal(device.number, bucket.length, 'button count is the filter result length')
+        grouped.push(...bucket)
+        for (const value of bucket) assert.equal(value.sourceKey, device.key)
+        assert.deepEqual(bucket, state.connections.filter(value => value.sourceKey === device.key), 'bucket preserves collection order and object identity')
+    }
+    assert.equal(grouped.length, state.connections.length, 'sources are exhaustive')
+    assert.equal(new Set(grouped).size, state.connections.length, 'sources are disjoint')
 }
 
 test('DNS connection presentation uses the final node without changing raw routing data', () => {
@@ -58,13 +78,13 @@ test('DNS connection presentation uses the final node without changing raw routi
     assert.deepEqual(getConnectionPresentation({ ...original, chains: [] }), { type: 'DNS', chains: '', rule: '' })
 })
 
-test('DNS compatibility markers do not misclassify ordinary proxy port 53 or arbitrary inbound names', () => {
+test('only an explicit boolean DNS flag changes presentation, regardless of type, name, or port', () => {
     const original = connection('ordinary-dns-port')
     original.chains = ['leaf-node', 'inner-group', 'outer-group']
     original.rule = 'DomainSuffix'; original.rulePayload = 'example.test'
     original.metadata.destinationPort = '53'
     original.metadata.inboundName = 'DNS'
-    for (const type of ['Socks5', 'HTTP', 'Tun']) {
+    for (const type of ['Socks5', 'HTTP', 'Tun', 'Inner', 'DNS']) {
         const value = { ...original, metadata: { ...original.metadata, type } }
         assert.equal(isDNSConnection(value), false)
         assert.deepEqual(getConnectionPresentation(value), {
@@ -74,14 +94,65 @@ test('DNS compatibility markers do not misclassify ordinary proxy port 53 or arb
     }
     for (const inboundName of ['DNS', 'DNS-TRANSPORT']) {
         const value = { ...original, metadata: { ...original.metadata, type: 'Inner', inboundName, destinationPort: '443' } }
-        assert.equal(isDNSConnection(value), true, 'old fork marker is independent of upstream port')
-        assert.equal(getConnectionPresentation(value).type, 'DNS')
+        assert.equal(isDNSConnection(value), false, 'legacy names are not evidence of a real resolver socket')
+        assert.equal(getConnectionPresentation(value).type, 'Inner')
     }
     for (const inboundName of [undefined, '', 'DNS-other', 'dns', 'HTTPS']) {
         assert.equal(isDNSConnection({ ...original, metadata: { ...original.metadata, type: 'Inner', inboundName } }), false)
     }
     assert.equal(isDNSConnection({}), false)
+    for (const dns of [false, 'true', 1, null]) assert.equal(isDNSConnection({ ...original, dns }), false)
     assert.deepEqual(getConnectionPresentation({}), { type: '', chains: '', rule: '' })
+})
+
+test('source classification separates real resolver sockets, logical clients, internal work, and unknown sources', () => {
+    const logical = connection('logical')
+    logical.metadata.type = 'Inner'; logical.metadata.inboundName = 'DNS'
+    const actualDNS = { ...logical, id: 'actual-dns', dns: true }
+    const ordinary53 = connection('ordinary53')
+    ordinary53.metadata.destinationPort = '53'; ordinary53.metadata.inboundName = 'DNS'
+    const internal = connection('internal', '')
+    internal.metadata.type = 'Inner'
+    const unknown = connection('unknown', '')
+    const store = new ConnectionsStore()
+    store.feed([logical, actualDNS, ordinary53, internal, unknown])
+    assertCounts(store, { '192.0.2.1': 2, internal: 2, unknown: 1 })
+    assert.deepEqual(store.getSnapshot().connectionsBySource.get(INTERNAL_CONNECTIONS).map(value => value.id), ['actual-dns', 'internal'])
+    assert.deepEqual(store.getSnapshot().connectionsBySource.get('device:192.0.2.1').map(value => value.id), ['logical', 'ordinary53'])
+    assert.equal(actualDNS.metadata.sourceIP, '192.0.2.1', 'classification preserves original tracking metadata')
+
+    for (const sourceIP of [undefined, null, '', '0.0.0.0', '::', '0:0:0:0:0:0:0:0', '::0.0.0.0', '::ffff:0.0.0.0', 'all', 'internal', 'unknown', 'not-an-ip', '256.1.1.1']) {
+        for (const type of ['Socks5', 'Inner']) {
+            const value = { ...logical, metadata: { ...logical.metadata, sourceIP, type } }
+            assert.equal(getConnectionSourceKey(value), type === 'Inner' ? INTERNAL_CONNECTIONS : UNKNOWN_CONNECTIONS, String(sourceIP))
+            assert.equal(getConnectionSourceKey({ ...value, dns: true }), INTERNAL_CONNECTIONS)
+        }
+    }
+    assert.equal(getConnectionSourceKey({}), UNKNOWN_CONNECTIONS)
+    assert.equal(getConnectionSourceKey(connection('loopback', '127.0.0.1')), 'device:127.0.0.1', 'loopback alone is not evidence of internal work')
+    assert.equal(getConnectionSourceKey(connection('v6', '2001:0DB8:0000:0000:0000:0000:0000:0001')), 'device:2001:db8::1')
+    assert.equal(getConnectionSourceKey(connection('v6-zone', 'fe80::1%eth0')), 'device:fe80::1%eth0')
+})
+
+test('source changes, returning IDs, and history eviction use the same source index', () => {
+    const store = new ConnectionsStore(2)
+    store.toggleSave()
+    const a = connection('A', '')
+    const b = connection('B', '::')
+    b.metadata.type = 'Inner'
+    store.feed([a, b], 1000)
+    assertCounts(store, { unknown: 1, internal: 1 })
+    store.feed([{ ...a, dns: true }, connection('C')], 2000)
+    assertCounts(store, { internal: 2, '192.0.2.1': 1 })
+    assert.equal(store.getSnapshot().connectionsBySource.has(UNKNOWN_CONNECTIONS), false)
+    store.feed([connection('D')], 3000)
+    assertCounts(store, { internal: 1, '192.0.2.1': 2 })
+    assert.equal(store.getConnection('B'), undefined, 'oldest internal closed record is evicted')
+    store.feed([connection('A', '192.0.2.2')], 4000)
+    assertCounts(store, { '192.0.2.1': 2, '192.0.2.2': 1 })
+    assert.equal(store.getSnapshot().connectionsBySource.has(INTERNAL_CONNECTIONS), false)
+    store.clearHistory()
+    assertCounts(store, { '192.0.2.2': 1 })
 })
 
 test('every valid snapshot updates the observed collection, including null and empty', () => {

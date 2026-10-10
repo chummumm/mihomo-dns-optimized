@@ -241,14 +241,18 @@ async function main() {
     await page.locator('.connections-devices-item').filter({ hasText: '192.0.2.101' }).click()
     await waitRows(2)
     await send([connection(20001)])
-    await waitCount(1); await waitRows(1)
-    assert.ok(await page.locator('.connections-devices-item').first().evaluate(element => element.classList.contains('selected')), 'expired device filter resets to All')
+    await waitCount(1); await waitRows(0)
+    const emptyDevice = page.getByRole('button', { name: '192.0.2.101 (0)', exact: true })
+    assert.equal(await emptyDevice.getAttribute('aria-pressed'), 'true', 'an empty selected source stays selected')
+    await page.getByText('No connections in this view.', { exact: true }).waitFor()
     await send(null)
     await waitCount(0); await waitRows(0)
     await send([connection(30000), connection(30001)])
     await waitCount(2)
     await send([connection(30000)])
     await waitCount(1)
+    await page.locator('.connections-devices-item').first().click()
+    await waitRows(1)
 
     const host = connection(31000)
     host.metadata.host = 'explicit.example.test'; host.metadata.sniffHost = 'ignored.example.test'
@@ -270,6 +274,8 @@ async function main() {
     await details.getByText(sniff.id, { exact: true }).waitFor()
     await details.getByText('sniff.example.test:443', { exact: true }).waitFor()
     await details.getByText('Open', { exact: true }).waitFor()
+    assert.equal(await details.locator('time').getAttribute('datetime'), sniff.start, 'details expose the original start timestamp')
+    assert.match(await details.locator('time').textContent(), /Jan 1, 2026/, 'start time follows English locale')
     assert.equal(await page.getByText('sniff.example.test:443', { exact: true }).count(), 2, 'details use the same sniffed host as the list')
     const closeConnection = details.getByRole('button', { name: 'Close', exact: true })
     assert.equal(await closeConnection.isDisabled(), false)
@@ -296,7 +302,7 @@ async function main() {
     await waitCount(3); await waitRows(3)
     for (const [item, type, chain, rule] of [
         [dns, 'DNS', 'dns-leaf', ''],
-        [legacyDNS, 'DNS', 'legacy-dns-leaf', ''],
+        [legacyDNS, 'Inner', 'legacy-dns-group / legacy-dns-leaf', 'Match'],
         [ordinary53, 'Socks5', 'ordinary-outer-group / ordinary-inner-group / ordinary-leaf', 'DomainSuffix :: ordinary.example.test'],
     ]) {
         const cells = page.locator('[data-connection-id="' + item.id + '"] .connections-block')
@@ -316,7 +322,76 @@ async function main() {
         }
         await details.locator('.icon-close').click()
     }
-    observations.push({ label: 'dns_connection_presentation', markedDNS: 'DNS / dns-leaf', legacyDNS: 'DNS / legacy-dns-leaf', ordinaryPort53: 'Socks5 with unchanged chain and rule' })
+    observations.push({ label: 'dns_connection_presentation', markedDNS: 'DNS / dns-leaf', legacyNameWithoutFlag: 'Inner with unchanged chain and rule', ordinaryPort53: 'Socks5 with unchanged chain and rule' })
+
+    const nativeDNS = connection(33000)
+    nativeDNS.dns = true; nativeDNS.metadata.type = 'Inner'; nativeDNS.metadata.sourceIP = ''
+    const internalWork = connection(33001)
+    internalWork.metadata.type = 'Inner'; internalWork.metadata.sourceIP = '::'
+    const unknown = connection(33002)
+    unknown.metadata.sourceIP = ''
+    const unspecified = connection(33003)
+    unspecified.metadata.sourceIP = '0.0.0.0'
+    const grouped = [dns, legacyDNS, ordinary53, nativeDNS, internalWork, unknown, unspecified]
+    await send(grouped)
+    await waitCount(7); await waitRows(7)
+    const expectedGroups = [
+        ['mihomo', [dns.id, nativeDNS.id, internalWork.id]],
+        ['Unknown source', [unknown.id, unspecified.id]],
+        ['192.0.2.101', [ordinary53.id]],
+        ['192.0.2.102', [legacyDNS.id]],
+    ]
+    let totalGrouped = 0
+    for (const [label, ids] of expectedGroups) {
+        await page.getByRole('button', { name: label + ' (' + ids.length + ')', exact: true }).click()
+        await waitRows(ids.length)
+        assert.deepEqual((await page.locator('.connections-row').evaluateAll(rows => rows.map(row => row.dataset.connectionId))).sort(), [...ids].sort(), label + ': displayed count and actual filter agree')
+        totalGrouped += ids.length
+    }
+    assert.equal(totalGrouped, grouped.length, 'source buckets partition All')
+    await page.getByRole('button', { name: 'mihomo (3)', exact: true }).click()
+    await send([legacyDNS, ordinary53, unknown, unspecified])
+    await waitCount(4); await waitRows(0)
+    assert.equal(await page.getByRole('button', { name: 'mihomo (0)', exact: true }).getAttribute('aria-pressed'), 'true')
+    await send(grouped)
+    await waitCount(7); await waitRows(3)
+    assert.equal(await page.getByRole('button', { name: 'mihomo (3)', exact: true }).getAttribute('aria-pressed'), 'true', 'new internal work returns to the existing selection')
+    observations.push({ label: 'source_groups', all: 7, mihomo: 3, unknown: 2, devices: 2, transientZeroKeepsSelection: true })
+
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.getByRole('link', { name: 'Connections', exact: true }).click()
+    await waitTableSize()
+    const mobileRows = Array.from({ length: 200 }, (_, index) => {
+        const item = connection(40000 + index)
+        item.dns = true; item.metadata.type = 'Inner'; item.metadata.sourceIP = ''
+        return item
+    })
+    await send([...mobileRows, ordinary53])
+    await waitCount(201); await waitRows(200)
+    await bottom('mobile_mihomo_bottom')
+    await send([...mobileRows, ordinary53], () => 200)
+    stillBottom(await position('mobile_mihomo_refresh'), 'mobile selected internal bottom')
+    await page.locator('[data-connection-id="' + mobileRows[0].id + '"] .connections-block').first().click()
+    await details.getByText(mobileRows[0].id, { exact: true }).waitFor()
+    await page.waitForFunction(() => {
+        const drawer = document.querySelector('.connections-card .card.translate-x-0')
+        const rect = drawer?.getBoundingClientRect()
+        return rect && rect.left >= 0 && rect.right <= window.innerWidth
+    })
+    const mobileDrawer = await details.boundingBox()
+    assert.ok(mobileDrawer.x >= 0 && mobileDrawer.x + mobileDrawer.width <= 390, 'details fit narrow mobile viewport')
+    assert.equal(await details.locator('time').getAttribute('datetime'), mobileRows[0].start)
+    assert.ok(await details.locator('time').isVisible(), 'start time is visible on mobile')
+    assert.equal(await page.locator('.connections-th').filter({ hasText: 'Process' }).count(), 1, 'process column is preserved')
+    await details.locator('.icon-close').click()
+    await page.getByText('Keep closed connections', { exact: true }).click()
+    await send([])
+    await waitCount(201); await waitRows(200)
+    await page.getByText('Clear closed records', { exact: true }).click()
+    await waitCount(0); await waitRows(0)
+    assert.equal(await page.getByRole('button', { name: 'mihomo (0)', exact: true }).getAttribute('aria-pressed'), 'true', 'clearing history keeps the selected source')
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, 'mobile page has no horizontal body overflow')
+    observations.push({ label: 'mobile_connections', width: 390, internalRows: 200, visibleNavigation: true, boundedDrawer: true, processColumnKept: true })
     assert.deepEqual(pageErrors, [])
     assert.ok(externalRequests.every(request => request.type === 'font' && request.url === 'http://at.alicdn.com/t/font_841708_ok9czskbhel.ttf'), 'only the inherited icon font may attempt an external request; all external requests are blocked')
     console.log(JSON.stringify({ passed: true, browser: browser.version(), observations, pageErrors, blockedExternalRequests: externalRequests }, null, 2))

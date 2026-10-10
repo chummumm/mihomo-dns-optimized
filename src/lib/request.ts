@@ -2,6 +2,8 @@ import axios, { type AxiosInstance } from 'axios'
 
 import type { DNSObservability, DNSQueries, DNSQueryParams, DNSStats, DNSUpstreams } from '@containers/DNS/types'
 
+import { DEFAULT_PROBE_URL, normalizeProbeURL } from './probe'
+
 export interface Config {
     port: number
     'socks-port': number
@@ -59,7 +61,7 @@ interface History {
 
 export interface Proxy {
     name: string
-    type: 'Direct' | 'Reject' | 'Shadowsocks' | 'Vmess' | 'Trojan' | 'Socks' | 'Http' | 'Snell'
+    type: 'Direct' | 'Reject' | 'Pass' | 'Shadowsocks' | 'Vmess' | 'Trojan' | 'Socks' | 'Http' | 'Snell'
     history: History[]
     udp: boolean
     alive?: boolean
@@ -120,6 +122,10 @@ export class Client {
         return await this.axiosClient.patch<void>('configs', config)
     }
 
+    async reloadConfig (signal?: AbortSignal) {
+        return await this.axiosClient.put<void>('configs', {}, { signal })
+    }
+
     async getRules () {
         return await this.axiosClient.get<Rules>('rules')
     }
@@ -165,11 +171,12 @@ export class Client {
         return await this.axiosClient.get<{ version: string, premium?: boolean }>('version')
     }
 
-    async getProxyDelay (name: string) {
+    async getProxyDelay (name: string, probeURL = DEFAULT_PROBE_URL, signal?: AbortSignal) {
         return await this.axiosClient.get<{ delay: number }>(`proxies/${encodeURIComponent(name)}/delay`, {
+            signal,
             params: {
                 timeout: 5000,
-                url: 'http://www.gstatic.com/generate_204',
+                url: normalizeProbeURL(probeURL) ?? DEFAULT_PROBE_URL,
             },
         })
     }
