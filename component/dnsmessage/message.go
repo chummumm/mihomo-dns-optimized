@@ -1,4 +1,4 @@
-// Package dnsmessage validates wire messages for DNS classification and routing.
+// Package dnsmessage validates wire messages for DNS query routing and exchange.
 // It does not resolve names or validate DNSSEC signatures.
 package dnsmessage
 

@@ -20,14 +20,14 @@
 
 一次逻辑查询只选一次实际出口；上游重试、main / fallback 和 UDP 截断后的 TCP 重试沿用它。直连池失败不会偷偷借用代理池。缓存按解析器池、实际出口、来源等作用域隔离，切组不会混用另一个出口的回答。
 
-原有普通入站 DNS 分类也保留：
+DNS 分流通过内置解析器提供，普通代理连接保持原转发行为：
 
 | 查询如何进入 | 解析器目的地址 |
 | --- | --- |
 | 直接发给 `dns.listen`，或由 TUN DNS 劫持进入本地服务 | 按上述规则选择 direct / main 池 |
-| 经 mixed / SOCKS / HTTP 等入站，访问指定解析器的 TCP / UDP 53 | 保留客户端指定的解析器地址，只按 QNAME 选择出口 |
+| 经 mixed / SOCKS / HTTP 等入站，访问指定解析器的 TCP / UDP 53 | 作为普通代理流量转发，按连接目标和原规则选择出口，不读取 DNS Question 分流 |
 
-后者不要求开启内置 DNS，也不依赖普通 sniffer。普通网页、SSH、非 53 流量继续原有流程。
+普通代理入站不再自动识别和接管目标 53 的 DNS 报文。需要按查询域名选择 DNS 出口时，让客户端使用 `dns.listen`，或显式配置 TUN DNS 劫持；普通 SOCKS / HTTP 请求直接携带的目标域名仍可正常匹配业务规则。
 
 ## DNS 路径性能优化
 
@@ -119,6 +119,8 @@ rules:
 
 示例监听本机 `1053`，原 mixed 仍为 `7890`。需要标准 DNS 端口或其他设备接入时，调整监听与原有访问范围配置。另有[包含文档代理节点的完整示例](docs/dns-proxy.example.yaml)，其中保留地址须替换后才能实际联网。
 
+`enhanced-mode: redir-host` 返回真实 IP，并保留 IP 到历史查询域名的映射，供只有 IP 的连接辅助匹配。若不需要这层反查，可改为 `enhanced-mode: normal`；正常 DNS 解析、正向回答缓存和本项目的原生优化仍保留。透明代理若拿不到域名，需要依赖嗅探或其他规则；模式区别与可选 TLS / HTTP 全端口嗅探示例见[使用说明](docs/dns-proxy.md#enhanced-mode-与域名嗅探)。
+
 ## 只有直连路径才做 IP 测速
 
 这里优选的是 **DNS 回答中的目标 IP**，不是代理节点速度，也不是 DNS 服务器所在地。
@@ -170,9 +172,9 @@ rules:
 
 自动 QNAME 选路只在 **开关开启、Rule 模式、入站没有固定 `proxy:`** 时接管；固定出站和 Global / Direct 保留原优先级。入站 `rule:` 仍作为子规则入口，已经选定业务叶子的内部解析继承该叶子，bootstrap 独立执行。
 
-- **不使用 FakeIP。** 内置 DNS 使用 `redir-host`；本功能与内置 FakeIP 同时启用会在校验时报错。不增加 listener 类型或专用 DNS 代理端口。
+- **使用真实 DNS 回答。** 内置 DNS 可使用 `normal` 或 `redir-host`；本功能与内置 FakeIP 同时启用会在校验时报错。不增加 listener 类型或专用 DNS 代理端口。
 - **规则顺序不变。** IN / SRC / PROCESS、端口和网络属性仍可参与；QNAME 用于域名规则。网站目标 IP / GEOIP / ASN 尚未知，不拿解析器 IP 代替，也不为选路递归解析同一个名字。
-- **原生上游与外部分类范围分别定义。** 内置 DNS 已知 QNAME，配置的 UDP / TCP 任意端口及 DoH / DoT / DoQ / H3 均可自动选池和选出口。外部入站只识别明文 TCP / UDP 53，不解密客户端 DoH，也不接管其他普通流量。
+- **按 QNAME 分流的入口是内置 DNS。** 内置 DNS 已知 QNAME，配置的 UDP / TCP 任意端口及 DoH / DoT / DoQ / H3 均可自动选池和选出口。普通代理入站不自动接管明文 DNS，也不解密客户端 DoH；显式 TUN DNS 劫持仍可将请求送入内置 DNS。
 - **显式 DNS 传输仍是例外。** `#Group` / `#DIRECT` / `#interface` 等保留旧行为；先选池，再判断该池的例外。混有显式上游时，显式分支可独立回答；未选池不会削弱自动分支的拒绝动作。
 - **不另写 DNS 域名策略。** 开启时停用 `nameserver-policy`、`direct-nameserver-follow-policy`、`fallback-filter.domain/geosite`；`fallback` 的适用 IP 过滤、hosts、基础解析等保留。关闭开关并完整重载可恢复原策略。
 - **respect-rules 的旧模式行为保留。** 非 Rule 模式不建立新计划；在自动范围内，QNAME 计划代替按解析器地址二次选路。
@@ -185,7 +187,7 @@ rules:
 
 [构建工作流](https://github.com/chummumm/mihomo-dns-optimized/actions/workflows/build.yml)先执行规定 Go 测试、DNS race、同步保护与安装包检查，再构建完整 37 目标矩阵；Linux amd64 产物运行本地模拟服务的实际二进制端到端测试。其他目标为交叉编译，不等同于在各设备实际执行。所有必需归档和安装包齐全、摘要一致后才发布。
 
-`main` 推送通过验证后自动发布带源提交标识和 SHA-256 的下载包；PR 只生成 Actions artifact。当前 `main` 对应构建才能更新 Latest，旧构建重跑不会覆盖新版本入口。
+`main` 的源码、依赖或构建配置变更通过验证后自动发布带源提交标识和 SHA-256 的下载包；PR 只生成 Actions artifact。纯文档更新跳过自动构建和发布，具体路径与显式发布入口见[发行文档](docs/releases.md)。当前 `main` 对应构建才能更新 Latest，旧构建重跑不会覆盖新版本入口。
 
 [稳定版同步](https://github.com/chummumm/mihomo-dns-optimized/actions/workflows/sync-upstream.yml)计划每日北京时间 04:23 检查上游正式 release，定时任务可能延迟。先合并、测试和编译，通过后普通推送；冲突、验证失败或远端分支并发变化时停止，不强推覆盖本项目修改。基线见 [UPSTREAM_VERSION](UPSTREAM_VERSION) / [UPSTREAM_COMMIT](UPSTREAM_COMMIT)。
 

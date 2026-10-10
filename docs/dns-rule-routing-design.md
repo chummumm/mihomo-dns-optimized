@@ -2,7 +2,7 @@
 
 ## 目标和配置边界
 
-顶层 `dns-rule-routing` 默认关闭，开启后复用已有业务 `rules` / `rule-providers`。内置 DNS 首次收到业务查询时取得一次 QNAME 路由计划，以实际叶子选择 `direct-nameserver` 或 `nameserver`。原生自动上游包括配置的 UDP / TCP 任意端口、DoT、DoH（HTTP/2 / HTTP/3）和 DoQ；公共代理入站的分类仍只接管普通明文 TCP / UDP 53。无需 SmartDNS、独立 DNS 域名策略表、专用监听类型或 `dns-proxy-port`。
+顶层 `dns-rule-routing` 默认关闭，开启后复用已有业务 `rules` / `rule-providers`。内置 DNS 首次收到业务查询时取得一次 QNAME 路由计划，以实际叶子选择 `direct-nameserver` 或 `nameserver`。原生自动上游包括配置的 UDP / TCP 任意端口、DoT、DoH（HTTP/2 / HTTP/3）和 DoQ；普通代理入站不再自动识别或接管目标 53 的 DNS。无需 SmartDNS、独立 DNS 域名策略表、专用监听类型或 `dns-proxy-port`。
 
 用户配置和示例见 [使用说明](dns-proxy.md)、[原生 DNS 示例](dns-proxy.example.yaml)。本功能只提供文档描述的选路、IP 优选和缓存控制，不声称完整实现 SmartDNS 的配置、插件或所有行为。
 
@@ -12,13 +12,13 @@
 | --- | --- |
 | 开关关闭 | 原版 DNS 与普通转发行为 |
 | Global / Direct 模式 | 不创建新增 QNAME 计划；原 DNSDialer / respect-rules 行为保留 |
-| 公共入站固定 `proxy:` | 不接管该连接的 QNAME 路由，仍服从固定出站 |
+| 普通代理入站，包括固定 `proxy:` | 仍按普通连接规则或固定出站转发，不检查载荷中的 DNS Question |
 | 内置解析来源带 SpecialProxy | 新增选池旁路，保留旧固定出站处理 |
 | 仅指定入站 `rule:` | 保留 SpecialRules 作为规则入口 |
 | 已决定业务实际叶子的内部 lookup | 沿用该叶子，可据此选池，不重新匹配业务规则 |
 | 节点或解析器域名 bootstrap | 独立基础解析，禁止继承业务 QNAME 计划 |
 
-普通网页、SSH 和非 53 流量不会被此开关丢弃。公共分类位于反向域名映射、普通嗅探及 UDP NAT 固定出口之前，协议入口解包后共用，不单独实现每种代理握手。
+普通代理入站的 TCP / UDP 53 与其他端口一样，使用原域名映射、可选协议嗅探、规则匹配和转发流程；没有专用 DNS 首帧等待或逐查询路由入口。`dns.listen` 与显式 TUN DNS 劫持继续使用内置 DNS。
 
 ## 2. 匹配信息
 
@@ -30,7 +30,7 @@ SRC-IP 是入口实际取得的来源。客户端直接访问 DNS 监听或入�
 
 域名叶子和 provider 继续用上游算法，共享原 match 外层控制流。PASS、PASS-RULE、禁用规则、命中计数、缺失出站及兜底遵循原语义；PASS 先于 UDP 能力检查。选中不支持所需 UDP 的出口时失败，不跳规则或退 DIRECT。DNS / REMATCH 回流型出口明确失败，避免递归。
 
-## 3. 一次计划与两种目的地址
+## 3. 原生 DNS 的一次计划
 
 ### 内置 DNS
 
@@ -49,11 +49,11 @@ SRC-IP 是入口实际取得的来源。客户端直接访问 DNS 监听或入�
 
 直连查询失败不得改用代理 main / fallback。代理查询保留 fallback-lazy-query 和 IP 过滤行为。同一逻辑查询的重试、并发 main / fallback、UDP→TCP 均不得再次推进选组；非 IP 查询不纳入原本不会使用的 fallback。
 
-### 公共入站过境 DNS
+### 普通代理转发与显式劫持
 
-目的解析器来自客户端请求，选路只决定出口，不能改写为 native direct / main 池，也不能把 QNAME 写入实际拨号 Host。原解析器 Host 如需解析，只能通过独立 bootstrap 获得原解析器 IP:53。
+通过普通代理访问解析器时，目标地址来自客户端代理请求，Mihomo 不读取其中的 DNS Question，不进行逐包 / 逐帧 QNAME 路由，也不改投原生 direct / main 池。该连接与其他普通代理流量使用相同的解析、匹配和转发行为。
 
-UDP 每包独立选路；TCP 每长度帧独立选路。公共路径不插入内置 hosts 或生成 FakeIP。TUN DNS 劫持则保持本地 DNS 服务身份，不能把虚拟 TUN DNS 地址当作公网解析器发送。
+显式 TUN DNS 劫持保持本地 DNS 服务身份，进入内置解析器，不能把虚拟 TUN DNS 地址当作公网解析器发送。取消普通入站自动识别不影响这一显式入口。
 
 ## 4. DNS 设置与基础解析
 
@@ -61,7 +61,7 @@ UDP 每包独立选路；TCP 每长度帧独立选路。公共路径不插入内
 
 保留 nameserver、direct-nameserver、实际 main 路径的 fallback / IP 过滤、hosts、系统 hosts、缓存及回答类型控制。自动原生交换用 QNAME 计划代替按解析器地址执行的 respect-rules / #RULES 二次选择。基础 TLS / HTTP / QUIC 客户端保留解析器的服务器名、证书验证和协议设置，不把业务 QNAME 用作实际拨号目标或 TLS 名称。
 
-proxy-server-nameserver 及其 policy 保持节点解析作用。未配置时使用独立 default bootstrap，不能退回正在建立的业务代理；即使关闭内置监听，公共分类所需基础解析仍可独立运行。FakeIP 与启用的内置 DNS 自动路由配置互斥。
+proxy-server-nameserver 及其 policy 保持节点解析作用。未配置时使用独立 default bootstrap，不能退回正在建立的业务代理。FakeIP 与启用的内置 DNS 自动路由配置互斥；normal 与 redir-host 都可使用原生优化，区别在于是否保留真实 IP 的历史域名映射。
 
 ## 5. 可选 IP 优选
 
@@ -83,7 +83,7 @@ proxy-server-nameserver 及其 policy 保持节点解析作用。未配置时使
 
 `force-no-cname` 默认 false，`rr-ttl-min` / `rr-ttl-max` 默认 0（不设该边界）。只压平同一回答中完整、无歧义的未签名 IN A / AAAA 链，将现有终点地址归属到查询名，TTL 取调整后链中最小值；不补造地址或发起新的 CNAME 解析。显式 CNAME 查询、DNAME、断链、循环、冲突和不相关 Answer 记录不压平。
 
-DO / CD 查询、AD / RRSIG / SIG / TSIG 保护、截断或不匹配回答跳过整个回答调整。OPT 的 TTL 字段是标志位，不作为寿命修改；TTL 最大值也限制 SOA MINIMUM，零 TTL 始终为零。只在新回答写缓存前调整一次，不对缓存命中或过期回答重复套用最小 TTL，不继承到节点 / 解析器 bootstrap 或公共过境 DNS。
+DO / CD 查询、AD / RRSIG / SIG / TSIG 保护、截断或不匹配回答跳过整个回答调整。OPT 的 TTL 字段是标志位，不作为寿命修改；TTL 最大值也限制 SOA MINIMUM，零 TTL 始终为零。只在新回答写缓存前调整一次，不对缓存命中或过期回答重复套用最小 TTL，不继承到节点 / 解析器 bootstrap。普通代理转发的 DNS 不经过此回答调整。
 
 这组设置独立于 DIRECT 测速：启用后也可作用于代理、显式上游或非 Rule 模式的内置业务回答。无自动路由计划时仍将完整查询内容加入缓存 / singleflight 键，避免受保护查询复用此前已改写的普通回答；不验证 DNSSEC 签名。
 
@@ -103,15 +103,15 @@ DO / CD 查询、AD / RRSIG / SIG / TSIG 保护、截断或不匹配回答跳过
 
 ## 8. 协议、连接复用和可观测性
 
-自动范围是单问题普通 QUERY。原生协议与端口范围见本文开头；只有公共入口的明文分类限制目标 53。严格校验报文消费、记录计数、OPT、响应来源 / ID / Question；普通记录类型、EDNS 和 DNSSEC 数据不靠窄类型白名单排除，但不验证签名。区域传送、更新、多问题不在自动范围。
+内置 DNS 自动范围是单问题普通 QUERY，原生协议与端口范围见本文开头。严格校验报文消费、记录计数、OPT、响应来源 / ID / Question；普通记录类型、EDNS 和 DNSSEC 数据不靠窄类型白名单排除，但不验证签名。区域传送、更新、多问题不在自动范围。
 
-公共 TCP 首帧探测可处理 65535 字节，未识别时保留全部字节并清 deadline 回原流程；确认后逐帧处理，畸形帧不得变为任意透传。公共上限为 128 个已识别候选 TCP 会话、256 个并发交换；探测 / 单次交换 5 秒，已接管 TCP 空闲 60 秒。模式或开关变化在下一帧重新检查。
+普通入站已删除 DNS 首帧探测、逐帧交换和相应的外部连接 / 交换限额。原生 DNS 的未命中工作、缓存、探测和后台刷新仍按各自边界管理，不将测速名额满视为 DNS 查询失败。
 
 原生加密及非 53 上游为每个配置客户端维护最多 64 个传输作用域，不等于 64 条 socket。作用域键包含实际叶子 / 组身份、出口参数及 UDP 约束和路由 epoch，不含 QNAME、来源 IP 或来源端口。HTTP/2、HTTP/3、DoQ 因而可以跨查询复用同一出口的连接，切叶子不得借用另一叶子的连接。仅淘汰空闲作用域；全部在用时等待空位或请求超时，不能关闭仍承载兄弟查询的连接。重载关闭旧池。
 
 这条原生共享传输路径将 tracker 分为每次逻辑查询和实际连接两层。逻辑层展示当前 QNAME、真实来源、入站、规则、策略链和 DNS 负载计数；物理层标记 DNS-TRANSPORT，展示真实解析器及配置端口，全局流量只累加真实线路字节一次。逻辑查询完成后移出活动列表，底层共享连接可继续存在。面板手动关闭逻辑查询只取消该查询，不关闭 HTTP/2 / QUIC 兄弟流，且禁止被该查询的重试或后台刷新重新发起。
 
-普通原生 TCP / UDP 53 和公共过境路径保留原有逐交换 transport / tracker；公共 DNS 不重复计数。回答缓存按来源隔离与物理连接复用互不冲突。普通 SSH 的反向域名显示不在本轮修改范围。
+普通原生 TCP / UDP 53 保留逐交换 transport / tracker；通过普通代理的 DNS 只展示普通连接，不再生成逐查询记录。回答缓存按来源隔离与物理连接复用互不冲突。普通 SSH 的反向域名显示不在本轮修改范围。
 
 ## 9. 最小验收矩阵
 
@@ -128,7 +128,7 @@ DO / CD 查询、AD / RRSIG / SIG / TSIG 保护、截断或不匹配回答跳过
 | 回答调整 | 完整 CNAME 链与异常链、DNSSEC/OPT/零 TTL 保护、负缓存上限、缓存命中不重复抬高 TTL、显式/Global 完整查询隔离 |
 | 缓存 | 不同来源/叶子隔离、过期上限/返回 TTL、热点条件、快照进程、重新匹配规则、零 TTL 删除旧正向、clear/mode/reload/close 取消及防旧世代写入/删除 |
 | 连接池与面板 | 同叶子跨 QNAME/来源复用、切叶子隔离、64 作用域和活动保护、取消单流不伤兄弟、逻辑手动关闭不重试、真实字节只计一次、重载关闭 |
-| 公共入口 | 同 socket / TCP 多帧逐查询、普通非 DNS 不变、完整帧、原目的地址不改池、TUN 上下文 |
+| 普通入口与显式劫持 | mixed / SOCKS / HTTP 的 DNS 载荷按普通连接转发，不按 QNAME 选路；普通非 DNS 不变；dns.listen 与显式 TUN 劫持保留上下文及原生选池 |
 | 交付 | Go 测试及 race、配置 -t、真实二进制、amd64/arm64 构建、精确提交 Actions |
 
 验证事实与平台限制单独记录在 [实施与复查记录](dns-rule-routing-validation.md)。

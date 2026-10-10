@@ -175,11 +175,15 @@ func resolveSocketByNetlink(network string, ip netip.Addr, srcPort int) (uid uin
 }
 
 func resolveProcessNameByProcSearch(inode, uid uint32) (string, error) {
-	files, err := os.ReadDir("/proc")
+	const procRoot = "/proc"
+	files, err := os.ReadDir(procRoot)
 	if err != nil {
 		return "", err
 	}
+	return resolveProcessNameByProcEntries(procRoot, files, inode, uid)
+}
 
+func resolveProcessNameByProcEntries(procRoot string, files []os.DirEntry, inode, uid uint32) (string, error) {
 	buffer := make([]byte, unix.PathMax)
 	socket := fmt.Appendf(nil, "socket:[%d]", inode)
 
@@ -190,13 +194,18 @@ func resolveProcessNameByProcSearch(inode, uid uint32) (string, error) {
 
 		info, err := f.Info()
 		if err != nil {
+			// A process may exit after ReadDir but before its metadata is read.
+			// An unrelated vanished PID must not abort the socket-owner search.
+			if os.IsNotExist(err) {
+				continue
+			}
 			return "", err
 		}
 		if info.Sys().(*syscall.Stat_t).Uid != uid {
 			continue
 		}
 
-		processPath := filepath.Join("/proc", f.Name())
+		processPath := filepath.Join(procRoot, f.Name())
 		fdPath := filepath.Join(processPath, "fd")
 
 		fds, err := os.ReadDir(fdPath)

@@ -1,10 +1,12 @@
 # DNS 分流、SmartDNS 功能迁移与发行：验证记录
 
-## 当前实现范围
+本文保留原生 DNS 扩展阶段的历史验证事实。后续版本已删除普通代理入站对 TCP / UDP 53 的自动识别和逐查询路由；下面关于该旧路径的测试数量与结果不代表当前仍提供这项能力。当前入口、配置与回归要求以[使用说明](dns-proxy.md)和[设计约定](dns-rule-routing-design.md)为准，当前提交的验证结果见对应 Actions。
+
+## 当时的实现范围
 
 在 `c30151ec8f2541634bfcab9742b89301bcc4f05d` 原生选池版本上，本次补齐配置上游的 UDP / TCP 任意端口、DoT、DoH、HTTP/3、DoQ 自动 QNAME 路由，迁入可选 DIRECT 双栈、CNAME / TTL 控制，并扩展 37 个平台 / CPU 的发行矩阵。原生 DNS 先按业务规则选实际出口，再选 direct / main；外部代理入站仍只分类明文 TCP / UDP 53，保留原目的解析器。
 
-当前本地实现、独立审查和下述集成验证均已完成。GitHub 会对精确提交重新执行测试和完整矩阵，只有全套必需文件通过检查才发布；每个 Release 的正文、BUILDINFO 和 SHA256SUMS 可将源码和产物对应。配置与边界见[使用说明](dns-proxy.md)、[设计约定](dns-rule-routing-design.md)、[SmartDNS 迁移对照](smartdns-migration.md)。
+该阶段本地实现、独立审查和下述集成验证均已完成。GitHub 对精确提交执行测试和完整矩阵，只有全套必需文件通过检查才发布；每个 Release 的正文、BUILDINFO 和 SHA256SUMS 可将源码和产物对应。配置与边界见[使用说明](dns-proxy.md)、[设计约定](dns-rule-routing-design.md)、[SmartDNS 迁移对照](smartdns-migration.md)。
 
 ## 独立审查与修复
 
@@ -30,7 +32,7 @@
 
 未发现上述审查范围内尚未解决的阻塞问题。这不是对全部网络环境、设备和协议实现无缺陷的保证。
 
-## 已执行的集成验证
+## 该阶段已执行的集成验证
 
 | 验证 | 已观察结果 |
 | --- | --- |
@@ -61,7 +63,7 @@ Global / Direct、入站固定出口、子规则入口和 bootstrap 保持原优
 
 原生 direct / main 选池版本 `c30151ec8f2541634bfcab9742b89301bcc4f05d` 已在 GitHub 通过规定 Go / race 门禁、70 次二进制 DNS 交换与 Linux amd64 / arm64 构建并发布；该版本的原生自动传输尚限普通 53，本次补齐加密与其他配置端口。
 
-更早公共分类器基线 `5633c97d` 已验证 mixed / SOCKS5 UDP / TCP / HTTP CONNECT 与 SmartDNS 48.4 接入，以及面板统计、模式切换和原始目的解析器保留。这些事实用于回归对照，不代替本次新增功能的测试。
+更早公共分类器基线 `5633c97d` 已验证 mixed / SOCKS5 UDP / TCP / HTTP CONNECT 与 SmartDNS 48.4 接入，以及面板统计、模式切换和原始目的解析器保留。该分类器现已删除，这些记录仅用于追溯历史，不作为当前逐查询分流能力或验收结果。
 
 ## 明确限制
 
@@ -69,7 +71,7 @@ Global / Direct、入站固定出口、子规则入口和 bootstrap 保持原优
 - 原生规则匹配的逻辑 DNS 目标端口是 53；实际 DoH / DoT / DoQ 传输保留配置的 443 / 853 / 其他端口。真实监听端口属于 IN-PORT。
 - 配置 `-t` 不会证明每个私人节点、远程 provider、设备上的既有自定义文件或实际网络均可用。未访问用户代理节点进行公网测试。
 - 跨平台构建不等于每种设备上的运行验证；TUN、redir、tproxy、ICMP、PROCESS 仍取决于上游平台支持和运行权限。
-- 外部分类限单问题明文 TCP / UDP 53，不解密任意客户端 DoH / DoT / DoQ；内置 DNS 的已知 QNAME 上游不受这条端口限制。
+- 当前普通代理入站不再分类明文 TCP / UDP 53，也不解密任意客户端 DoH / DoT / DoQ；内置 DNS 的已知 QNAME 上游仍可使用已支持的配置协议和端口。
 - 传递 DNSSEC 数据不等于校验 DNSSEC 签名；速度反映探测时的握手或 ICMP 耗时，不保证下载吞吐或全部 SmartDNS 行为等价。
 - 普通 SSH 的反向 IP→域名显示仍可能受原映射影响；用户配置可用窄 IP＋TCP＋22 规则确定实际出口，不能用面板显示名证明 SSH 请求了该域名。
 

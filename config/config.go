@@ -780,7 +780,7 @@ func temporaryUpdateGeneral(general *General) func()
 
 func parseGeneral(cfg *RawConfig) (*General, error) {
 	if cfg.LegacyDNSProxyPort != nil && *cfg.LegacyDNSProxyPort != 0 {
-		return nil, errors.New("dns-proxy-port has been removed; use dns-rule-routing: true with an existing mixed-port or another inbound")
+		return nil, errors.New("dns-proxy-port has been removed; use dns-rule-routing: true with the built-in dns.listen service or explicit TUN dns-hijack")
 	}
 	if cfg.GlobalClientFingerprint != "" {
 		log.Errorln("The `global-client-fingerprint` configuration is removed, please set `client-fingerprint` directly on the proxy instead")

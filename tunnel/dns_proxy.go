@@ -46,18 +46,6 @@ type dnsProxyRoute struct {
 type dnsProxySelect func(*C.Metadata) (dnsProxyRoute, error)
 type dnsProxyExchange func(context.Context, []byte, *C.Metadata, dnsProxyRoute) ([]byte, error)
 
-// ExchangeDNS routes one DNS question through the live rules with its real
-// inbound/source metadata. The queried site's destination IP remains unknown;
-// the resolver IP is used only for transport, never as the site's address.
-//
-// Call once per UDP datagram or DNS-over-TCP message, not once per connection.
-// Resolver hostnames use a separate bootstrap resolver, never QNAME routing.
-func (t tunnel) ExchangeDNS(ctx context.Context, query []byte, resolver *C.Metadata) ([]byte, error) {
-	return exchangeDNSProxy(ctx, query, resolver, selectDNSProxy, exchangeDNSProxyWire)
-}
-
-var _ C.DNSExchanger = Tunnel
-
 func exchangeDNSProxy(ctx context.Context, wire []byte, resolver *C.Metadata, selectProxy dnsProxySelect, exchange dnsProxyExchange) ([]byte, error) {
 	if resolver == nil || resolver.DstPort != 53 {
 		return nil, errors.New("DNS query routing requires destination port 53")

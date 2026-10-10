@@ -30,11 +30,6 @@ func SetDNSRuleRouting(enabled bool) {
 // Old background resolver work must not outlive either transition.
 func DNSRoutingEpoch() uint64 { return dnsRoutingEpoch.Load() }
 
-// Explicit inbound targets and non-rule modes retain the ordinary priority.
-func DNSRuleRoutingApplies(metadata *C.Metadata) bool {
-	return metadata != nil && DNSRuleRoutingEnabled() && Mode() == Rule && metadata.SpecialProxy == ""
-}
-
 func dnsRoutingMetadata(qname string, origin *C.Metadata) *C.Metadata {
 	metadata := origin.Clone()
 	metadata.Host = qname
