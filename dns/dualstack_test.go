@@ -208,44 +208,90 @@ func TestDualStackBothFamiliesShareBudgetAndProbeLimit(t *testing.T) {
 		t.Fatalf("auxiliary failure exceeded one budget or lost primary answer: %v, %v, %v", time.Since(start), answer, err)
 	}
 
-	checker = speedCheckTestChecker(t, time.Second, 2)
+	checker = speedCheckTestChecker(t, 5*time.Second, 2)
+	// Hold one real probe from each family until both have started. A single
+	// mode keeps the barrier independent of the fallback modes' time budgets.
+	checker.modes = []speedCheckMode{{port: 443}}
 	client = &dualStackTestClient{exchange: func(_ context.Context, q *D.Msg) (*D.Msg, error) {
-		answer := dualStackTestAnswer(q)
-		for i := 1; i < 3; i++ {
-			rr := D.Copy(answer.Answer[0])
-			if a, ok := rr.(*D.A); ok {
-				a.A = net.IPv4(192, 0, 2, byte(4+i))
-			} else {
-				ip := net.ParseIP("2001:db8::6")
-				ip[15] += byte(i)
-				rr.(*D.AAAA).AAAA = ip
-			}
-			answer.Answer = append(answer.Answer, rr)
-		}
-		return answer, nil
+		return dualStackTestAnswer(q), nil
 	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started := make(chan netip.Addr, 2)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
 	var active, maximum, probes atomic.Int32
-	probe := func(ctx context.Context, _ netip.Addr, _ speedCheckMode) (time.Duration, error) {
+	probe := func(ctx context.Context, ip netip.Addr, _ speedCheckMode) (time.Duration, error) {
 		current := active.Add(1)
 		defer active.Add(-1)
 		for old := maximum.Load(); current > old && !maximum.CompareAndSwap(old, current); old = maximum.Load() {
 		}
 		probes.Add(1)
-		timer := time.NewTimer(2 * time.Millisecond)
-		defer timer.Stop()
 		select {
-		case <-timer.C:
+		case started <- ip:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+		select {
+		case <-release:
 			return time.Millisecond, nil
 		case <-ctx.Done():
 			return 0, ctx.Err()
 		}
 	}
-	answer, _, err = checker.ExchangeDualStackWithProbe(context.Background(), []dnsClient{client}, query, probe,
-		DualStackConfig{Enabled: true, Threshold: 10 * time.Millisecond})
-	// Busy probe slots skip excess candidates immediately. Both families
-	// still share the limit and an unmeasured address remains a valid answer.
-	if err != nil || maximum.Load() > 2 || probes.Load() == 0 || probes.Load() > 6 || answer == nil || len(msgToIP(answer)) == 0 {
-		t.Fatalf("families did not share the probe limiter: maximum=%d probes=%d err=%v", maximum.Load(), probes.Load(), err)
+	type exchangeResult struct {
+		answer *D.Msg
+		err    error
+	}
+	finished := make(chan exchangeResult, 1)
+	go func() {
+		answer, _, err := checker.ExchangeDualStackWithProbe(ctx, []dnsClient{client}, query, probe,
+			DualStackConfig{Enabled: true, Threshold: 10 * time.Millisecond})
+		finished <- exchangeResult{answer, err}
+	}()
+	var v4, v6 bool
+	for i := 0; i < 2; i++ {
+		select {
+		case ip := <-started:
+			v4 = v4 || ip.Is4()
+			v6 = v6 || ip.Is6()
+		case result := <-finished:
+			t.Fatalf("dual-stack exchange returned before both probes started: %v, %v", result.answer, result.err)
+		case <-ctx.Done():
+			t.Fatalf("both families did not start probing: %v", ctx.Err())
+		}
+	}
+	if !v4 || !v6 || active.Load() != 2 || maximum.Load() != 2 || probes.Load() != 2 {
+		t.Fatalf("family probes did not overlap: v4=%t v6=%t active=%d maximum=%d probes=%d", v4, v6, active.Load(), maximum.Load(), probes.Load())
+	}
+	// A third private probe must be refused while both families are held.
+	// Separate family pools could otherwise hide behind checkIP's slot limit.
+	overflowCtx, cancelOverflow := context.WithCancel(ctx)
+	ticket, submitErr := checker.pool.submit(overflowCtx, "",
+		func(ctx context.Context) (time.Duration, error) { return 0, ctx.Err() },
+		func(time.Duration, error) {})
+	if ticket != nil {
+		ticket.Release()
+	}
+	cancelOverflow()
+	if !errors.Is(submitErr, errDNSProbeBusy) {
+		t.Fatalf("families did not occupy the shared probe pool: %v", submitErr)
+	}
+	unblock()
+	select {
+	case result := <-finished:
+		answer, err = result.answer, result.err
+	case <-ctx.Done():
+		t.Fatalf("dual-stack exchange did not finish after releasing probes: %v", ctx.Err())
+	}
+	if err != nil || answer == nil {
+		t.Fatalf("shared probes lost the primary answer: %v, %v", answer, err)
+	}
+	ips := msgToIP(answer)
+	if len(ips) != 1 || ips[0] != netip.MustParseAddr("2001:db8::6") || client.count() != 2 || active.Load() != 0 || maximum.Load() != 2 || probes.Load() != 2 {
+		t.Fatalf("shared probes lost the primary answer or exceeded their limit: answer=%v queries=%d active=%d maximum=%d probes=%d err=%v", answer, client.count(), active.Load(), maximum.Load(), probes.Load(), err)
 	}
 }
 
