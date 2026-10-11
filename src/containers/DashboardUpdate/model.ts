@@ -1,20 +1,53 @@
 import type { DashboardUpdateStatus } from '@lib/request'
 
-export const DASHBOARD_UPDATE_INTERVAL = 6 * 60 * 60 * 1000
+function parseDashboardVersion (version: string) {
+    if (version.length > 64) return null
+    const match = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.exec(version)
+    if (match === null || match[0] !== version) return null
+    const prerelease = match[4]?.split('.') ?? []
+    if (prerelease.some(part => /^0\d+$/.test(part))) return null
+    return { core: match.slice(1, 4), prerelease }
+}
 
+function compareNumericIdentifier (left: string, right: string) {
+    if (left.length !== right.length) return left.length > right.length ? 1 : -1
+    return left === right ? 0 : left > right ? 1 : -1
+}
+
+// Keep refresh notices aligned with the core's strict SemVer comparison.
+// Strings avoid precision loss for version numbers larger than JS integers.
 export function compareDashboardVersions (left: string, right: string) {
-    const valid = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/
-    if (!valid.test(left) || !valid.test(right)) return null
-    const a = left.split('.').map(Number)
-    const b = right.split('.').map(Number)
+    const a = parseDashboardVersion(left)
+    const b = parseDashboardVersion(right)
+    if (a === null || b === null) return null
     for (let i = 0; i < 3; i++) {
-        if (a[i] !== b[i]) return a[i] > b[i] ? 1 : -1
+        const result = compareNumericIdentifier(a.core[i], b.core[i])
+        if (result !== 0) return result
     }
-    return 0
+    if (a.prerelease.length === 0 || b.prerelease.length === 0) {
+        return a.prerelease.length === b.prerelease.length ? 0 : a.prerelease.length === 0 ? 1 : -1
+    }
+    for (let i = 0; i < Math.min(a.prerelease.length, b.prerelease.length); i++) {
+        const left = a.prerelease[i]
+        const right = b.prerelease[i]
+        if (left === right) continue
+        const leftNumeric = /^\d+$/.test(left)
+        const rightNumeric = /^\d+$/.test(right)
+        if (leftNumeric && rightNumeric) return compareNumericIdentifier(left, right)
+        if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1
+        return left > right ? 1 : -1
+    }
+    return a.prerelease.length === b.prerelease.length ? 0 : a.prerelease.length > b.prerelease.length ? 1 : -1
+}
+
+export function canInstallDashboardUpdate (status: DashboardUpdateStatus | null) {
+    return status !== null && status.supported && !status.updating && !status.check_error &&
+        (status.update_available || status.reason === 'version-unavailable')
 }
 
 // Older cores may return their HTML fallback at this endpoint. Version
-// metadata is optional: any configured external-ui-url can provide updates.
+// metadata is optional for status and explicit manual installation; the core
+// only considers a parseable, strictly newer version an available update.
 export function readDashboardUpdateStatus (value: unknown): DashboardUpdateStatus | null {
     if (value === null || typeof value !== 'object') return null
     const item = value as Record<string, unknown>
@@ -30,6 +63,9 @@ export function readDashboardUpdateStatus (value: unknown): DashboardUpdateStatu
     for (const key of ['current_digest', 'latest_digest']) {
         if (item[key] !== undefined && (typeof item[key] !== 'string' || !/^[a-f0-9]{64}$/.test(item[key] as string))) return null
     }
+    if (item.auto_update !== undefined && typeof item.auto_update !== 'boolean') return null
+    if (item.update_interval !== undefined && (typeof item.update_interval !== 'number' || !Number.isSafeInteger(item.update_interval) || item.update_interval < 1)) return null
+    if (item.next_check !== undefined && (typeof item.next_check !== 'string' || item.next_check.length > 64 || !Number.isFinite(Date.parse(item.next_check)))) return null
     return item as unknown as DashboardUpdateStatus
 }
 
