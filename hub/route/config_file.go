@@ -37,6 +37,7 @@ type configFileDocument struct {
 	Content  string `json:"content"`
 	Revision string `json:"revision"`
 	MaxSize  int    `json:"max_size"`
+	Writable bool   `json:"writable"`
 }
 
 type configFileFailure struct {
@@ -45,12 +46,14 @@ type configFileFailure struct {
 }
 
 var (
-	configFileConflict    = &configFileFailure{http.StatusConflict, "Configuration file changed; reload it before saving"}
-	configFileReadError   = &configFileFailure{http.StatusInternalServerError, "Cannot read the current configuration file"}
-	configFileSaveError   = &configFileFailure{http.StatusInternalServerError, "Cannot safely save the configuration file; the original file was preserved"}
-	configFileTooLarge    = &configFileFailure{http.StatusRequestEntityTooLarge, "Configuration file exceeds the 4 MiB limit"}
-	configFileInvalid     = &configFileFailure{http.StatusBadRequest, "Configuration must be a nonempty, single YAML mapping with valid configuration field types"}
-	configFileUnsupported = &configFileFailure{http.StatusUnprocessableEntity, "Editing requires a regular configuration file without symbolic links in its path"}
+	configFileConflict     = &configFileFailure{http.StatusConflict, "Configuration file changed; reload it before saving"}
+	configFileReadError    = &configFileFailure{http.StatusInternalServerError, "Cannot read the current configuration file"}
+	configFileSaveError    = &configFileFailure{http.StatusInternalServerError, "Cannot safely save the configuration file; the original file was preserved"}
+	configFileReadOnly     = &configFileFailure{http.StatusForbidden, "The current process cannot safely save the configuration file with its existing permissions; the original file was preserved"}
+	configFileAccessDenied = &configFileFailure{http.StatusForbidden, "The current process does not have permission to read the configuration file"}
+	configFileTooLarge     = &configFileFailure{http.StatusRequestEntityTooLarge, "Configuration file exceeds the 4 MiB limit"}
+	configFileInvalid      = &configFileFailure{http.StatusBadRequest, "Configuration must be a nonempty, single YAML mapping with valid configuration field types"}
+	configFileUnsupported  = &configFileFailure{http.StatusUnprocessableEntity, "Editing requires a regular configuration file without symbolic links in its path"}
 )
 
 type configPathPart struct {
@@ -79,7 +82,28 @@ func configFileNoStore(next http.Handler) http.Handler {
 
 func configFileRespondError(w http.ResponseWriter, r *http.Request, failure *configFileFailure) {
 	render.Status(r, failure.status)
+	var code string
+	switch failure {
+	case configFileReadOnly:
+		code = "config_file_read_only"
+	case configFileAccessDenied:
+		code = "config_file_access_denied"
+	}
+	if code != "" {
+		render.JSON(w, r, map[string]string{"message": failure.message, "code": code})
+		return
+	}
 	render.JSON(w, r, newError(failure.message))
+}
+
+func configFileStorageFailure(err error, fallback *configFileFailure) *configFileFailure {
+	if configFilePermissionError(err) {
+		if fallback == configFileReadError {
+			return configFileAccessDenied
+		}
+		return configFileReadOnly
+	}
+	return fallback
 }
 
 func configFileBegin(w http.ResponseWriter, r *http.Request) bool {
@@ -145,7 +169,14 @@ func putConfigFile(w http.ResponseWriter, r *http.Request) {
 	}
 	snapshot, failure := readCurrentConfigFile()
 	if failure != nil {
+		if failure == configFileAccessDenied {
+			failure = configFileReadOnly
+		}
 		configFileRespondError(w, r, failure)
+		return
+	}
+	if !snapshot.document.Writable {
+		configFileRespondError(w, r, configFileReadOnly)
 		return
 	}
 	if !safeEqual(*request.Revision, snapshot.document.Revision) {
@@ -247,7 +278,7 @@ func inspectConfigFilePath(path string) ([]configPathPart, *configFileFailure) {
 	for current := path; ; current = filepath.Dir(current) {
 		info, err := os.Lstat(current)
 		if err != nil {
-			return nil, configFileReadError
+			return nil, configFileStorageFailure(err, configFileReadError)
 		}
 		if info.Mode()&os.ModeSymlink != 0 || (current == path && !info.Mode().IsRegular()) || (current != path && !info.IsDir()) {
 			return nil, configFileUnsupported
@@ -287,7 +318,7 @@ func readCurrentConfigFile() (*configFileSnapshot, *configFileFailure) {
 	}
 	file, err := openConfigFile(path)
 	if err != nil {
-		return nil, configFileReadError
+		return nil, configFileStorageFailure(err, configFileReadError)
 	}
 	defer file.Close()
 	info, err := file.Stat()
@@ -299,11 +330,11 @@ func readCurrentConfigFile() (*configFileSnapshot, *configFileFailure) {
 	}
 	metadata, err := readConfigFileMetadata(file, info)
 	if err != nil {
-		return nil, configFileReadError
+		return nil, configFileStorageFailure(err, configFileReadError)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, configFileMaxSize+1))
 	if err != nil {
-		return nil, configFileReadError
+		return nil, configFileStorageFailure(err, configFileReadError)
 	}
 	if len(data) > configFileMaxSize {
 		return nil, configFileTooLarge
@@ -325,50 +356,65 @@ func readCurrentConfigFile() (*configFileSnapshot, *configFileFailure) {
 	}
 	content := string(data)
 	return &configFileSnapshot{
-		document: configFileDocument{path, content, configFileRevision(path, metadata.identity, content, info), configFileMaxSize},
-		info:     info, metadata: metadata, parts: parts,
+		document: configFileDocument{
+			Path: path, Content: content, Revision: configFileRevision(path, metadata.identity, content, info),
+			MaxSize: configFileMaxSize, Writable: configFileWritable(file, info, metadata),
+		},
+		info: info, metadata: metadata, parts: parts,
 	}, nil
 }
 
 func saveConfigFile(snapshot *configFileSnapshot, content string) (*configFileDocument, *configFileFailure) {
+	if !snapshot.document.Writable {
+		return nil, configFileReadOnly
+	}
 	directory := filepath.Dir(snapshot.document.Path)
 	temporary, err := os.CreateTemp(directory, ".mihomo-config-*")
 	if err != nil {
-		return nil, configFileSaveError
+		return nil, configFileStorageFailure(err, configFileSaveError)
 	}
 	defer os.Remove(temporary.Name())
 	defer temporary.Close()
 	// Tighten inherited access controls before putting secrets in the temporary
 	// file (in particular, Windows may inherit a broader directory DACL).
 	if err = preserveConfigFileMetadata(temporary, snapshot.info, snapshot.metadata); err != nil {
-		return nil, configFileSaveError
+		return nil, configFileStorageFailure(err, configFileSaveError)
 	}
 	if _, err = io.WriteString(temporary, content); err != nil {
-		return nil, configFileSaveError
+		return nil, configFileStorageFailure(err, configFileSaveError)
 	}
 	// Some Unix filesystems clear set-ID bits on a write.
 	if err = temporary.Chmod(snapshot.info.Mode()); err != nil {
-		return nil, configFileSaveError
+		return nil, configFileStorageFailure(err, configFileSaveError)
 	}
 	if err = temporary.Sync(); err != nil {
-		return nil, configFileSaveError
+		return nil, configFileStorageFailure(err, configFileSaveError)
 	}
 	info, err := temporary.Stat()
 	if err != nil {
-		return nil, configFileSaveError
+		return nil, configFileStorageFailure(err, configFileSaveError)
 	}
 	metadata, err := readConfigFileMetadata(temporary, info)
-	if err != nil || temporary.Close() != nil {
-		return nil, configFileSaveError
+	if err != nil {
+		return nil, configFileStorageFailure(err, configFileSaveError)
+	}
+	if err = temporary.Close(); err != nil {
+		return nil, configFileStorageFailure(err, configFileSaveError)
 	}
 	// Windows only guarantees the final last-write timestamp after the writer
 	// is closed. Return a revision that a subsequent GET can reproduce.
 	closedInfo, err := os.Stat(temporary.Name())
-	if err != nil || !os.SameFile(info, closedInfo) || closedInfo.Size() != int64(len(content)) {
+	if err != nil {
+		return nil, configFileStorageFailure(err, configFileSaveError)
+	}
+	if !os.SameFile(info, closedInfo) || closedInfo.Size() != int64(len(content)) {
 		return nil, configFileSaveError
 	}
 	info = closedInfo
 	current, failure := readCurrentConfigFile()
+	if failure == configFileAccessDenied || (failure == nil && !current.document.Writable) {
+		return nil, configFileReadOnly
+	}
 	if failure != nil || current.document.Revision != snapshot.document.Revision || !configFilePathUnchanged(snapshot.parts) {
 		return nil, configFileConflict
 	}
@@ -377,7 +423,7 @@ func saveConfigFile(snapshot *configFileSnapshot, content string) (*configFileDo
 	// external writer not sharing this lock can still race the final rename;
 	// portable filesystems do not expose a conditional replace-by-file-ID API.
 	if err = os.Rename(temporary.Name(), snapshot.document.Path); err != nil {
-		return nil, configFileSaveError
+		return nil, configFileStorageFailure(err, configFileSaveError)
 	}
 	// The file itself was synced before replacement. Directory syncing is best
 	// effort on platforms/filesystems which do not support it; after rename the
@@ -388,6 +434,6 @@ func saveConfigFile(snapshot *configFileSnapshot, content string) (*configFileDo
 	}
 	return &configFileDocument{
 		Path: snapshot.document.Path, Content: content,
-		Revision: configFileRevision(snapshot.document.Path, metadata.identity, content, info), MaxSize: configFileMaxSize,
+		Revision: configFileRevision(snapshot.document.Path, metadata.identity, content, info), MaxSize: configFileMaxSize, Writable: true,
 	}, nil
 }
