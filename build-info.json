@@ -1,8 +1,8 @@
 {
   "name": "clash-dashboard",
-  "version": "0.3.6",
-  "source_commit": "5578acb9d438f2a6544aad048fdc83172008442c",
-  "source_url": "https://github.com/chummumm/mihomo-dns-optimized/tree/5578acb9d438f2a6544aad048fdc83172008442c",
+  "version": "0.3.7",
+  "source_commit": "b88163a8fb8745b2d82325f29aecb7e0318036ff",
+  "source_url": "https://github.com/chummumm/mihomo-dns-optimized/tree/b88163a8fb8745b2d82325f29aecb7e0318036ff",
   "upstream_commit": "9a32d9d163ad233141c384ba365c6ef18c58cb94",
   "display_host_order": [
     "host",
