@@ -116,7 +116,7 @@ func TestUIUpdaterConfiguredSourceAndPinnedGenericSnapshot(t *testing.T) {
 		return uiTestResponse(archive), nil
 	}
 	status := u.Status(context.Background(), true)
-	if !status.Supported || !status.UpdateAvailable || status.CheckError != "" || len(status.CurrentDigest) != 64 || len(status.LatestDigest) != 64 {
+	if !status.Supported || status.UpdateAvailable || status.Reason != "version-unavailable" || status.CheckError != "" || len(status.CurrentDigest) != 64 || len(status.LatestDigest) != 64 || status.CurrentDigest == status.LatestDigest {
 		t.Fatalf("unexpected generic source status: %+v", status)
 	}
 	if status.CurrentVersion != "" || status.LatestVersion != "" || status.LatestCommit != "" {
@@ -179,7 +179,7 @@ func TestUIUpdaterCheckSingleFlightCachingAndConditionalRequests(t *testing.T) {
 	var digest string
 	for i := 0; i < clients; i++ {
 		status := <-results
-		if status.CheckError != "" || !status.UpdateAvailable {
+		if status.CheckError != "" || status.Reason != "version-unavailable" || status.UpdateAvailable || status.LatestDigest == "" || status.LatestDigest == status.CurrentDigest {
 			t.Fatalf("joined check: %+v", status)
 		}
 		digest = status.LatestDigest
@@ -543,7 +543,7 @@ func TestUIUpdaterSourceAndTargetSeparateCachedSnapshots(t *testing.T) {
 	u.request = func(context.Context, string, map[string][]string) (*http.Response, error) {
 		return uiTestResponse(firstArchive), nil
 	}
-	if s := u.Status(context.Background(), true); !s.UpdateAvailable || s.CheckError != "" {
+	if s := u.Status(context.Background(), true); s.UpdateAvailable || s.Reason != "version-unavailable" || s.CheckError != "" || s.LatestDigest == "" || s.LatestDigest == s.CurrentDigest {
 		t.Fatalf("first source check failed: %+v", s)
 	}
 	firstStage := u.state().latest.work
@@ -553,7 +553,7 @@ func TestUIUpdaterSourceAndTargetSeparateCachedSnapshots(t *testing.T) {
 	v.request = func(context.Context, string, map[string][]string) (*http.Response, error) {
 		return uiTestResponse(secondArchive), nil
 	}
-	if s := v.Status(context.Background(), true); !s.UpdateAvailable || s.CheckError != "" {
+	if s := v.Status(context.Background(), true); s.UpdateAvailable || s.Reason != "version-unavailable" || s.CheckError != "" || s.LatestDigest == "" || s.LatestDigest == s.CurrentDigest {
 		t.Fatalf("second source reused incompatible state: %+v", s)
 	}
 	if _, err := os.Stat(firstStage); !os.IsNotExist(err) {

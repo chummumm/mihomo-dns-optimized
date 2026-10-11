@@ -144,6 +144,7 @@ func initInnerTcp() {
 
 func GetGeneral() *config.General {
 	ports := listener.GetPorts()
+	uiUpdater := updater.CurrentUIUpdater()
 	var authenticator []string
 	if auth := authStore.Default.Authenticator(); auth != nil {
 		authenticator = auth.Users()
@@ -182,19 +183,21 @@ func GetGeneral() *config.General {
 			ASN:     geodata.ASNUrl(),
 			GeoSite: geodata.GeoSiteUrl(),
 		},
-		GeoAutoUpdate:     updater.GeoAutoUpdate(),
-		GeoUpdateInterval: updater.GeoUpdateInterval(),
-		GeodataMode:       geodata.GeodataMode(),
-		GeodataLoader:     geodata.LoaderName(),
-		GeositeMatcher:    geodata.SiteMatcherName(),
-		TCPConcurrent:     dialer.GetTcpConcurrent(),
-		FindProcessMode:   tunnel.FindProcessMode(),
-		Sniffing:          tunnel.IsSniffing(),
-		GlobalUA:          mihomoHttp.UA(),
-		ETagSupport:       resource.ETag(),
-		KeepAliveInterval: int(keepalive.KeepAliveInterval() / time.Second),
-		KeepAliveIdle:     int(keepalive.KeepAliveIdle() / time.Second),
-		DisableKeepAlive:  keepalive.DisableKeepAlive(),
+		GeoAutoUpdate:            updater.GeoAutoUpdate(),
+		GeoUpdateInterval:        updater.GeoUpdateInterval(),
+		ExternalUIAutoUpdate:     uiUpdater.AutoUpdate(),
+		ExternalUIUpdateInterval: uiUpdater.UpdateInterval(),
+		GeodataMode:              geodata.GeodataMode(),
+		GeodataLoader:            geodata.LoaderName(),
+		GeositeMatcher:           geodata.SiteMatcherName(),
+		TCPConcurrent:            dialer.GetTcpConcurrent(),
+		FindProcessMode:          tunnel.FindProcessMode(),
+		Sniffing:                 tunnel.IsSniffing(),
+		GlobalUA:                 mihomoHttp.UA(),
+		ETagSupport:              resource.ETag(),
+		KeepAliveInterval:        int(keepalive.KeepAliveInterval() / time.Second),
+		KeepAliveIdle:            int(keepalive.KeepAliveIdle() / time.Second),
+		DisableKeepAlive:         keepalive.DisableKeepAlive(),
 	}
 
 	return general
@@ -439,7 +442,8 @@ func updateUpdater(cfg *config.Config) {
 	updater.SetGeoUpdateInterval(general.GeoUpdateInterval)
 
 	controller := cfg.Controller
-	uiUpdater := updater.NewUiUpdater(controller.ExternalUI, controller.ExternalUIURL, controller.ExternalUIName)
+	uiUpdater := updater.NewUiUpdaterWithAutoUpdate(controller.ExternalUI, controller.ExternalUIURL, controller.ExternalUIName,
+		general.ExternalUIAutoUpdate, general.ExternalUIUpdateInterval)
 	updater.SetUIUpdater(uiUpdater)
 	uiUpdater.AutoDownloadUI()
 }
