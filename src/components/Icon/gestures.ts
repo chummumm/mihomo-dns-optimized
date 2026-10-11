@@ -84,6 +84,27 @@ const gestures: Record<string, Gesture> = {
         ],
         duration: 520,
     },
+    // the pencil makes a quick stroke
+    edit: {
+        frames: [
+            { transform: 'translate(0, 0) rotate(0deg)' },
+            { transform: 'translate(-2px, 1px) rotate(-14deg)', offset: 0.3 },
+            { transform: 'translate(2px, -1px) rotate(6deg)', offset: 0.65 },
+            { transform: 'translate(0, 0) rotate(0deg)' },
+        ],
+        duration: 520,
+        origin: '20% 80%',
+    },
+    // the disk presses in, as if stamped
+    save: {
+        frames: [
+            { transform: 'translateY(0) scale(1)' },
+            { transform: 'translateY(2px) scale(0.84)', offset: 0.35 },
+            { transform: 'translateY(-1px) scale(1.06)', offset: 0.7 },
+            { transform: 'translateY(0) scale(1)' },
+        ],
+        duration: 480,
+    },
     'caret-left': nudge(-3, 0),
     'caret-right': nudge(3, 0),
 }

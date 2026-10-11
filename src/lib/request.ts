@@ -129,8 +129,8 @@ export class Client {
         return await this.axiosClient.patch<void>('configs', config)
     }
 
-    async reloadConfig (signal?: AbortSignal) {
-        return await this.axiosClient.put<void>('configs', {}, { signal })
+    async reloadConfig (signal?: AbortSignal, force = false) {
+        return await this.axiosClient.put<void>('configs', {}, { signal, params: force ? { force: true } : undefined })
     }
 
     async getConfigFile (signal?: AbortSignal) {

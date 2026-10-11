@@ -72,6 +72,14 @@
         transform: rotate(50deg);
     }
 
+    :is(button:not(:disabled), a):hover .icon-save > svg {
+        transform: translateY(1px) scale(0.94);
+    }
+
+    :is(button:not(:disabled), a):hover .icon-edit > svg {
+        transform: translate(-1px, -1px) rotate(-12deg);
+    }
+
     :is(button:not(:disabled), a):hover .icon-speed > svg {
         transform: translateY(-1px) rotate(-9deg) scale(1.1);
     }

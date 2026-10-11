@@ -37,6 +37,7 @@
 }
 
 .settings-row-action {
+    flex-wrap: wrap;
     justify-content: flex-end;
     min-height: 52px;
     background: var(--hover);
