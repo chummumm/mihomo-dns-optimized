@@ -15,8 +15,6 @@
     color: var(--text);
     text-align: left;
     user-select: none;
-    -webkit-backdrop-filter: blur(12px);
-    backdrop-filter: blur(12px);
     transition: border-color var(--dur-2) var(--ease-out), box-shadow var(--dur-3) var(--ease-out), transform var(--dur-spring) var(--ease-spring);
 }
 

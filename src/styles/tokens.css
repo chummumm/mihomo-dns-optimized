@@ -87,7 +87,7 @@
 
     /* Ground and surfaces (light) */
     --ground: #eef2f9;
-    --panel: rgb(255 255 255 / 78%);
+    --panel: rgb(255 255 255 / 90%);
     --panel-solid: #ffffff;
     --sunken: #f3f6fb;
     --hover: rgb(30 60 130 / 4.5%);
@@ -170,7 +170,7 @@
 @media (prefers-color-scheme: dark) {
     :root {
         --ground: #050913;
-        --panel: rgb(12 20 37 / 74%);
+        --panel: rgb(12 20 37 / 90%);
         --panel-solid: #0c1426;
         --sunken: #081020;
         --hover: rgb(160 190 255 / 6%);

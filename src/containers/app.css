@@ -73,7 +73,6 @@
     border-radius: var(--r-panel);
     background: var(--panel);
     box-shadow: var(--shadow-card);
-    backdrop-filter: blur(16px);
 }
 
 .empty-state {

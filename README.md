@@ -4,6 +4,10 @@ mihomo-optimized 的配套网络控制台，基于原版 Clash Dashboard 维护�
 
 连接展示不会写回连接元数据，不会改变实际连接目标或 DNS 分流。使用 `enhanced-mode: normal` 和 `override-destination: false` 时，已经嗅探到的域名也能显示；未获得任何域名的连接仍显示 IP。
 
+自 `0.4.1` 起，代理节点、按钮、卡片、面板和导航等常驻区域不再使用背景模糊，通用面板底色在深浅主题中均为 90% 不透明度；页面入场保留透明度与位移，新连接行入场保留透明度，二者均去掉模糊。下拉菜单、提示消息和模态窗口等覆盖内容的浮层仍保留原有背景模糊。连接表继续按可见区域渲染，代理节点卡片仍按原列表渲染。
+
+[内核完整配置示例](https://github.com/chummumm/mihomo-optimized#完整配置示例) · [YAML 自动更新设置](#自动更新配置) · [旧配置迁移说明](https://github.com/chummumm/mihomo-optimized#旧配置迁移与停用范围)
+
 ## 代理与实时流量拓扑
 
 代理页顶部的流量拓扑按“来源 → 策略组 → 出口节点”画出当前活动连接，连线粗细和流动光点随实时速率变化，悬停可查看完整名称并突出该节点的链路，点击策略组或出口节点会跳到对应卡片。拓扑只读复用连接页同一个 `/connections` 推送，仅在拓扑展开时订阅，收起后立即断开；聚合只在内存中进行，不写回连接数据。来源、策略组和出口各最多显示前几项，其余合并为“其他”。拓扑滚出视口或页面进入后台时停止绘制并回收旧节点、连线和粒子，重新可见后恢复动效；长名称使用二分截断和有限测量缓存。策略组通过共享索引解析当前出口，支持深层嵌套并检测循环，不按节点名称前缀猜测拒绝类型。
@@ -38,7 +42,7 @@ DNS 连接在列表和详情中统一显示类型 `DNS`，节点链只显示实�
 
 ## 配置编辑
 
-设置页的“编辑配置”读取当前控制器正在使用的 YAML 文件，支持行号、光标位置和 Ctrl-S / Cmd-S 保存。使用本仓库 `mihomo-optimized-v1.0.0` 内核提供的 `/configs/file` API，并沿用控制器鉴权。
+设置页的“编辑配置”读取当前控制器正在使用的 YAML 文件，支持行号、光标位置和 Ctrl-S / Cmd-S 保存。使用本仓库自 `mihomo-optimized-v1.0.0` 起提供的 `/configs/file` API，并沿用控制器鉴权。使用原有的 `external-controller` / `secret` 配置连接面板即可，无需新增配置编辑开关。
 
 **保存只写配置文件，不立即应用。** 保存时检查单个 YAML 文档及基础字段类型；要使修改生效，关闭编辑器后点击原有“重新加载配置”，由内核执行完整配置校验和应用。读取和保存不触发内核重载，不清理 DNS 缓存、观测或现有连接；完整重载沿用内核原有规则。
 
@@ -76,11 +80,30 @@ DNS 页由本二开内核的 `/dns/observability` API 提供数据：
 
 ## 安装和更新
 
-面板版本使用纯 `x.y.z` 格式（当前 `0.4.0`），产品与构建元数据名称统一为 **`mihomo-optimized`**。请搭配本仓库 `mihomo-optimized-v1.0.0` 或后续内核使用。
+面板版本使用纯 `x.y.z` 格式（当前 `0.4.1`），产品与构建元数据名称统一为 **`mihomo-optimized`**。请搭配本仓库 `mihomo-optimized-v1.0.0` 或后续内核使用；下面的启动时自动检查行为从内核 `mihomo-optimized-v1.0.1` 起提供。
 
-源码维护在本仓库的 [`clash-dashboard`](https://github.com/chummumm/mihomo-optimized/tree/clash-dashboard) 分支。构建后的静态文件发布到固定的 [`clash-dashboard-dist`](https://github.com/chummumm/mihomo-optimized/tree/clash-dashboard-dist) 分支。内核固定从本仓库获取面板，并管理核心工作目录下的 **`./ui`**；在控制器地址的 `/ui/` 打开面板即可。
+源码维护在本仓库的 [`clash-dashboard`](https://github.com/chummumm/mihomo-optimized/tree/clash-dashboard) 分支。构建后的静态文件发布到固定的 [`clash-dashboard-dist`](https://github.com/chummumm/mihomo-optimized/tree/clash-dashboard-dist) 分支。内核固定从本仓库获取面板，并管理核心工作目录下的 **`./ui`**（跟随 `-d`）；在控制器地址的 `/ui/` 打开面板即可。旧 `external-ui`、`external-ui-url`、`external-ui-name` 和命令行 `-ext-ui` 均被忽略，不改变目录或下载来源。
 
-面板不提供面板路径、下载 URL、面板或内核的手动检查、安装、自动更新开关、间隔和更新状态区域。相关 Provider、API 调用、计时器和事件处理已删除；打开面板、切换控制器、重新联网和时间推移均不会发起 `/upgrade` 请求。旧版浏览器保存的自动更新偏好不会生效。内核的配置仍可通过原 YAML 编辑器读取、修改、保存，再使用原“重新加载配置”应用。
+自面板 `0.4.0` 起，不再提供面板路径、下载 URL、面板或内核的手动检查、安装、自动更新开关、间隔和更新状态区域。相关 Provider、API 调用、计时器和事件处理已删除；打开面板、切换控制器、重新联网和时间推移均不会发起 `/upgrade` 请求。旧版浏览器保存的自动更新偏好不会生效。内核的配置仍可通过原 YAML 编辑器读取、修改、保存，再使用原“重新加载配置”应用。
+
+### 自动更新配置
+
+把下面四项放在内核 YAML **顶层，与 `dns:` 同级**；示例显式开启面板和内核自动更新，可按需只开启其中一项：
+
+```yaml
+external-ui-auto-update: true
+external-ui-update-interval: 24
+core-auto-update: true
+core-update-interval: 24
+```
+
+两个开关均默认 `false`，两个检查间隔均默认 `24`，单位是**整数小时**，有效范围为 `1`–`2562047`。写 `24`，不要写 `24h`、`"24"`、小数或 `0`。设置 `false` 并完整重载可停止对应的自动更新；保存 YAML 本身不会改变运行中的策略。
+
+从内核 `1.0.1` 起，已开启的项目在进程启动或重启、网络与配置应用完成后，立即异步检查一次，之后按各自间隔检查。运行中从关闭改为开启也立即检查；相同策略的完整重载不会重复检查或重置计时器；保持开启而只修改间隔时，从该次重载按新间隔计时，不追加一次立即检查。
+
+面板通过远端和本地 `build-info.json` 的版本号判断，内核通过当前实际版本与本仓库正式 release 版本判断；只有远端版本严格更高时才自动安装，相同、旧版或无法可靠比较的版本均跳过。面板安装完成不重启内核，内核升级完成会自动重启。首次运行时，若受管 `./ui` 目录不存在或为空，内核仍会自动下载初始面板，即使 `external-ui-auto-update` 为 `false`；此后已安装面板是否自动升级才由该开关控制。
+
+DNS 新增与调整字段、完整可复制 YAML、共享连接的 `#disable-reuse=true` 例外，以及永久忽略和仅在 `dns-rule-routing` 开启时停用的旧字段，集中见[内核 README 配置入口](https://github.com/chummumm/mihomo-optimized#完整配置示例)和[迁移表](https://github.com/chummumm/mihomo-optimized#旧配置迁移与停用范围)。日志等级过滤与手动节点测速 URL 仍是浏览器偏好，没有新增对应 YAML 键。
 
 浏览器继续使用当前站点的 service worker 缓存静态资源。它只处理网页资源，不发起内核或面板安装请求；面板不会因后台安装主动刷新正在编辑的页面。编辑器原有未保存离页保护、关闭确认及冲突草稿保留均继续有效。若浏览器保留旧资源，可重新打开页面或使用浏览器刷新。
 
