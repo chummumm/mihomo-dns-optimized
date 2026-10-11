@@ -5,6 +5,7 @@ export interface EditableConfigFile {
     content: string
     revision: string
     max_size: number
+    writable: boolean
 }
 
 // Textarea offsets use LF. Preserve an existing CRLF file when saving edits.
@@ -39,10 +40,13 @@ export function readConfigFile (value: unknown): EditableConfigFile | undefined 
     const file = value as Partial<EditableConfigFile>
     if (typeof file.path !== 'string' || file.path.length === 0 || file.path.length > 4096 ||
         typeof file.content !== 'string' || typeof file.revision !== 'string' || file.revision.length === 0 || file.revision.length > 512 ||
-        typeof file.max_size !== 'number' || !Number.isSafeInteger(file.max_size) || file.max_size < 1) return undefined
+        typeof file.max_size !== 'number' || !Number.isSafeInteger(file.max_size) || file.max_size < 1 ||
+        ('writable' in file && typeof file.writable !== 'boolean')) return undefined
     const limit = Math.min(file.max_size, MAX_CONFIG_FILE_BYTES)
     if (!configFits(file.content, limit)) return undefined
-    return { path: file.path, content: file.content, revision: file.revision, max_size: limit }
+    // Older cores do not advertise this capability. Preserve their existing
+    // editor behavior, while a provided field must be an actual boolean.
+    return { path: file.path, content: file.content, revision: file.revision, max_size: limit, writable: file.writable ?? true }
 }
 
 // Rebuilt only when text changes. A typed array bounds indexing memory to four

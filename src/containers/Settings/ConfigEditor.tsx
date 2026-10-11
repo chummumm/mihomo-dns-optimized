@@ -14,11 +14,13 @@ interface ConfigEditorProps {
     onClose: () => void
 }
 
-type EditorError = 'unsupported' | 'unauthorized' | 'tooLarge' | 'invalid' | 'conflict' | 'format' | 'path' | 'busy' | 'network' | 'invalidResponse' | 'reloadInvalid' | 'reload'
+type EditorError = 'unsupported' | 'unauthorized' | 'fileAccess' | 'readOnly' | 'tooLarge' | 'invalid' | 'conflict' | 'format' | 'path' | 'busy' | 'network' | 'invalidResponse' | 'reloadInvalid' | 'reload'
 
 function classifyError (reason: unknown): EditorError {
     const status = axios.isAxiosError(reason) ? reason.response?.status : undefined
     if (status === 404 || status === 405) return 'unsupported'
+    if (status === 403 && axios.isAxiosError(reason) && reason.response?.data?.code === 'config_file_read_only') return 'readOnly'
+    if (status === 403 && axios.isAxiosError(reason) && reason.response?.data?.code === 'config_file_access_denied') return 'fileAccess'
     if (status === 401 || status === 403) return 'unauthorized'
     if (status === 409) return 'conflict'
     if (status === 413) return 'tooLarge'
@@ -74,6 +76,7 @@ function EditorSession ({ client, onClose, closeHandler }: {
     const area = useRef<HTMLTextAreaElement>(null)
     const lineMeasure = useRef<HTMLPreElement>(null)
     const pendingCaret = useRef<number>()
+    const resetPosition = useRef(false)
     const requestRef = useRef<AbortController | null>(null)
     const active = useRef(true)
     const root = useRef<HTMLDivElement>(null)
@@ -82,6 +85,7 @@ function EditorSession ({ client, onClose, closeHandler }: {
     const dirty = useMemo(() => file !== null && text !== original, [file, original, text])
     const lines = useMemo(() => configLineStarts(text), [text])
     const limit = file?.max_size ?? MAX_CONFIG_FILE_BYTES
+    const readOnly = file?.writable === false
 
     const load = useCallback(async () => {
         if (requestRef.current !== null) return
@@ -96,11 +100,14 @@ function EditorSession ({ client, onClose, closeHandler }: {
         setReloadPending(false)
         setConfirmation(null)
         setCursor({ line: 1, column: 1 })
+        pendingCaret.current = undefined
+        resetPosition.current = false
         try {
             const response = await client.getConfigFile(request.signal)
             if (!active.current || request.signal.aborted || requestRef.current !== request) return
             const result = readConfigFile(response.data)
             if (result === undefined) { setProblem('invalidResponse'); return }
+            resetPosition.current = true
             setFile(result)
             setText(configDisplayText(result.content))
         } catch (reason) {
@@ -121,30 +128,15 @@ function EditorSession ({ client, onClose, closeHandler }: {
             requestRef.current?.abort()
             requestRef.current = null
             pendingCaret.current = undefined
+            resetPosition.current = false
         }
     }, [load])
-
-    useEffect(() => {
-        if (file === null || loading) return
-        const focus = window.setTimeout(() => area.current?.focus(), 120)
-        return () => window.clearTimeout(focus)
-    }, [file, loading])
 
     const track = useCallback(() => {
         if (area.current === null) return
         const next = configCursor(lines, area.current.selectionStart)
         setCursor(previous => previous.line === next.line && previous.column === next.column ? previous : next)
     }, [lines])
-
-    useLayoutEffect(() => {
-        const element = area.current
-        if (element === null) return
-        if (pendingCaret.current !== undefined) {
-            element.selectionStart = element.selectionEnd = pendingCaret.current
-            pendingCaret.current = undefined
-        }
-        track()
-    }, [text, track])
 
     const measure = useCallback(() => {
         const element = area.current
@@ -162,6 +154,26 @@ function EditorSession ({ client, onClose, closeHandler }: {
         }
         setViewport(previous => Object.keys(next).every(key => previous[key as keyof typeof next] === next[key as keyof typeof next]) ? previous : next)
     }, [])
+
+    useLayoutEffect(() => {
+        const element = area.current
+        if (element === null) return
+        if (resetPosition.current && !loading) {
+            // Assigning a textarea value can leave its selection at EOF. Reset
+            // only after an actual file read, before focusing or painting; a
+            // save response must not move the user's selection or viewport.
+            resetPosition.current = false
+            element.setSelectionRange(0, 0)
+            element.scrollTop = element.scrollLeft = 0
+            element.focus({ preventScroll: true })
+            element.scrollTop = element.scrollLeft = 0
+            measure()
+        } else if (pendingCaret.current !== undefined) {
+            element.selectionStart = element.selectionEnd = pendingCaret.current
+            pendingCaret.current = undefined
+        }
+        track()
+    }, [loading, text, track, measure])
 
     useLayoutEffect(() => {
         const element = area.current
@@ -198,7 +210,7 @@ function EditorSession ({ client, onClose, closeHandler }: {
     }, [confirmation])
 
     async function save () {
-        if (file === null || (!dirty && !reloadPending) || conflict || requestRef.current !== null || confirmation !== null) return
+        if (file === null || readOnly || (!dirty && !reloadPending) || conflict || requestRef.current !== null || confirmation !== null) return
         const content = configSaveText(text, file.content)
         if (!configFits(content, limit)) { setProblem('tooLarge'); return }
         const request = new AbortController()
@@ -237,6 +249,7 @@ function EditorSession ({ client, onClose, closeHandler }: {
                 : classifyError(reason)
             setProblem(error)
             if (error === 'conflict') setConflict(true)
+            if (error === 'readOnly' || error === 'fileAccess') setFile(current => current === null ? current : { ...current, writable: false })
         } finally {
             if (requestRef.current === request) {
                 requestRef.current = null
@@ -249,6 +262,7 @@ function EditorSession ({ client, onClose, closeHandler }: {
     }
 
     function edit (value: string) {
+        if (file === null || loading || readOnly || saving || confirmation !== null) return false
         if (!configFits(value, limit)) { setProblem('tooLarge'); return false }
         setText(value)
         setSaved(false)
@@ -257,7 +271,7 @@ function EditorSession ({ client, onClose, closeHandler }: {
     }
 
     function keydown (event: KeyboardEvent<HTMLTextAreaElement>) {
-        if (event.key === 'Tab' && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && !saving && confirmation === null) {
+        if (event.key === 'Tab' && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && !readOnly && !saving && confirmation === null) {
             event.preventDefault()
             const element = event.currentTarget
             const start = element.selectionStart
@@ -300,13 +314,13 @@ function EditorSession ({ client, onClose, closeHandler }: {
                     <Icon type="file" size={14} />
                     <span>{file?.path ?? t('editor.noFile')}</span>
                 </span>
-                <span className={classnames('config-editor-state', { 'is-connected': file !== null && !conflict })}>
+                <span className={classnames('config-editor-state', { 'is-connected': file !== null && !conflict && !readOnly })}>
                     <i aria-hidden="true" />
-                    {loading ? t('editor.loading') : saving ? t(reloading ? 'editor.reloading' : 'editor.saving') : dirty ? t('editor.unsaved') : reloadPending ? t('editor.pendingReload') : file !== null ? 'YAML' : t('editor.unavailable')}
+                    {loading ? t('editor.loading') : saving ? t(reloading ? 'editor.reloading' : 'editor.saving') : readOnly ? t('editor.readOnly') : dirty ? t('editor.unsaved') : reloadPending ? t('editor.pendingReload') : file !== null ? 'YAML' : t('editor.unavailable')}
                 </span>
             </div>
             <div className={classnames('config-editor-notice', { 'is-error': problem !== null, 'is-saved': saved })} role={problem !== null ? 'alert' : 'status'}>
-                {problem !== null ? t(`editor.errors.${problem}`) : saved ? t('editor.saved') : t('editor.note')}
+                {problem !== null ? t(`editor.errors.${problem}`) : readOnly ? t('editor.readOnlyNote') : saved ? t('editor.saved') : t('editor.note')}
             </div>
             <div className="config-editor-frame" aria-busy={loading || saving}>
                 <pre ref={lineMeasure} className="config-editor-line-measure" aria-hidden="true">{'0\n0\n0\n0\n0\n0\n0\n0'}</pre>
@@ -318,7 +332,7 @@ function EditorSession ({ client, onClose, closeHandler }: {
                     className="config-editor-text"
                     value={text}
                     aria-label={t('editor.title')}
-                    readOnly={saving || confirmation !== null}
+                    readOnly={readOnly || saving || confirmation !== null}
                     disabled={file === null || loading}
                     maxLength={limit}
                     spellCheck={false}
@@ -361,7 +375,7 @@ function EditorSession ({ client, onClose, closeHandler }: {
                     <Button icon="update" disabled={loading || saving} onClick={reread}>{t(file === null ? 'editor.retry' : 'editor.reread')}</Button>
                     <span className="config-editor-footer-spacer" />
                     <Button disabled={saving} onClick={() => closeHandler.current?.()}>{t('editor.close')}</Button>
-                    <Button type="primary" icon={reloading ? 'update' : 'save'} loading={saving} disabled={file === null || loading || saving || (!dirty && !reloadPending) || conflict} onClick={() => { void save() }}>{t(saving ? reloading ? 'editor.reloading' : 'editor.saving' : reloadPending && !dirty ? 'editor.retryReload' : 'editor.save')}</Button>
+                    <Button type="primary" icon={reloading ? 'update' : 'save'} loading={saving} disabled={file === null || readOnly || loading || saving || (!dirty && !reloadPending) || conflict} onClick={() => { void save() }}>{t(saving ? reloading ? 'editor.reloading' : 'editor.saving' : reloadPending && !dirty ? 'editor.retryReload' : 'editor.save')}</Button>
                 </div>}
         </div>
     )
