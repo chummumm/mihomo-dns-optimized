@@ -314,13 +314,18 @@ func TestUIUpdaterStartupIntervalOnlyWaitsForNewCycle(t *testing.T) {
 	}
 	uiTestActivateUpdater(t, u)
 	uiTestAutomaticWait(t, func() bool { return requests.Load() == 1 && uiTestAutomaticSettled(u) })
-	// An unexpired successful check would hide an erroneous activation by
-	// serving its result from memory. Force any new check to reach the source.
-	uiTestExpireCheck(u)
 	oldJob := u.automatic
 	latest := uiTestAutomaticClone(u, true, 2)
-	uiTestStartupApply(t, latest, nil, true)
+	ready := make(chan struct{})
+	uiTestStartupApply(t, latest, ready, true)
+	// The download worker can settle before its caller wakes and reads the
+	// cached result. Retire that old caller before expiring the cache, while
+	// the new policy cannot start a request through its readiness barrier.
 	uiTestAutomaticDone(t, oldJob.done)
+	// An unexpired successful check would hide an erroneous activation by
+	// serving its result from memory. Force any new check to reach the source.
+	uiTestExpireCheck(latest)
+	close(ready)
 	if latest.automatic == oldJob || clock.ticker(t, 1).interval != 2*time.Hour || uiTestStartupBootstrap(latest) != nil {
 		t.Fatal("interval-only reload did not replace just the periodic schedule")
 	}
