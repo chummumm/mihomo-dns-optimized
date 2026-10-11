@@ -313,7 +313,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 		return &dnsExchangeResult{Msg: message, local: local.has(message)}, err
 	}
 
-	ch := r.group.DoChanEarly(flightKey, fn)
+	ch := r.group.DoChanEarlyWithReuse(flightKey, fn, dnsEarlyResultReusable)
 
 	var result singleflight.Result[*dnsExchangeResult]
 
@@ -330,7 +330,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 					result := <-ch
 					ret, err, shared := result.Val, result.Err, result.Shared
 					if err != nil && !shared && ret.Opcode < retryMax && canRetry() { // retry
-						r.group.DoChanEarly(flightKey, fn)
+						r.group.DoChanEarlyWithReuse(flightKey, fn, dnsEarlyResultReusable)
 					}
 				}()
 			}
@@ -340,7 +340,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 
 	ret, err, shared := result.Val, result.Err, result.Shared
 	if err != nil && !shared && ret.Opcode < retryMax && canRetry() { // retry
-		r.group.DoChanEarly(flightKey, fn)
+		r.group.DoChanEarlyWithReuse(flightKey, fn, dnsEarlyResultReusable)
 	}
 
 	if err == nil {

@@ -214,6 +214,7 @@ type dnsExchangeResult struct {
 	*D.Msg
 	local      bool
 	receivedAt time.Time
+	expires    time.Time
 }
 
 type dnsLocalAnswersKey struct{}

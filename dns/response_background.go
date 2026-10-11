@@ -47,13 +47,19 @@ func (p *dnsResponsePublisher) offer(message *D.Msg) bool {
 	if p.r.cacheControl == nil || message == nil || p.ctx.Err() != nil || dnsQueryClosed(p.ctx) {
 		return false
 	}
+	adjusted := p.r.answerPolicy.apply(p.query, message)
+	answer := ageDNSAnswerAfterPolicy(p.ctx, message, adjusted)
+	expires := dnsAnswerExpires(p.ctx, answer)
+	if expires.IsZero() || !expires.After(time.Now()) {
+		// TTL-zero or already exhausted answers may satisfy this exchange,
+		// but cannot become a replayable snapshot while optimization runs.
+		return false
+	}
 	lease := p.r.cacheControl.beginResponseContinuation(p.ctx, p.key, p.cancel)
 	if lease == nil {
 		return false
 	}
 	writeContext := context.WithValue(p.ctx, dnsResponseContinuationKey{}, lease)
-	adjusted := p.r.answerPolicy.apply(p.query, message)
-	answer := ageDNSAnswerAfterPolicy(writeContext, message, adjusted)
 	inheritDNSLocalAnswer(writeContext, answer, message)
 	if !p.r.cacheControl.Store(writeContext, p.key, p.query.Question[0], answer) {
 		lease.Close()
@@ -65,9 +71,15 @@ func (p *dnsResponsePublisher) offer(message *D.Msg) bool {
 	// Each waiter ages once from that clock. Aging an already aged snapshot
 	// again from publication would lose the fractional second at each step.
 	// Every consumer receives a private copy, including late flight joiners.
-	result := &dnsExchangeResult{Msg: adjusted.Copy(), local: local != nil && local.has(answer), receivedAt: dnsAnswerReceivedAt(writeContext, message)}
+	result := &dnsExchangeResult{Msg: adjusted.Copy(), local: local != nil && local.has(answer), receivedAt: dnsAnswerReceivedAt(writeContext, message), expires: expires}
 	p.release()
 	return p.publish(result)
+}
+
+// The singleflight reuse check holds only its own group mutex. Keep this a
+// constant-time read of the immutable snapshot, without cache locks or RR walks.
+func dnsEarlyResultReusable(result *dnsExchangeResult) bool {
+	return result != nil && result.expires.After(time.Now())
 }
 
 func (p *dnsResponsePublisher) storeContext(ctx context.Context) context.Context {

@@ -204,3 +204,75 @@ func TestDoChanEarlyRetainedDoCompletionWithConcurrentLateWaiters(t *testing.T) 
 		}
 	}
 }
+
+func TestDoChanEarlyReuseExpiryReplacesOnlyItsOwnCall(t *testing.T) {
+	for _, incomingPredicate := range []bool{false, true} {
+		name := "ordinary-early-joiner"
+		if incomingPredicate {
+			name = "permissive-joiner"
+		}
+		t.Run(name, func(t *testing.T) {
+			var group Group[int]
+			var valid atomic.Bool
+			valid.Store(true)
+			var calls atomic.Int32
+			finishOld, finishNew := make(chan struct{}), make(chan struct{})
+			old := group.DoChanEarlyWithReuse("query", func(publish func(int) bool) (int, error) {
+				calls.Add(1)
+				publish(1)
+				<-finishOld
+				return 11, nil
+			}, func(int) bool { return valid.Load() })
+			if got := receiveEarlyTest(t, old); got.Val != 1 {
+				t.Fatal(got)
+			}
+			// The original call owns its replay policy. A different joining
+			// predicate must neither tighten nor loosen that existing policy.
+			fresh := group.DoChanEarlyWithReuse("query", func(func(int) bool) (int, error) {
+				t.Error("a joiner replaced a still valid call")
+				return 99, nil
+			}, func(int) bool { return false })
+			if got := receiveEarlyTest(t, fresh); got.Val != 1 {
+				t.Fatal(got)
+			}
+			oldFinal := group.DoChan("query", func() (int, error) { t.Error("duplicate old work"); return 99, nil })
+			valid.Store(false)
+			replacement := func(publish func(int) bool) (int, error) {
+				calls.Add(1)
+				publish(2)
+				<-finishNew
+				return 22, nil
+			}
+			var newCall <-chan Result[int]
+			if incomingPredicate {
+				newCall = group.DoChanEarlyWithReuse("query", replacement, func(int) bool { return true })
+			} else {
+				newCall = group.DoChanEarly("query", replacement)
+			}
+			if got := receiveEarlyTest(t, newCall); got.Val != 2 || calls.Load() != 2 {
+				t.Fatalf("expired call was replayed: %+v calls=%d", got, calls.Load())
+			}
+			newFinal := group.DoChan("query", func() (int, error) { t.Error("duplicate new work"); return 99, nil })
+			close(finishOld)
+			if got := receiveEarlyTest(t, oldFinal); got.Val != 11 {
+				t.Fatal(got)
+			}
+			late := group.DoChanEarly("query", func(func(int) bool) (int, error) {
+				t.Error("old completion removed its replacement")
+				return 99, nil
+			})
+			if got := receiveEarlyTest(t, late); got.Val != 2 {
+				t.Fatal(got)
+			}
+			select {
+			case got := <-newFinal:
+				t.Fatalf("replacement final waiter received an early result: %+v", got)
+			default:
+			}
+			close(finishNew)
+			if got := receiveEarlyTest(t, newFinal); got.Val != 22 {
+				t.Fatal(got)
+			}
+		})
+	}
+}

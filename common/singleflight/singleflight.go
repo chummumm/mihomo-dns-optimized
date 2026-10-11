@@ -74,6 +74,7 @@ type call[T any] struct {
 	published bool
 	completed bool
 	earlyVal  T
+	reuse     func(T) bool
 }
 
 // Group represents a class of work and forms a namespace in
@@ -131,7 +132,7 @@ func (g *Group[T]) Do(key string, fn func() (T, error)) (v T, err error, shared 
 //
 // The returned channel will not be closed.
 func (g *Group[T]) DoChan(key string, fn func() (T, error)) <-chan Result[T] {
-	return g.doChan(key, func(func(T) bool) (T, error) { return fn() }, false)
+	return g.doChan(key, func(func(T) bool) (T, error) { return fn() }, false, nil)
 }
 
 // DoChanEarly permits fn to publish one successful immutable result before
@@ -140,32 +141,49 @@ func (g *Group[T]) DoChan(key string, fn func() (T, error)) <-chan Result[T] {
 // final result. publish returns false if this call was forgotten or already published.
 // Early results are always marked Shared because fn may still reference them.
 func (g *Group[T]) DoChanEarly(key string, fn func(publish func(T) bool) (T, error)) <-chan Result[T] {
-	return g.doChan(key, fn, true)
+	return g.doChan(key, fn, true, nil)
 }
 
-func (g *Group[T]) doChan(key string, fn func(publish func(T) bool) (T, error), early bool) <-chan Result[T] {
+// DoChanEarlyWithReuse adds a lifetime check for late replay of an early
+// result. The call creator's predicate remains authoritative for that call,
+// including joiners using DoChanEarly or a different predicate. It runs under
+// the group lock and must not block or call this Group. A rejected snapshot is
+// atomically replaced by new work; existing waiters retain the old call, whose
+// eventual completion cannot remove its replacement.
+func (g *Group[T]) DoChanEarlyWithReuse(key string, fn func(publish func(T) bool) (T, error), reusable func(T) bool) <-chan Result[T] {
+	return g.doChan(key, fn, true, reusable)
+}
+
+func (g *Group[T]) doChan(key string, fn func(publish func(T) bool) (T, error), early bool, reusable func(T) bool) <-chan Result[T] {
 	ch := make(chan Result[T], 1)
 	g.mu.Lock()
 	if g.m == nil {
 		g.m = make(map[string]*call[T])
 	}
 	if c, ok := g.m[key]; ok {
-		if !c.completed {
-			c.dups++
-		}
-		if c.completed {
-			ch <- Result[T]{Val: c.val, Err: c.err, Shared: true}
-		} else if early && c.published {
-			ch <- Result[T]{Val: c.earlyVal, Shared: true}
-		} else if early {
-			c.earlyChans = append(c.earlyChans, ch)
+		if early && c.published && !c.completed && c.reuse != nil && !c.reuse(c.earlyVal) {
+			// This is a compare-and-replace under the same lock as completion
+			// and publication, never an unlocked Forget of a possibly new call.
+			delete(g.m, key)
 		} else {
-			c.chans = append(c.chans, ch)
+			if !c.completed {
+				c.dups++
+			}
+			if c.completed {
+				ch <- Result[T]{Val: c.val, Err: c.err, Shared: true}
+			} else if early && c.published {
+				ch <- Result[T]{Val: c.earlyVal, Shared: true}
+			} else if early {
+				c.earlyChans = append(c.earlyChans, ch)
+			} else {
+				c.chans = append(c.chans, ch)
+			}
+			g.mu.Unlock()
+			return ch
 		}
-		g.mu.Unlock()
-		return ch
 	}
 	c := new(call[T])
+	c.reuse = reusable
 	if early {
 		c.earlyChans = []chan<- Result[T]{ch}
 	} else {
@@ -236,7 +254,7 @@ func (g *Group[T]) doCall(c *call[T], key string, fn func() (T, error)) {
 			// A retained StoreResult call needs only the final value. Do not
 			// retain its early snapshot or channels after delivery.
 			var zero T
-			c.earlyVal, c.chans, c.earlyChans = zero, nil, nil
+			c.earlyVal, c.chans, c.earlyChans, c.reuse = zero, nil, nil, nil
 		}
 	}()
 
