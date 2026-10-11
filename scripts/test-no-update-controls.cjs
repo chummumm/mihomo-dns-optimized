@@ -122,8 +122,8 @@ async function main() {
     }
 
     await page.goto('http://127.0.0.1:' + firstPort + '/ui/#/settings', { waitUntil: 'networkidle' })
-    assert.equal(await page.title(), 'mihomo-optimized')
-    assert.equal(await page.locator('.sidebar-name').textContent(), 'mihomo-optimized')
+    assert.equal(await page.title(), 'mihomo')
+    assert.equal(await page.locator('.sidebar-name').textContent(), 'mihomo')
     await noControls()
     const editor = page.locator('.config-editor-content')
     const text = editor.locator('textarea')

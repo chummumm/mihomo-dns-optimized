@@ -33,6 +33,9 @@ export default function Sidebar (props: SidebarProps) {
     const mobileRoutes = routes.filter(route => !route.noMobile)
     const mobileIndex = mobileRoutes.findIndex(route => isActive(route.path))
     const online = reachable && version !== ''
+    // Keep the version itself readable in the narrow rail. Preserve the full
+    // controller response in the tooltip and accessible name below.
+    const coreVersion = version.startsWith('mihomo-optimized-v') ? version.slice('mihomo-optimized-'.length) : version
 
     const navlinks = routes.map(
         ({ path, name, icon, noMobile }) => (
@@ -47,9 +50,9 @@ export default function Sidebar (props: SidebarProps) {
 
     return (
         <nav className="sidebar">
-            <div className="sidebar-brand" title="mihomo-optimized">
+            <div className="sidebar-brand" title="mihomo">
                 <img src={logo} alt="" className="sidebar-logo" />
-                <span className="sidebar-name">mihomo-optimized</span>
+                <span className="sidebar-name">mihomo</span>
             </div>
             <div className="sidebar-route" style={{ '--count-m': mobileRoutes.length } as React.CSSProperties}>
                 {activeIndex !== -1 && <motion.span className="sidebar-marker" aria-hidden="true" initial={false} animate={{ y: activeIndex * ITEM_STEP }} transition={springs.glide} />}
@@ -58,13 +61,19 @@ export default function Sidebar (props: SidebarProps) {
                     { navlinks }
                 </ul>
             </div>
-            <div className={classnames('sidebar-version', { 'is-offline': !online })} title={version ? `mihomo-optimized ${t('Version')} ${version}` : undefined}>
+            <div className={classnames('sidebar-version', { 'is-offline': !online })}>
                 <span className="sidebar-live">
                     <span className="sidebar-live-dot" aria-hidden="true" />
                     <span>{ online ? t('Online') : t('Offline') }</span>
                 </span>
-                <span className="sidebar-version-label sr-only">mihomo-optimized { t('Version') }</span>
-                <span className="sidebar-version-text">{ version || '—' }</span>
+                <div className="sidebar-version-row" role="group" title={`${t('Core')} ${version || '—'}`} aria-label={`${t('Core')} ${version || '—'}`}>
+                    <span className="sidebar-version-label">{ t('Core') }</span>
+                    <span className="sidebar-version-text">{ coreVersion || '—' }</span>
+                </div>
+                <div className="sidebar-version-row" role="group" title={`${t('Dashboard')} ${__UI_VERSION__}`} aria-label={`${t('Dashboard')} ${__UI_VERSION__}`}>
+                    <span className="sidebar-version-label">{ t('Dashboard') }</span>
+                    <span className="sidebar-version-text">{ __UI_VERSION__ }</span>
+                </div>
                 { premium && <span className="sidebar-version-premium">Premium</span> }
             </div>
         </nav>

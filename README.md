@@ -8,6 +8,12 @@ mihomo-optimized 的配套网络控制台，基于原版 Clash Dashboard 维护�
 
 [内核完整配置示例](https://github.com/chummumm/mihomo-optimized#完整配置示例) · [YAML 自动更新设置](#自动更新配置) · [旧配置迁移说明](https://github.com/chummumm/mihomo-optimized#旧配置迁移与停用范围)
 
+## 标题、版本与布局
+
+自面板 **`0.4.5`** 起，浏览器标签、侧栏品牌和安装到主屏幕的应用名称统一显示 **`mihomo`**；项目、仓库、内核发行版和 `build-info.json` 的名称仍为 `mihomo-optimized`。左下角分别显示“内核”和“面板”版本：内核来自当前控制器，面板版本由同一份 `package.json` 在构建时写入，因此断开控制器后仍能看到当前浏览器运行的面板版本。为适应窄侧栏，本项目内核版本省略 `mihomo-optimized-` 前缀，完整原值保留在提示和无障碍名称中；其他内核格式原样显示。
+
+侧栏和右侧内容共用固定视口外壳，右侧在内部独立滚动，避免根文档的大视口高度与内容区的动态高度不一致。浏览器栏展开、收起或窗口尺寸变化时，两侧使用同一高度参照，并统一预留安全区域；手机继续保留底部导航，配置编辑器继续使用独立全屏布局。
+
 ## 代理与实时流量拓扑
 
 代理页顶部的流量拓扑按“来源 → 策略组 → 出口节点”画出当前活动连接，连线粗细和流动光点随实时速率变化，悬停可查看完整名称并突出该节点的链路，点击策略组或出口节点会跳到对应卡片。拓扑只读复用连接页同一个 `/connections` 推送，仅在拓扑展开时订阅，收起后立即断开；聚合只在内存中进行，不写回连接数据。来源、策略组和出口各最多显示前几项，其余合并为“其他”。拓扑滚出视口或页面进入后台时停止绘制并回收旧节点、连线和粒子，重新可见后恢复动效；长名称使用二分截断和有限测量缓存。策略组通过共享索引解析当前出口，支持深层嵌套并检测循环，不按节点名称前缀猜测拒绝类型。
@@ -90,7 +96,7 @@ DNS 页由本二开内核的 `/dns/observability` API 提供数据：
 
 ## 安装和更新
 
-面板版本使用纯 `x.y.z` 格式（当前 `0.4.4`），产品与构建元数据名称统一为 **`mihomo-optimized`**。请搭配本仓库 `mihomo-optimized-v1.0.0` 或后续内核使用；下面的启动时自动检查行为从内核 `mihomo-optimized-v1.0.1` 起提供。
+面板版本使用纯 `x.y.z` 格式（当前 `0.4.5`），界面标题为 **`mihomo`**，安装包与构建元数据名称保留 **`mihomo-optimized`**。请搭配本仓库 `mihomo-optimized-v1.0.0` 或后续内核使用；下面的启动时自动检查行为从内核 `mihomo-optimized-v1.0.1` 起提供。
 
 源码维护在本仓库的 [`clash-dashboard`](https://github.com/chummumm/mihomo-optimized/tree/clash-dashboard) 分支。构建后的静态文件发布到固定的 [`clash-dashboard-dist`](https://github.com/chummumm/mihomo-optimized/tree/clash-dashboard-dist) 分支。内核固定从本仓库获取面板，并管理核心工作目录下的 **`./ui`**（跟随 `-d`）；在控制器地址的 `/ui/` 打开面板即可。旧 `external-ui`、`external-ui-url`、`external-ui-name` 和命令行 `-ext-ui` 均被忽略，不改变目录或下载来源。
 
@@ -127,14 +133,17 @@ DNS 新增与调整字段、完整可复制 YAML、共享连接的 `#disable-reu
 corepack pnpm@8.15.9 install --frozen-lockfile
 corepack pnpm@8.15.9 test:unit
 corepack pnpm@8.15.9 build
-corepack pnpm@8.15.9 exec playwright install chromium
+corepack pnpm@8.15.9 exec playwright install chromium webkit
 corepack pnpm@8.15.9 test:browser
+PLAYWRIGHT_BROWSER_NAME=webkit node scripts/test-app-shell.cjs
 python3 scripts/package-ui.py --source-sha "$(git rev-parse HEAD)" --repository chummumm/mihomo-optimized
 ```
 
 UI 工作流只处理 `clash-dashboard` 分支的代码变更及指向该分支的 PR。文档修改不触发构建，PR 不发布静态文件。浏览器回归使用本机模拟控制器，不连接生产设备；发布前验证来源计数与筛选、底部刷新、关闭历史上限、滚动位置、DNS API 兼容与内存生命周期，以及移动界面、重载、测速和控制器切换边界。
 
 日志回归另验证全局 `silent` 下的等级选择、鼠标与键盘操作、菜单滚动、200 条内存上限，以及切换等级不会发送配置修改或缓存清理请求。配置编辑回归覆盖先保存后重载、两个阶段防重复、部分成功与重试、冲突保留草稿、控制器切换、错误兼容及图标显示。更新移除回归验证两种语言均没有更新控件，多个页面、控制器切换、联网事件和长时间运行均不发起更新请求，同时验证 YAML 保存重载与草稿保护仍可用。
+
+外壳回归验证页面与安装名称、实际构建版本、控制器离线时的版本显示、可用视口反复改变后的页头位置、独立内容滚动，以及手机底栏和编辑器可达性。此项回归在 Chromium 和 WebKit 中运行；自动化尺寸与触屏模拟不能替代真实 iPad Safari 浏览器栏的实机验证。
 
 ## 原项目与许可
 

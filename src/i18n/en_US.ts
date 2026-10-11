@@ -8,6 +8,8 @@ const EN = {
         Connections: 'Connections',
         DNS: 'DNS',
         Version: 'Version',
+        Core: 'Core',
+        Dashboard: 'UI',
         Online: 'Online',
         Offline: 'Offline',
     },

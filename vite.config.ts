@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+
 import react from '@vitejs/plugin-react'
 import jotaiDebugLabel from 'jotai/babel/plugin-debug-label'
 import jotaiReactRefresh from 'jotai/babel/plugin-react-refresh'
@@ -5,8 +7,13 @@ import { defineConfig, splitVendorChunkPlugin } from 'vite'
 import { VitePWA } from 'vite-plugin-pwa'
 import tsConfigPath from 'vite-tsconfig-paths'
 
+const { version } = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as { version: string }
+
 export default defineConfig(
     env => ({
+        define: {
+            __UI_VERSION__: JSON.stringify(version),
+        },
         plugins: [
             // only use react-fresh
             env.mode === 'development' && react({
@@ -23,8 +30,8 @@ export default defineConfig(
                         type: 'image/png',
                     }],
                     start_url: './',
-                    short_name: 'mihomo-optimized',
-                    name: 'mihomo-optimized',
+                    short_name: 'mihomo',
+                    name: 'mihomo',
                     theme_color: '#141e2f',
                     background_color: '#f3f6f9',
                 },

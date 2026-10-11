@@ -56,9 +56,11 @@ jobs:
       - name: Build UI
         run: pnpm build
       - name: Install browser for isolated regression tests
-        run: pnpm exec playwright install --with-deps chromium
+        run: pnpm exec playwright install --with-deps chromium webkit
       - name: Verify connection scrolling, counts and memory-only DNS pages
         run: pnpm test:browser
+      - name: Verify viewport layout and version display in WebKit
+        run: PLAYWRIGHT_BROWSER_NAME=webkit node scripts/test-app-shell.cjs
       - name: Package UI
         run: python3 scripts/package-ui.py --source-sha "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY"
       - uses: actions/upload-artifact@v4
