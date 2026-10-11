@@ -48,6 +48,9 @@ type UIUpdateStatus struct {
 	UpdateAvailable bool   `json:"update_available"`
 	Updating        bool   `json:"updating"`
 	CheckError      string `json:"check_error,omitempty"`
+	AutoUpdate      bool   `json:"auto_update"`
+	UpdateInterval  int    `json:"update_interval"`
+	NextCheck       string `json:"next_check,omitempty"`
 }
 
 type uiBuildInfo struct {
@@ -98,6 +101,9 @@ func SetUIUpdater(u *UIUpdater) {
 	uiActivation.Lock()
 	defer uiActivation.Unlock()
 	previous := currentUIUpdater.Load()
+	if previous == u {
+		return
+	}
 	if previous != nil && previous.key() == u.key() {
 		u.activeCtx, u.activeCancel = previous.activeCtx, previous.activeCancel
 	} else {
@@ -106,6 +112,7 @@ func SetUIUpdater(u *UIUpdater) {
 		}
 		u.activeCtx, u.activeCancel = context.WithCancel(context.Background())
 	}
+	u.configureAutomaticUpdates(previous)
 	currentUIUpdater.Store(u)
 }
 
@@ -113,8 +120,11 @@ type UIUpdater struct {
 	externalUIURL  string
 	externalUIPath string
 	autoDownloadUI bool
+	autoUpdateUI   bool
+	updateInterval int
 	activeCtx      context.Context
 	activeCancel   context.CancelFunc
+	automatic      *uiAutomaticUpdate
 
 	// Test-only injection; neither requests nor filesystem functions are API or
 	// YAML options. Production always uses the configured external-ui-url.
@@ -123,10 +133,21 @@ type UIUpdater struct {
 	rename       func(string, string) error
 	removeAll    func(string) error
 	beforeCommit func()
+	newTicker    func(time.Duration) (<-chan time.Time, func())
 }
 
 func NewUiUpdater(externalUI, externalUIURL, externalUIName string) *UIUpdater {
-	u := &UIUpdater{externalUIURL: externalUIURL}
+	return NewUiUpdaterWithAutoUpdate(externalUI, externalUIURL, externalUIName, false, defaultUIUpdateInterval)
+}
+
+// NewUiUpdaterWithAutoUpdate creates an immutable source and scheduling policy.
+// SetUIUpdater activates it; constructing or parsing a configuration never starts
+// a timer or a network request. updateInterval is expressed in hours.
+func NewUiUpdaterWithAutoUpdate(externalUI, externalUIURL, externalUIName string, autoUpdate bool, updateInterval int) *UIUpdater {
+	if updateInterval <= 0 || updateInterval > int((1<<63-1)/time.Hour) {
+		updateInterval = defaultUIUpdateInterval
+	}
+	u := &UIUpdater{externalUIURL: externalUIURL, autoUpdateUI: autoUpdate, updateInterval: updateInterval}
 	if externalUI != "" {
 		u.autoDownloadUI = true
 		u.externalUIPath = C.Path.Resolve(externalUI)
@@ -177,7 +198,7 @@ func (u *UIUpdater) operationContext(parent context.Context, limit time.Duration
 
 func (u *UIUpdater) Status(ctx context.Context, check bool) UIUpdateStatus {
 	state := u.state()
-	s := UIUpdateStatus{Updating: state.updating.Load()}
+	s := UIUpdateStatus{Updating: state.updating.Load(), AutoUpdate: u.AutoUpdate(), UpdateInterval: u.UpdateInterval(), NextCheck: u.nextAutomaticCheck()}
 	if u.externalUIPath == "" {
 		s.Reason = "ui-not-configured"
 		return s
@@ -206,15 +227,29 @@ func (u *UIUpdater) Status(ctx context.Context, check bool) UIUpdateStatus {
 	if latest.digest != "" {
 		s.CurrentDigest, s.LatestDigest = latest.currentDigest, latest.digest
 		s.LatestVersion, s.LatestCommit = latest.info.Version, latest.info.SourceCommit
-		s.UpdateAvailable = err == nil && latest.currentDigest != latest.digest
+		comparison, valid := compareUIVersions(latest.info.Version, current.Version)
+		if err == nil && !valid {
+			s.Reason = "version-unavailable"
+		}
+		s.UpdateAvailable = err == nil && valid && comparison > 0
 	}
 	s.Updating = state.updating.Load()
 	return s
 }
 
 func (u *UIUpdater) check(ctx context.Context) (uiSnapshot, error) {
+	return u.checkWithLifetime(ctx, context.Background())
+}
+
+// Browser checks outlive an individual HTTP waiter. A scheduled check instead
+// belongs to its automatic policy, so disabling or rescheduling that policy also
+// interrupts its download without canceling a manual installation.
+func (u *UIUpdater) checkWithLifetime(ctx, lifetime context.Context) (uiSnapshot, error) {
 	state, key := u.state(), u.key()
 	for {
+		if err := ctx.Err(); err != nil {
+			return uiSnapshot{}, err
+		}
 		if !u.active() {
 			return uiSnapshot{}, ErrUIConfigurationChanged
 		}
@@ -247,7 +282,7 @@ func (u *UIUpdater) check(ctx context.Context) (uiSnapshot, error) {
 				if previous.key != key {
 					conditional = uiSnapshot{}
 				}
-				checkCtx, cancel := u.operationContext(context.Background(), uiCheckLimit)
+				checkCtx, cancel := u.operationContext(lifetime, uiCheckLimit)
 				latest, err := u.prepareSnapshot(checkCtx, conditional)
 				cancel()
 				if !u.active() {
@@ -268,6 +303,12 @@ func (u *UIUpdater) check(ctx context.Context) (uiSnapshot, error) {
 				}
 				state.mu.Lock()
 				state.latest, state.err, state.key, state.checked = latest, err, key, time.Now()
+				if lifetime.Err() != nil && u.active() {
+					// A deliberate policy cancellation is not a source failure.
+					// Let a manual waiter immediately revalidate instead of caching
+					// the cancellation as an error for the next five minutes.
+					state.err, state.checked = nil, time.Time{}
+				}
 				state.checking = nil
 				state.expireLocked()
 				state.operation.Unlock()
@@ -504,7 +545,8 @@ func readUIBuildInfo(root string) uiBuildInfo {
 	if err != nil || json.Unmarshal(data, &info) != nil {
 		return uiBuildInfo{}
 	}
-	// Metadata is optional display information; updates compare file digests.
+	// Versions control update availability. Missing or invalid versions still
+	// permit an explicit manual installation, but never an automatic update.
 	if len(info.Version) > 64 || strings.ContainsAny(info.Version, "\r\n") {
 		info.Version = ""
 	}
@@ -535,7 +577,16 @@ func (u *UIUpdater) AutoDownloadUI() {
 
 func (u *UIUpdater) DownloadUI() error { return u.DownloadUIContext(context.Background()) }
 
-func (u *UIUpdater) DownloadUIContext(ctx context.Context) (err error) {
+func (u *UIUpdater) updateAvailable(snapshot uiSnapshot) bool {
+	comparison, valid := compareUIVersions(snapshot.info.Version, readUIBuildInfo(u.externalUIPath).Version)
+	return valid && comparison > 0
+}
+
+func (u *UIUpdater) DownloadUIContext(ctx context.Context) error {
+	return u.downloadUIContext(ctx, false)
+}
+
+func (u *UIUpdater) downloadUIContext(ctx context.Context, onlyNewer bool) (err error) {
 	state, key := u.state(), u.key()
 	if !state.operation.TryLock() {
 		return ErrUIUpdateBusy
@@ -565,6 +616,7 @@ func (u *UIUpdater) DownloadUIContext(ctx context.Context) (err error) {
 			return err
 		}
 	}
+	installed := false
 	defer func() {
 		if snapshot.work != "" {
 			_ = os.RemoveAll(snapshot.work)
@@ -579,7 +631,9 @@ func (u *UIUpdater) DownloadUIContext(ctx context.Context) (err error) {
 		if err == nil {
 			snapshot.work, snapshot.root = "", ""
 			snapshot.files = nil
-			snapshot.currentDigest = snapshot.digest
+			if installed {
+				snapshot.currentDigest = snapshot.digest
+			}
 			state.latest, state.err, state.key, state.checked = snapshot, nil, key, time.Now()
 		} else {
 			state.latest, state.checked = uiSnapshot{}, time.Time{}
@@ -596,7 +650,15 @@ func (u *UIUpdater) DownloadUIContext(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
+	snapshot.currentDigest = currentDigest
+	// The current version can change after the automatic check (for example,
+	// a manual installation wins the operation gate). Compare again while
+	// holding that gate, including when a fresh archive had to be downloaded.
+	if onlyNewer && !u.updateAvailable(snapshot) {
+		return nil
+	}
 	if currentDigest == snapshot.digest {
+		installed = true
 		return nil
 	}
 	if err = retainUIAssets(ctx, target, snapshot.root, currentFiles, snapshot.files); err != nil {
@@ -630,8 +692,9 @@ func (u *UIUpdater) DownloadUIContext(ctx context.Context) (err error) {
 		if err == nil {
 			err = ctx.Err()
 		}
-		if err == nil {
+		if err == nil && (!onlyNewer || u.updateAvailable(snapshot)) {
 			err = installUIDirectory(snapshot.root, target, rename, removeAll)
+			installed = err == nil
 		}
 	}
 	uiActivation.Unlock()

@@ -95,6 +95,10 @@ external-ui-name: xd
 # 目前支持下载zip,tgz格式的压缩包
 external-ui-url: "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip"
 
+# 内核后台按小时检查 external-ui-url；无需打开面板，远端版本更高时更新
+external-ui-auto-update: false
+external-ui-update-interval: 24
+
 # 在RESTful API端口上开启DOH服务器
 # ！！！该URL不会验证secret， 如果开启请自行保证安全问题 ！！！
 external-doh-server: /dns-query

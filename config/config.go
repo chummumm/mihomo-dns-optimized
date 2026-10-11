@@ -48,27 +48,29 @@ import (
 // General config
 type General struct {
 	Inbound
-	DNSRuleRouting    bool                    `json:"dns-rule-routing"`
-	Mode              T.TunnelMode            `json:"mode"`
-	UnifiedDelay      bool                    `json:"unified-delay"`
-	LogLevel          log.LogLevel            `json:"log-level"`
-	IPv6              bool                    `json:"ipv6"`
-	Interface         string                  `json:"interface-name"`
-	RoutingMark       int                     `json:"routing-mark"`
-	GeoXUrl           GeoXUrl                 `json:"geox-url"`
-	GeoAutoUpdate     bool                    `json:"geo-auto-update"`
-	GeoUpdateInterval int                     `json:"geo-update-interval"`
-	GeodataMode       bool                    `json:"geodata-mode"`
-	GeodataLoader     string                  `json:"geodata-loader"`
-	GeositeMatcher    string                  `json:"geosite-matcher"`
-	TCPConcurrent     bool                    `json:"tcp-concurrent"`
-	FindProcessMode   process.FindProcessMode `json:"find-process-mode"`
-	Sniffing          bool                    `json:"sniffing"`
-	GlobalUA          string                  `json:"global-ua"`
-	ETagSupport       bool                    `json:"etag-support"`
-	KeepAliveIdle     int                     `json:"keep-alive-idle"`
-	KeepAliveInterval int                     `json:"keep-alive-interval"`
-	DisableKeepAlive  bool                    `json:"disable-keep-alive"`
+	DNSRuleRouting           bool                    `json:"dns-rule-routing"`
+	Mode                     T.TunnelMode            `json:"mode"`
+	UnifiedDelay             bool                    `json:"unified-delay"`
+	LogLevel                 log.LogLevel            `json:"log-level"`
+	IPv6                     bool                    `json:"ipv6"`
+	Interface                string                  `json:"interface-name"`
+	RoutingMark              int                     `json:"routing-mark"`
+	GeoXUrl                  GeoXUrl                 `json:"geox-url"`
+	GeoAutoUpdate            bool                    `json:"geo-auto-update"`
+	GeoUpdateInterval        int                     `json:"geo-update-interval"`
+	ExternalUIAutoUpdate     bool                    `json:"external-ui-auto-update"`
+	ExternalUIUpdateInterval int                     `json:"external-ui-update-interval"`
+	GeodataMode              bool                    `json:"geodata-mode"`
+	GeodataLoader            string                  `json:"geodata-loader"`
+	GeositeMatcher           string                  `json:"geosite-matcher"`
+	TCPConcurrent            bool                    `json:"tcp-concurrent"`
+	FindProcessMode          process.FindProcessMode `json:"find-process-mode"`
+	Sniffing                 bool                    `json:"sniffing"`
+	GlobalUA                 string                  `json:"global-ua"`
+	ETagSupport              bool                    `json:"etag-support"`
+	KeepAliveIdle            int                     `json:"keep-alive-idle"`
+	KeepAliveInterval        int                     `json:"keep-alive-interval"`
+	DisableKeepAlive         bool                    `json:"disable-keep-alive"`
 }
 
 // Inbound config
@@ -456,6 +458,8 @@ type RawConfig struct {
 	ExternalUI                    string                  `yaml:"external-ui" json:"external-ui"`
 	ExternalUIURL                 string                  `yaml:"external-ui-url" json:"external-ui-url"`
 	ExternalUIName                string                  `yaml:"external-ui-name" json:"external-ui-name"`
+	ExternalUIAutoUpdate          bool                    `yaml:"external-ui-auto-update" json:"external-ui-auto-update"`
+	ExternalUIUpdateInterval      UIUpdateInterval        `yaml:"external-ui-update-interval" json:"external-ui-update-interval"`
 	ExternalDohServer             string                  `yaml:"external-doh-server" json:"external-doh-server"`
 	Secret                        string                  `yaml:"secret" json:"secret"`
 	Interface                     string                  `yaml:"interface-name" json:"interface-name"`
@@ -509,26 +513,28 @@ func Parse(buf []byte) (*Config, error) {
 
 func DefaultRawConfig() *RawConfig {
 	return &RawConfig{
-		AllowLan:          false,
-		BindAddress:       "*",
-		LanAllowedIPs:     []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")},
-		IPv6:              true,
-		Mode:              T.Rule,
-		GeoAutoUpdate:     false,
-		GeoUpdateInterval: 24,
-		GeodataMode:       geodata.GeodataMode(),
-		GeodataLoader:     "memconservative",
-		UnifiedDelay:      false,
-		Authentication:    []string{},
-		LogLevel:          log.INFO,
-		Hosts:             map[string]any{},
-		Rule:              []string{},
-		Proxy:             []map[string]any{},
-		ProxyGroup:        []map[string]any{},
-		TCPConcurrent:     false,
-		FindProcessMode:   process.FindProcessStrict,
-		GlobalUA:          "clash.meta/" + C.Version,
-		ETagSupport:       true,
+		AllowLan:                 false,
+		BindAddress:              "*",
+		LanAllowedIPs:            []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")},
+		IPv6:                     true,
+		Mode:                     T.Rule,
+		GeoAutoUpdate:            false,
+		GeoUpdateInterval:        24,
+		ExternalUIAutoUpdate:     false,
+		ExternalUIUpdateInterval: 24,
+		GeodataMode:              geodata.GeodataMode(),
+		GeodataLoader:            "memconservative",
+		UnifiedDelay:             false,
+		Authentication:           []string{},
+		LogLevel:                 log.INFO,
+		Hosts:                    map[string]any{},
+		Rule:                     []string{},
+		Proxy:                    []map[string]any{},
+		ProxyGroup:               []map[string]any{},
+		TCPConcurrent:            false,
+		FindProcessMode:          process.FindProcessStrict,
+		GlobalUA:                 "clash.meta/" + C.Version,
+		ETagSupport:              true,
 		DNS: RawDNS{
 			Enable:         false,
 			IPv6:           false,
@@ -785,6 +791,10 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 func temporaryUpdateGeneral(general *General) func()
 
 func parseGeneral(cfg *RawConfig) (*General, error) {
+	const maxUIUpdateHours = int64(1<<63-1) / int64(time.Hour)
+	if cfg.ExternalUIUpdateInterval <= 0 || int64(cfg.ExternalUIUpdateInterval) > maxUIUpdateHours {
+		return nil, fmt.Errorf("external-ui-update-interval must be a positive integer number of hours no greater than %d", maxUIUpdateHours)
+	}
 	if cfg.LegacyDNSProxyPort != nil && *cfg.LegacyDNSProxyPort != 0 {
 		return nil, errors.New("dns-proxy-port has been removed; use dns-rule-routing: true with the built-in dns.listen service or explicit TUN dns-hijack")
 	}
@@ -821,18 +831,20 @@ func parseGeneral(cfg *RawConfig) (*General, error) {
 			ASN:     cfg.GeoXUrl.ASN,
 			GeoSite: cfg.GeoXUrl.GeoSite,
 		},
-		GeoAutoUpdate:     cfg.GeoAutoUpdate,
-		GeoUpdateInterval: cfg.GeoUpdateInterval,
-		GeodataMode:       cfg.GeodataMode,
-		GeodataLoader:     cfg.GeodataLoader,
-		GeositeMatcher:    cfg.GeositeMatcher,
-		TCPConcurrent:     cfg.TCPConcurrent,
-		FindProcessMode:   cfg.FindProcessMode,
-		GlobalUA:          cfg.GlobalUA,
-		ETagSupport:       cfg.ETagSupport,
-		KeepAliveIdle:     cfg.KeepAliveIdle,
-		KeepAliveInterval: cfg.KeepAliveInterval,
-		DisableKeepAlive:  cfg.DisableKeepAlive,
+		GeoAutoUpdate:            cfg.GeoAutoUpdate,
+		GeoUpdateInterval:        cfg.GeoUpdateInterval,
+		ExternalUIAutoUpdate:     cfg.ExternalUIAutoUpdate,
+		ExternalUIUpdateInterval: int(cfg.ExternalUIUpdateInterval),
+		GeodataMode:              cfg.GeodataMode,
+		GeodataLoader:            cfg.GeodataLoader,
+		GeositeMatcher:           cfg.GeositeMatcher,
+		TCPConcurrent:            cfg.TCPConcurrent,
+		FindProcessMode:          cfg.FindProcessMode,
+		GlobalUA:                 cfg.GlobalUA,
+		ETagSupport:              cfg.ETagSupport,
+		KeepAliveIdle:            cfg.KeepAliveIdle,
+		KeepAliveInterval:        cfg.KeepAliveInterval,
+		DisableKeepAlive:         cfg.DisableKeepAlive,
 	}, nil
 }
 
