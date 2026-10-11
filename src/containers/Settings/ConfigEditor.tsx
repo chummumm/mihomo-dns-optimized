@@ -4,7 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 
 import { Button, Icon, Modal } from '@components'
 import { type Client } from '@lib/request'
-import { useClient, useI18n } from '@stores'
+import { useClient, useGeneral, useI18n } from '@stores'
 
 import { MAX_CONFIG_FILE_BYTES, configCursor, configDisplayText, configFits, configLineStarts, configSaveText, readConfigFile, type EditableConfigFile } from './config-editor-model'
 import './config-editor.css'
@@ -14,7 +14,7 @@ interface ConfigEditorProps {
     onClose: () => void
 }
 
-type EditorError = 'unsupported' | 'unauthorized' | 'tooLarge' | 'invalid' | 'conflict' | 'format' | 'path' | 'busy' | 'network' | 'invalidResponse'
+type EditorError = 'unsupported' | 'unauthorized' | 'tooLarge' | 'invalid' | 'conflict' | 'format' | 'path' | 'busy' | 'network' | 'invalidResponse' | 'reloadInvalid' | 'reload'
 
 function classifyError (reason: unknown): EditorError {
     const status = axios.isAxiosError(reason) ? reason.response?.status : undefined
@@ -58,11 +58,14 @@ function EditorSession ({ client, onClose, closeHandler }: {
 }) {
     const { translation } = useI18n()
     const { t } = translation('Settings')
+    const { update: fetchGeneral } = useGeneral()
     const [file, setFile] = useState<EditableConfigFile | null>(null)
     const [text, setText] = useState('')
     const [cursor, setCursor] = useState({ line: 1, column: 1 })
     const [loading, setLoading] = useState(true)
     const [saving, setSaving] = useState(false)
+    const [reloading, setReloading] = useState(false)
+    const [reloadPending, setReloadPending] = useState(false)
     const [saved, setSaved] = useState(false)
     const [problem, setProblem] = useState<EditorError | null>(null)
     const [conflict, setConflict] = useState(false)
@@ -90,6 +93,7 @@ function EditorSession ({ client, onClose, closeHandler }: {
         setProblem(null)
         setConflict(false)
         setSaved(false)
+        setReloadPending(false)
         setConfirmation(null)
         setCursor({ line: 1, column: 1 })
         try {
@@ -194,31 +198,52 @@ function EditorSession ({ client, onClose, closeHandler }: {
     }, [confirmation])
 
     async function save () {
-        if (file === null || !dirty || conflict || requestRef.current !== null || confirmation !== null) return
+        if (file === null || (!dirty && !reloadPending) || conflict || requestRef.current !== null || confirmation !== null) return
         const content = configSaveText(text, file.content)
         if (!configFits(content, limit)) { setProblem('tooLarge'); return }
         const request = new AbortController()
         requestRef.current = request
         setSaving(true)
+        setReloading(false)
         setProblem(null)
         setSaved(false)
+        let fileSaved = false
         try {
+            // A reload retry still checks the saved revision. The core's
+            // unchanged-content path does not rewrite the file, and rejects
+            // a conflicting external edit before we can reload it.
             const response = await client.saveConfigFile(content, file.revision, request.signal)
             if (!active.current || request.signal.aborted || requestRef.current !== request) return
             const result = readConfigFile(response.data)
             if (result === undefined) { setProblem('invalidResponse'); return }
             setFile(result)
             setText(configDisplayText(result.content))
+            fileSaved = true
+            setReloadPending(true)
+            setReloading(true)
+            // Include listener settings such as port / mixed-port / allow-lan.
+            // This reads the current file, never an arbitrary path or payload.
+            await client.reloadConfig(request.signal, true)
+            if (!active.current || request.signal.aborted || requestRef.current !== request) return
+            setReloadPending(false)
             setSaved(true)
+            // Reload is complete. A failed settings refresh must not turn it
+            // into a reported reload failure or keep the editor locked.
+            void fetchGeneral().catch(() => undefined)
         } catch (reason) {
             if (!active.current || request.signal.aborted || requestRef.current !== request) return
-            const error = classifyError(reason)
+            const error = fileSaved
+                ? axios.isAxiosError(reason) && reason.response?.status === 400 ? 'reloadInvalid' : 'reload'
+                : classifyError(reason)
             setProblem(error)
             if (error === 'conflict') setConflict(true)
         } finally {
             if (requestRef.current === request) {
                 requestRef.current = null
-                if (active.current) setSaving(false)
+                if (active.current) {
+                    setSaving(false)
+                    setReloading(false)
+                }
             }
         }
     }
@@ -272,12 +297,12 @@ function EditorSession ({ client, onClose, closeHandler }: {
         <div ref={root} className="config-editor-content" role="dialog" aria-modal="true" aria-label={t('editor.title')} onKeyDown={dialogKeydown}>
             <div className="config-editor-bar">
                 <span className="config-editor-file" title={file?.path}>
-                    <Icon type="copy" size={14} />
+                    <Icon type="file" size={14} />
                     <span>{file?.path ?? t('editor.noFile')}</span>
                 </span>
                 <span className={classnames('config-editor-state', { 'is-connected': file !== null && !conflict })}>
                     <i aria-hidden="true" />
-                    {loading ? t('editor.loading') : saving ? t('editor.saving') : dirty ? t('editor.unsaved') : file !== null ? 'YAML' : t('editor.unavailable')}
+                    {loading ? t('editor.loading') : saving ? t(reloading ? 'editor.reloading' : 'editor.saving') : dirty ? t('editor.unsaved') : reloadPending ? t('editor.pendingReload') : file !== null ? 'YAML' : t('editor.unavailable')}
                 </span>
             </div>
             <div className={classnames('config-editor-notice', { 'is-error': problem !== null, 'is-saved': saved })} role={problem !== null ? 'alert' : 'status'}>
@@ -336,7 +361,7 @@ function EditorSession ({ client, onClose, closeHandler }: {
                     <Button icon="update" disabled={loading || saving} onClick={reread}>{t(file === null ? 'editor.retry' : 'editor.reread')}</Button>
                     <span className="config-editor-footer-spacer" />
                     <Button disabled={saving} onClick={() => closeHandler.current?.()}>{t('editor.close')}</Button>
-                    <Button type="primary" icon="edit" loading={saving} disabled={file === null || loading || saving || !dirty || conflict} onClick={() => { void save() }}>{t(saving ? 'editor.saving' : 'editor.save')}</Button>
+                    <Button type="primary" icon={reloading ? 'update' : 'save'} loading={saving} disabled={file === null || loading || saving || (!dirty && !reloadPending) || conflict} onClick={() => { void save() }}>{t(saving ? reloading ? 'editor.reloading' : 'editor.saving' : reloadPending && !dirty ? 'editor.retryReload' : 'editor.save')}</Button>
                 </div>}
         </div>
     )

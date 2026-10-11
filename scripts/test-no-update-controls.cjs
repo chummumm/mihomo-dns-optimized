@@ -142,14 +142,14 @@ async function main() {
     await editor.getByRole('button', { name: 'Keep editing', exact: true }).click()
     assert.equal(await text.inputValue(), draft, 'the existing discard guard remains active')
     await text.press('Control+s')
-    await editor.getByText('Configuration file saved. The running configuration is unchanged. Use Reload configuration to apply your changes.', { exact: true }).waitFor()
+    await editor.getByText('Configuration file saved and reloaded.', { exact: true }).waitFor()
     assert.deepEqual(saves, [{ content: draft, revision: 'revision-1' }])
-    assert.deepEqual(reloads, [], 'saving remains separate from runtime configuration changes')
+    assert.deepEqual(reloads, ['PUT'], 'Save and reload applies the saved configuration exactly once')
     await editor.getByRole('button', { name: 'Close', exact: true }).click()
     await editor.waitFor({ state: 'detached' })
     await page.getByRole('button', { name: 'Reload configuration', exact: true }).click()
     await page.waitForFunction(() => !document.querySelector('.settings-page .button-loading'))
-    assert.deepEqual(reloads, ['PUT'], 'explicit configuration reload remains available')
+    assert.deepEqual(reloads, ['PUT', 'PUT'], 'explicit configuration reload remains available after the combined action')
 
     for (const [route, title] of [['proxies', 'Proxies'], ['connections', 'Connections'], ['dns', 'DNS'], ['logs', 'Logs'], ['rules', 'Rules'], ['settings', 'Settings']]) {
         await page.evaluate(route => { location.hash = '/' + route }, route)
