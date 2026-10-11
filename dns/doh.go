@@ -112,7 +112,7 @@ func (doh *dnsOverHTTPS) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.
 	if answer, err, handled := exchangeNativeTransport(ctx, m, doh); handled {
 		return answer, err
 	}
-	attempt := observeDNSUpstream(ctx, doh.Address())
+	attempt := observeDNSUpstream(ctx, doh.Address(), doh.dialer)
 	defer func() { finishDNSUpstream(attempt, msg, err) }()
 	// Quote from https://www.rfc-editor.org/rfc/rfc8484.html:
 	// In order to maximize HTTP cache friendliness, DoH clients using media
@@ -139,8 +139,10 @@ func (doh *dnsOverHTTPS) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.
 
 	// Make the first attempt to send the DNS query.
 	msg, err = doh.exchangeHTTPS(ctx, client, m)
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
+	if err == nil || ctx.Err() != nil {
+		// HTTP reports its own cancellation error. A context canceled after
+		// a reply or an unrelated failure must not rewrite that I/O result.
+		return msg, err
 	}
 
 	// Make up to 2 attempts to re-create the HTTP client and send the request
@@ -148,7 +150,7 @@ func (doh *dnsOverHTTPS) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.
 	// is necessary to make HTTP client usable.  We need to make 2 attempts in
 	// the case when the connection was closed (due to inactivity for example)
 	// AND the server refuses to open a 0-RTT connection.
-	for i := 0; isCached && doh.shouldRetry(err) && i < 2; i++ {
+	for i := 0; isCached && doh.shouldRetry(err) && ctx.Err() == nil && i < 2; i++ {
 		client, err = doh.resetClient(ctx, err)
 		if err != nil {
 			return nil, fmt.Errorf("failed to reset http client: %w", err)
@@ -157,7 +159,7 @@ func (doh *dnsOverHTTPS) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.
 		msg, err = doh.exchangeHTTPS(ctx, client, m)
 	}
 
-	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+	if err != nil && ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		// If the request failed anyway, make sure we don't use this client.
 		_, resErr := doh.resetClient(ctx, err)
 

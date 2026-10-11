@@ -88,6 +88,7 @@ type cacheControl struct {
 	hot        map[string]*cacheHotEntry
 	lru        list.List
 	inflight   map[string]uint64
+	selections map[string]*dnsResponseContinuation
 
 	// One clock and one ticker per active control, never a timer per domain.
 	now       func() time.Time
@@ -238,6 +239,9 @@ func (c *cacheControl) Store(ctx context.Context, key string, question D.Questio
 	defer c.mu.Unlock()
 	c.syncPolicyLocked()
 	if !c.validLocked(ctx) || message == nil || c.r.cache == nil {
+		return false
+	}
+	if !c.acceptResponseWriteLocked(ctx, key) {
 		return false
 	}
 	if c.r.ruleRouting {
@@ -436,6 +440,7 @@ func (c *cacheControl) resetLocked() {
 	c.hot = make(map[string]*cacheHotEntry)
 	c.lru.Init()
 	c.inflight = make(map[string]uint64)
+	c.selections = nil
 	c.stopIdleLocked()
 }
 
@@ -458,6 +463,7 @@ func (c *cacheControl) Close() {
 		c.generation++
 		c.hot = make(map[string]*cacheHotEntry)
 		c.lru.Init()
+		c.selections = nil
 		c.stopLocked()
 	}
 	c.mu.Unlock()

@@ -35,7 +35,7 @@ DNS 分流通过内置解析器提供，普通代理连接保持原转发行为�
 
 新增的 DNS 面板数据由本机控制器提供，查询记录、趋势和上游统计只保存在进程内存中，不写数据库或日志文件，也不发送遥测。无需维护第二份分流规则；观测不会改变 DNS 回答和出口选择。优化范围、缓存安全边界及测试方式见 [DNS 性能说明](docs/dns-performance.md)。
 
-正式版本采用 `vX.Y.Z-optimized-N`，本次为 `v1.19.32-optimized-10`；tag、发行标题与内核版本一致，源码哈希保留在 BUILDINFO 中供核对。修订号由 `OPTIMIZED_REVISION` 记录，更新文档不会消耗编号或自动发版。自 v9 起，发行文件统一使用 `mihomo-<target>-<version>`，Windows ZIP 内为 `mihomo-<target>.exe`。内核一键更新继续使用本二开仓库的正式发行并验证 SHA256；**包括 `v1.19.32-optimized-8` 在内的旧内核，首次升级 v9 或后续版本需要手动安装一次**，因为其编译内置的更新器要求旧资产文件名。安装 v9 或后续版本后可继续一键更新，见[更新说明](docs/releases.md#内核一键更新)。
+正式版本采用 `vX.Y.Z-optimized-N`，本次为 `v1.19.32-optimized-11`；tag、发行标题与内核版本一致，源码哈希保留在 BUILDINFO 中供核对。修订号由 `OPTIMIZED_REVISION` 记录，更新文档不会消耗编号或自动发版。自 v9 起，发行文件统一使用 `mihomo-<target>-<version>`，Windows ZIP 内为 `mihomo-<target>.exe`。内核一键更新继续使用本二开仓库的正式发行并验证 SHA256；**包括 `v1.19.32-optimized-8` 在内的旧内核，首次升级 v9 或后续版本需要手动安装一次**，因为其编译内置的更新器要求旧资产文件名。安装 v9 或后续版本后可继续一键更新，见[更新说明](docs/releases.md#内核一键更新)。
 
 ## DNS 状态与原版面板
 
@@ -108,6 +108,7 @@ dns:
 
   # 可选：这里显式开启；仅实际 DIRECT 优选 IP 与双栈。
   speed-check-mode: [tcp:443, tcp:80, ping]
+  response-mode: first-ping
   speed-check-timeout: 1000
   speed-check-concurrency: 16
   dualstack-ip-selection: true
@@ -142,7 +143,9 @@ rules:
 - TCP 测握手耗时，ping 测 ICMP 往返。探测继承所选直连出口的接口 / mark，不重新匹配规则；ping 是否可用取决于平台与权限。
 - 保留候选所属回答及 CNAME 链，不拼接不同服务器的回答；DNSSEC 等保护场景不改写。全部探测失败但已有有效回答时返回原回答。
 
-测速不代表下载带宽，也不保证所有域名都更快。后台更新属于新的查询，满足条件时可以重新优选。
+测速不代表下载带宽，也不保证所有域名都更快。预取和过期缓存刷新属于新的查询，满足条件时可以重新优选。
+
+开启测速后，可用 `response-mode` 选择首次回答的时机。默认 `first-ping` 在候选 IP 首次探测成功后回答；`fastest-ip` 在本轮预算内充分比较候选；`fastest-response` 在首个通过当前策略检查的 DNS 回答到达时回答，不等待 IP 探测。提前回答后，剩余比较仅在有后台名额时继续，沿用本轮期限，结果可以更新缓存。缓存命中直接回答，代理路径和关闭测速的配置保持原解析行为。具体边界见[响应模式](docs/dns-proxy.md#响应模式)。
 
 可选双栈优选复用这次已选直连出口和同一个超时预算。默认保留 IPv4；当 AAAA 查询同时取得两族可测速的回答，且 IPv4 比 IPv6 快至少所设阈值时，返回零 TTL 的 NOERROR / NODATA。代理查询不另查另一族、不探测；测速失败或受 DNSSEC 保护时保留原回答。该临时优选结论不缓存，避免被过期缓存长期延续。
 
@@ -155,6 +158,7 @@ rules:
 | 测速字段 | 默认值 | 含义与单位 |
 | --- | --- | --- |
 | `speed-check-mode` | 空 / `[none]` | 关闭；可设 `tcp:端口`、`ping`；`none` 不能与其他项混用 |
+| `response-mode` | `first-ping` | 开启测速时的首次回答策略；可选 `first-ping`、`fastest-ip`、`fastest-response` |
 | `speed-check-timeout` | 0 → 1000 | 毫秒；显式范围 1–5000，只限制本轮可选优选等待；无有效答复时，已发出的 DNS 继续使用正常解析期限 |
 | `speed-check-concurrency` | 0 → 16 | 最大 256；只限制活动 IP 探测，满额立即跳过新探测，不排队，不限制 DNS 上游请求；每轮最多 256 个候选 IP |
 | `dualstack-ip-selection` | `false` | 开启 DIRECT 双栈优选；仍需启用测速 |

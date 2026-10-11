@@ -66,8 +66,14 @@ type call[T any] struct {
 	// These fields are read and written with the singleflight
 	// mutex held before the WaitGroup is done, and are read but
 	// not written after the WaitGroup is done.
-	dups  int
-	chans []chan<- Result[T]
+	dups       int
+	chans      []chan<- Result[T]
+	earlyChans []chan<- Result[T]
+	// Optional early publication is separate from val: fn may still be
+	// computing its final result while new channel waiters join this call.
+	published bool
+	completed bool
+	earlyVal  T
 }
 
 // Group represents a class of work and forms a namespace in
@@ -98,7 +104,9 @@ func (g *Group[T]) Do(key string, fn func() (T, error)) (v T, err error, shared 
 		g.m = make(map[string]*call[T])
 	}
 	if c, ok := g.m[key]; ok {
-		c.dups++
+		if !c.completed {
+			c.dups++
+		}
 		g.mu.Unlock()
 		c.wg.Wait()
 
@@ -123,23 +131,64 @@ func (g *Group[T]) Do(key string, fn func() (T, error)) (v T, err error, shared 
 //
 // The returned channel will not be closed.
 func (g *Group[T]) DoChan(key string, fn func() (T, error)) <-chan Result[T] {
+	return g.doChan(key, func(func(T) bool) (T, error) { return fn() }, false)
+}
+
+// DoChanEarly permits fn to publish one successful immutable result before
+// finishing bounded follow-up work. Channel waiters receive that result once;
+// the key remains in flight until fn returns, and Do/DoChan still wait for its
+// final result. publish returns false if this call was forgotten or already published.
+// Early results are always marked Shared because fn may still reference them.
+func (g *Group[T]) DoChanEarly(key string, fn func(publish func(T) bool) (T, error)) <-chan Result[T] {
+	return g.doChan(key, fn, true)
+}
+
+func (g *Group[T]) doChan(key string, fn func(publish func(T) bool) (T, error), early bool) <-chan Result[T] {
 	ch := make(chan Result[T], 1)
 	g.mu.Lock()
 	if g.m == nil {
 		g.m = make(map[string]*call[T])
 	}
 	if c, ok := g.m[key]; ok {
-		c.dups++
-		c.chans = append(c.chans, ch)
+		if !c.completed {
+			c.dups++
+		}
+		if c.completed {
+			ch <- Result[T]{Val: c.val, Err: c.err, Shared: true}
+		} else if early && c.published {
+			ch <- Result[T]{Val: c.earlyVal, Shared: true}
+		} else if early {
+			c.earlyChans = append(c.earlyChans, ch)
+		} else {
+			c.chans = append(c.chans, ch)
+		}
 		g.mu.Unlock()
 		return ch
 	}
-	c := &call[T]{chans: []chan<- Result[T]{ch}}
+	c := new(call[T])
+	if early {
+		c.earlyChans = []chan<- Result[T]{ch}
+	} else {
+		c.chans = []chan<- Result[T]{ch}
+	}
 	c.wg.Add(1)
 	g.m[key] = c
 	g.mu.Unlock()
 
-	go g.doCall(c, key, fn)
+	publish := func(value T) bool {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.m[key] != c || c.published || c.completed {
+			return false
+		}
+		c.earlyVal, c.published = value, true
+		for _, waiter := range c.earlyChans {
+			waiter <- Result[T]{Val: value, Shared: true}
+		}
+		c.earlyChans = nil
+		return true
+	}
+	go g.doCall(c, key, func() (T, error) { return fn(publish) })
 
 	return ch
 }
@@ -159,6 +208,7 @@ func (g *Group[T]) doCall(c *call[T], key string, fn func() (T, error)) {
 
 		g.mu.Lock()
 		defer g.mu.Unlock()
+		c.completed = true
 		c.wg.Done()
 		if g.m[key] == c && !g.StoreResult {
 			delete(g.m, key)
@@ -167,7 +217,7 @@ func (g *Group[T]) doCall(c *call[T], key string, fn func() (T, error)) {
 		if e, ok := c.err.(*panicError); ok {
 			// In order to prevent the waiting channels from being blocked forever,
 			// needs to ensure that this panic cannot be recovered.
-			if len(c.chans) > 0 {
+			if len(c.chans)+len(c.earlyChans) > 0 || c.published {
 				go panic(e)
 				select {} // Keep this goroutine around so that it will appear in the crash dump.
 			} else {
@@ -180,6 +230,13 @@ func (g *Group[T]) doCall(c *call[T], key string, fn func() (T, error)) {
 			for _, ch := range c.chans {
 				ch <- Result[T]{c.val, c.err, c.dups > 0}
 			}
+			for _, ch := range c.earlyChans {
+				ch <- Result[T]{c.val, c.err, c.dups > 0}
+			}
+			// A retained StoreResult call needs only the final value. Do not
+			// retain its early snapshot or channels after delivery.
+			var zero T
+			c.earlyVal, c.chans, c.earlyChans = zero, nil, nil
 		}
 	}()
 

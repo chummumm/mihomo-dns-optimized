@@ -89,7 +89,9 @@ var dnsNativeWorkSlots = make(chan struct{}, 256)
 // Admission is applied only to actual work in the fork's native DNS path, not
 // to cache hits, bootstrap, ordinary traffic or existing upstream behavior.
 func admitDNSNativeWork(ctx context.Context) (func(), error) {
-	if queryRoute(ctx) == nil {
+	if queryRoute(ctx) == nil || cacheBackground(ctx) {
+		// Prefetch/refresh already owns a cacheBackgroundSlots reservation.
+		// Its optional work must not exhaust foreground DNS admission.
 		return func() {}, nil
 	}
 	select {

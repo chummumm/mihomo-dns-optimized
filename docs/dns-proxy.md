@@ -180,6 +180,7 @@ hosts、系统 hosts、回答类型控制、`proxy-server-nameserver-policy` 等
 ```yaml
 dns:
   speed-check-mode: [tcp:443, tcp:80, ping]
+  response-mode: first-ping
   speed-check-timeout: 1000
   speed-check-concurrency: 16
 ```
@@ -191,9 +192,26 @@ dns:
 | 设置 | 默认值与单位 |
 | --- | --- |
 | `speed-check-mode` | 空列表或 `[none]` 表示关闭；`none` 不能与其他模式混用；支持 `tcp:端口`、`ping` |
+| `response-mode` | `first-ping`；可选 `first-ping`、`fastest-ip`、`fastest-response`，见下表 |
 | `speed-check-timeout` | 毫秒；0 采用 1000，显式范围 1–5000；限制可选优选等待，不缩短正常 DNS 解析期限 |
 | `speed-check-concurrency` | 0 采用 16，最大 256；只限制活动 IP 探测，满额立即跳过新探测，不排队，不限制 DNS 上游并发 |
 | 候选地址上限 | 每轮最多 256 个去重候选，非可配置项 |
+
+### 响应模式
+
+`response-mode` 控制已经符合 DIRECT 测速条件的查询何时首次回答客户端。它不启用测速；`speed-check-mode` 为空或 `[none]` 时仍然不探测，也不为代理路径增加本地探测。
+
+| 模式 | 首次回答时机 | 取舍 |
+| --- | --- | --- |
+| `first-ping`（默认） | 已取得合格 DNS 回答，且候选 IP 首次成功探测后，可以回答 | 减少首次等待；首次选中的 IP 未必是最后比较出的最低 RTT |
+| `fastest-ip` | 在可选等待期限内收集 DNS 回答并比较成功探测；本轮完成或预算到期后回答 | 更充分比较目标 IP，首次查询可能更慢；不保证互联网上的全局最快 IP |
+| `fastest-response` | 首个通过当前上游选择、回答检查和过滤条件的 DNS 回答到达时回答 | 不等待 IP 测通，首次解析等待较短，返回的目标 IP 可能较慢 |
+
+自 `v1.19.32-optimized-11` 起，启用测速且未设置该字段时默认采用 `first-ping`。需要保留之前充分比较后再回答的行为，可显式设置 `response-mode: fastest-ip`。
+
+`first-ping` 与 `fastest-response` 提前回答后，只在取得有界后台名额时继续本轮已发出的上游查询和探测，以更充分的结果更新缓存；不重新发起整批 DNS，也不从回答时刻重置超时或 TTL。没有后台名额时直接结束可选比较。响应模式不改变 main / fallback 的选择和过滤优先级，备用池不能因为更早到达就绕过主池检查。
+
+探测并发满额时立即跳过新探测。未测速或测速失败不等于地址不存在；已有有效 DNS 回答就正常兜底。优选预算到期但仍无有效回答时，已经发出的 DNS 继续服从原解析期限。真实上游故障、正常 NXDOMAIN 以及明确的拒绝 / 丢弃仍保留原有含义。
 
 ## 可选双栈优选
 
@@ -208,6 +226,8 @@ dns:
 默认在 AAAA 查询中辅助查询同域名的 A。两族复用已经冻结的出口、同一上游池、一个优选等待期限和共享探测并发上限；正常 DNS 查询保留自己的解析期限，不重新选组，也不通过主 resolver 递归查询。只有两族均有有效地址和成功测速结果，且 IPv4 比 IPv6 快至少指定阈值，才对原 AAAA 返回 NOERROR / NODATA。开启 `dualstack-ip-allow-force-aaaa` 才允许对 A 做对称处理。全局 IPv6 或 `dns.ipv6` 关闭时，跨族优选不生效，不会用无法交付给客户端的 AAAA 抑制 A；已有配置仍可正常加载。
 
 代理路径不发这种辅助查询。DNSSEC 保护、某族解析错误、没有地址或某族探测全部失败时，不把失败当成较慢而过滤原有效回答。辅助结果不单独写入另一族缓存。
+
+`first-ping` 和 `fastest-response` 提前回答时，只采用当时已经完成且可验证的跨族测量。缺少两族成功探测证据就立即保留请求族，不为另一族额外等待；后续同预算比较仍须满足原证据和阈值条件，才能更新或撤销先前的缓存答案。
 
 优选合成的 NODATA 使用零 TTL SOA，不进入缓存。如果新回答替代了该作用域内的旧正向缓存，旧条目也会失效，避免继续用数天的过期 AAAA 答案或把短时偏好固化成长期负缓存。
 

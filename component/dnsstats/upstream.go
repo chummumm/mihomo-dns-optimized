@@ -3,6 +3,7 @@ package dnsstats
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"net/url"
 	"sort"
@@ -22,21 +23,47 @@ const (
 )
 
 type UpstreamStats struct {
-	ID           string  `json:"id"`
-	Address      string  `json:"address"`
-	Attempts     uint64  `json:"attempts"`
-	Successes    uint64  `json:"successes"`
-	Errors       uint64  `json:"errors"`
-	Canceled     uint64  `json:"canceled"`
-	Timeouts     uint64  `json:"timeouts"`
-	RCodeErrors  uint64  `json:"rcode_errors"`
-	ElapsedMSAvg float64 `json:"elapsed_ms_avg"`
+	ID                   string  `json:"id"`
+	Address              string  `json:"address"`
+	Outbound             string  `json:"outbound"`
+	OutboundType         string  `json:"outbound_type"`
+	Attempts             uint64  `json:"attempts"`
+	Successes            uint64  `json:"successes"`
+	Errors               uint64  `json:"errors"`
+	Canceled             uint64  `json:"canceled"`
+	Timeouts             uint64  `json:"timeouts"`
+	RCodeErrors          uint64  `json:"rcode_errors"`
+	ElapsedMSAvg         float64 `json:"elapsed_ms_avg"`
+	SuccessElapsedMSAvg  float64 `json:"success_elapsed_ms_avg"`
+	ErrorElapsedMSAvg    float64 `json:"error_elapsed_ms_avg"`
+	CanceledElapsedMSAvg float64 `json:"canceled_elapsed_ms_avg"`
 }
 type upstream struct {
-	stats        UpstreamStats
-	completed    uint64
-	milliseconds float64
+	stats                UpstreamStats
+	completed            uint64
+	milliseconds         float64
+	successMilliseconds  float64
+	errorMilliseconds    float64
+	canceledMilliseconds float64
 }
+
+// Outbound identifies an already selected physical exit. Key is opaque and is
+// only hashed; it must never contain a rule/group identity in place of a leaf.
+// An empty key means that the actual exit is unknown, not implicitly DIRECT.
+type Outbound struct {
+	Key  string
+	Name string
+	Type string
+}
+
+func normalizeOutbound(outbound Outbound) Outbound {
+	if outbound.Key == "" || (outbound.Type != "direct" && outbound.Type != "proxy") {
+		return Outbound{Type: "unknown"}
+	}
+	outbound.Name = bounded(outbound.Name, 128)
+	return outbound
+}
+
 type Upstreams struct {
 	Items        []UpstreamStats `json:"items"`
 	Scope        string          `json:"scope"`
@@ -46,10 +73,11 @@ type Upstreams struct {
 	InstanceID   string          `json:"instance_id"`
 }
 
-// Only endpoint identity is hashed; credentials, fragments and URL parameters
-// never appear in API output. A custom DoH path may itself be a token, so expose
-// only the conventional /dns-query path. Distinct hidden identities retain
-// distinct IDs even when their sanitized display addresses are the same.
+// Endpoint identity and the opaque outbound key are hashed; credentials,
+// fragments and URL parameters never appear in API output. A custom DoH path
+// may itself be a token, so expose only the conventional /dns-query path.
+// Distinct hidden identities retain distinct IDs even when their sanitized
+// display addresses are the same.
 func sanitizeAddress(address string) string {
 	parsed, err := url.Parse(address)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
@@ -71,12 +99,23 @@ type Attempt struct {
 	finished atomic.Bool
 }
 
-func StartUpstream(ctx context.Context, address string) *Attempt {
+func StartUpstream(ctx context.Context, address string, exits ...Outbound) *Attempt {
 	s := contextScope(ctx)
 	if !s.manager.Enabled() {
 		return nil
 	}
-	key := sha256.Sum256([]byte(address))
+	outbound := Outbound{Type: "unknown"}
+	if len(exits) != 0 {
+		outbound = normalizeOutbound(exits[0])
+	}
+	// Length-prefix the endpoint so it cannot collide with an opaque exit key.
+	identity := make([]byte, 8, 8+len(address)+len(outbound.Type)+1+len(outbound.Key))
+	binary.BigEndian.PutUint64(identity, uint64(len(address)))
+	identity = append(identity, address...)
+	identity = append(identity, outbound.Type...)
+	identity = append(identity, 0)
+	identity = append(identity, outbound.Key...)
+	key := sha256.Sum256(identity)
 	m := s.manager
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -90,11 +129,11 @@ func StartUpstream(ctx context.Context, address string) *Attempt {
 			value = m.upstreams[key]
 			m.overflowed++
 			if value == nil {
-				value = &upstream{stats: UpstreamStats{ID: "overflow", Address: "other upstreams"}}
+				value = &upstream{stats: UpstreamStats{ID: "overflow", Address: "other upstreams", OutboundType: "unknown"}}
 				m.upstreams[key] = value
 			}
 		} else {
-			value = &upstream{stats: UpstreamStats{ID: hex.EncodeToString(key[:]), Address: sanitizeAddress(address)}}
+			value = &upstream{stats: UpstreamStats{ID: hex.EncodeToString(key[:]), Address: sanitizeAddress(address), Outbound: outbound.Name, OutboundType: outbound.Type}}
 			m.upstreams[key] = value
 		}
 	}
@@ -103,7 +142,13 @@ func StartUpstream(ctx context.Context, address string) *Attempt {
 }
 
 func (a *Attempt) Complete(result UpstreamResult) {
-	if a == nil || a.finished.Swap(true) {
+	if a == nil {
+		return
+	}
+	// End the exchange clock before waiting for observers/readers of the
+	// statistics mutex. Their work is not part of this upstream's latency.
+	elapsedMS := float64(time.Since(a.start)) / float64(time.Millisecond)
+	if a.finished.Swap(true) {
 		return
 	}
 	m := a.scope.manager
@@ -117,20 +162,25 @@ func (a *Attempt) Complete(result UpstreamResult) {
 		return
 	}
 	value.completed++
-	value.milliseconds += float64(time.Since(a.start)) / float64(time.Millisecond)
+	value.milliseconds += elapsedMS
 	switch result {
 	case UpstreamSuccess:
 		value.stats.Successes++
+		value.successMilliseconds += elapsedMS
 	case UpstreamCanceled:
 		value.stats.Canceled++
+		value.canceledMilliseconds += elapsedMS
 	case UpstreamTimeout:
 		value.stats.Errors++
 		value.stats.Timeouts++
+		value.errorMilliseconds += elapsedMS
 	case UpstreamRCodeError:
 		value.stats.Errors++
 		value.stats.RCodeErrors++
+		value.errorMilliseconds += elapsedMS
 	default:
 		value.stats.Errors++
+		value.errorMilliseconds += elapsedMS
 	}
 }
 
@@ -142,6 +192,15 @@ func (m *Manager) Upstreams() Upstreams {
 		stats := value.stats
 		if value.completed != 0 {
 			stats.ElapsedMSAvg = value.milliseconds / float64(value.completed)
+		}
+		if stats.Successes != 0 {
+			stats.SuccessElapsedMSAvg = value.successMilliseconds / float64(stats.Successes)
+		}
+		if stats.Errors != 0 {
+			stats.ErrorElapsedMSAvg = value.errorMilliseconds / float64(stats.Errors)
+		}
+		if stats.Canceled != 0 {
+			stats.CanceledElapsedMSAvg = value.canceledMilliseconds / float64(stats.Canceled)
 		}
 		response.Items = append(response.Items, stats)
 	}

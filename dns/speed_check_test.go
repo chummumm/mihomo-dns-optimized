@@ -72,7 +72,7 @@ func speedCheckTestEqual(a, b *D.Msg) bool {
 
 func speedCheckTestChecker(t *testing.T, timeout time.Duration, concurrency int) *directSpeedChecker {
 	t.Helper()
-	s, err := newDirectSpeedChecker(SpeedCheckConfig{Mode: []string{"tcp:443", "tcp:80", "ping"}, Timeout: timeout, Concurrency: concurrency})
+	s, err := newDirectSpeedChecker(SpeedCheckConfig{Mode: []string{"tcp:443", "tcp:80", "ping"}, Timeout: timeout, Concurrency: concurrency, ResponseMode: ResponseModeFastestIP})
 	if err != nil {
 		t.Fatal(err)
 	}

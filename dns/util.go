@@ -86,6 +86,16 @@ func hasDNSAnswerLifetimes(ctx context.Context) bool {
 	return lifetimes != nil
 }
 
+func dnsAnswerReceivedAt(ctx context.Context, message *D.Msg) time.Time {
+	lifetimes, _ := ctx.Value(dnsAnswerLifetimesKey{}).(*dnsAnswerLifetimes)
+	if lifetimes == nil || message == nil {
+		return time.Time{}
+	}
+	lifetimes.mu.Lock()
+	defer lifetimes.mu.Unlock()
+	return lifetimes.received[message]
+}
+
 func recordDNSAnswerReceived(ctx context.Context, message *D.Msg, receivedAt time.Time) time.Time {
 	lifetimes, _ := ctx.Value(dnsAnswerLifetimesKey{}).(*dnsAnswerLifetimes)
 	if lifetimes == nil || message == nil || receivedAt.IsZero() {

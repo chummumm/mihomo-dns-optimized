@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/component/dnsmessage"
 	R "github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
@@ -197,17 +198,17 @@ func exchangeDNSProxyWire(ctx context.Context, query []byte, resolver *C.Metadat
 		if err := conn.SetDeadline(deadline); err != nil {
 			return nil, err
 		}
-		stop := closeDNSProxyOnCancel(ctx, normalClose)
-		defer stop()
+		guard := N.NewDNSCancelGuard(ctx, func() { _ = normalClose.Close() })
+		defer guard.Stop()
 		frame := make([]byte, len(query)+2)
 		binary.BigEndian.PutUint16(frame[:2], uint16(len(query)))
 		copy(frame[2:], query)
 		if err := writeDNSProxyFrame(conn, frame); err != nil {
-			return nil, err
+			return nil, guard.Error(err, N.DNSClosedIO(err))
 		}
 		var length [2]byte
 		if _, err := io.ReadFull(conn, length[:]); err != nil {
-			return nil, err
+			return nil, guard.Error(err, N.DNSClosedIO(err))
 		}
 		n := int(binary.BigEndian.Uint16(length[:]))
 		if n < 12 {
@@ -215,7 +216,7 @@ func exchangeDNSProxyWire(ctx context.Context, query []byte, resolver *C.Metadat
 		}
 		response := make([]byte, n)
 		if _, err := io.ReadFull(conn, response); err != nil {
-			return nil, err
+			return nil, guard.Error(err, N.DNSClosedIO(err))
 		}
 		return response, nil
 	}
@@ -238,10 +239,10 @@ func exchangeDNSProxyWire(ctx context.Context, query []byte, resolver *C.Metadat
 	if err := conn.SetDeadline(deadline); err != nil {
 		return nil, err
 	}
-	stop := closeDNSProxyOnCancel(ctx, normalClose)
-	defer stop()
+	guard := N.NewDNSCancelGuard(ctx, func() { _ = normalClose.Close() })
+	defer guard.Stop()
 	if n, err := conn.WriteTo(query, resolver.UDPAddr()); err != nil {
-		return nil, err
+		return nil, guard.Error(err, N.DNSClosedIO(err))
 	} else if n != len(query) {
 		return nil, io.ErrShortWrite
 	}
@@ -249,7 +250,7 @@ func exchangeDNSProxyWire(ctx context.Context, query []byte, resolver *C.Metadat
 	for {
 		n, from, err := conn.ReadFrom(response)
 		if err != nil {
-			return nil, err
+			return nil, guard.Error(err, N.DNSClosedIO(err))
 		}
 		if !sameDNSProxyEndpoint(from, resolver.AddrPort()) {
 			// Ignore unrelated packets until the bounded exchange deadline.
@@ -292,21 +293,6 @@ func writeDNSProxyFrame(w io.Writer, frame []byte) error {
 		frame = frame[n:]
 	}
 	return nil
-}
-
-// Also interrupt blocked reads promptly when the caller cancels (for example
-// when an inbound is closed), rather than waiting for the complete per-query
-// deadline. Uses Go 1.20-compatible APIs.
-func closeDNSProxyOnCancel(ctx context.Context, conn io.Closer) func() {
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = conn.Close()
-		case <-done:
-		}
-	}()
-	return func() { close(done) }
 }
 
 func sameDNSProxyEndpoint(addr net.Addr, expected netip.AddrPort) bool {

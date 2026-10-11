@@ -16,6 +16,7 @@ import (
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/tunnel"
 
 	D "github.com/miekg/dns"
 	"golang.org/x/net/icmp"
@@ -35,9 +36,10 @@ const (
 // has not answered yet retains the normal DNS deadline after that budget ends.
 // Concurrency limits active IP probes across queries sharing a checker.
 type SpeedCheckConfig struct {
-	Mode        []string
-	Timeout     time.Duration
-	Concurrency int
+	Mode         []string
+	Timeout      time.Duration
+	Concurrency  int
+	ResponseMode string
 }
 
 type speedCheckMode struct {
@@ -47,13 +49,14 @@ type speedCheckMode struct {
 type speedCheckProbe func(context.Context, netip.Addr, speedCheckMode) (time.Duration, error)
 
 type directSpeedChecker struct {
-	modes       []speedCheckMode
-	timeout     time.Duration
-	concurrency int
-	slots       chan struct{}
-	probe       speedCheckProbe
-	candidates  *dnsCandidateCache
-	pool        *dnsProbePool
+	modes        []speedCheckMode
+	responseMode string
+	timeout      time.Duration
+	concurrency  int
+	slots        chan struct{}
+	probe        speedCheckProbe
+	candidates   *dnsCandidateCache
+	pool         *dnsProbePool
 }
 
 // ValidateSpeedCheckConfig also validates disabled configurations, so a typo
@@ -64,6 +67,9 @@ func ValidateSpeedCheckConfig(config SpeedCheckConfig) error {
 }
 
 func newDirectSpeedChecker(config SpeedCheckConfig) (*directSpeedChecker, error) {
+	if err := ValidateResponseMode(config.ResponseMode); err != nil {
+		return nil, err
+	}
 	if config.Timeout < 0 {
 		return nil, errors.New("dns.speed-check-timeout must not be negative")
 	}
@@ -108,7 +114,8 @@ func newDirectSpeedChecker(config SpeedCheckConfig) (*directSpeedChecker, error)
 	}
 	return &directSpeedChecker{
 		modes: modes, timeout: config.Timeout, concurrency: config.Concurrency,
-		slots: make(chan struct{}, config.Concurrency), probe: probeDirectIP,
+		responseMode: normalizeResponseMode(config.ResponseMode),
+		slots:        make(chan struct{}, config.Concurrency), probe: probeDirectIP,
 		pool:       newDNSProbePool(config.Concurrency, config.Timeout),
 		candidates: newDNSCandidateCache(),
 	}, nil
@@ -191,6 +198,8 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 	defer cancelProbes()
 	probeDone := probeCtx.Done()
 	optimizing := true
+	mode := dnsResponseMode(ctx, s)
+	earlyOffered := false
 	type upstreamResult struct {
 		message    *D.Msg
 		err        error
@@ -261,6 +270,9 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 		}
 	}
 	for remaining > 0 || pending > 0 {
+		if dnsQueryClosed(ctx) {
+			return nil, true, tunnel.ErrDNSNativeQueryClosed
+		}
 		select {
 		case <-ctx.Done():
 			return finish()
@@ -316,6 +328,12 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 			if speedCheckProtected(result.message) {
 				return result.message, true, nil
 			}
+			if !earlyOffered && mode == ResponseModeFastestResponse {
+				earlyOffered = true
+				if !deliverDNSEarlyResponse(ctx, result.message) {
+					return result.message, true, nil
+				}
+			}
 			candidates := speedCheckCandidates(result.message, query.Question[0])
 			if firstAddressResponse == nil && len(candidates) != 0 {
 				firstAddressResponse = result.message
@@ -341,6 +359,13 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 		case result := <-probes:
 			if optimizing {
 				recordProbe(result)
+				if !earlyOffered && mode == ResponseModeFirstPing && best != nil {
+					earlyOffered = true
+					answer, _, _ := finish()
+					if !deliverDNSEarlyResponse(ctx, answer) {
+						return answer, true, nil
+					}
+				}
 			}
 		}
 		if probeSkipped && pending == 0 && firstResponse != nil {

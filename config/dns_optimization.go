@@ -16,9 +16,16 @@ func parseDNSOptimizations(raw RawDNS) (dns.SpeedCheckConfig, *dns.CacheOptions,
 		return speed, nil, fmt.Errorf("dns.speed-check-timeout must be 0 (default) or 1..5000 milliseconds")
 	}
 	speed = dns.SpeedCheckConfig{
-		Mode:        append([]string(nil), raw.SpeedCheckMode...),
-		Timeout:     time.Duration(raw.SpeedCheckTimeout) * time.Millisecond,
-		Concurrency: raw.SpeedCheckConcurrency,
+		Mode:         append([]string(nil), raw.SpeedCheckMode...),
+		ResponseMode: raw.ResponseMode,
+		Timeout:      time.Duration(raw.SpeedCheckTimeout) * time.Millisecond,
+		Concurrency:  raw.SpeedCheckConcurrency,
+	}
+	if speed.ResponseMode == "" {
+		speed.ResponseMode = dns.ResponseModeFirstPing
+	}
+	if err := dns.ValidateResponseMode(speed.ResponseMode); err != nil {
+		return speed, nil, err
 	}
 	if err := dns.ValidateSpeedCheckConfig(speed); err != nil {
 		return speed, nil, err

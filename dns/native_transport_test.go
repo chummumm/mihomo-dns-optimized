@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/metacubex/mihomo/component/dnsstats"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/tunnel/statistic"
 	D "github.com/miekg/dns"
@@ -163,7 +164,8 @@ func TestDNSRuleRoutingNativeDashboardCloseDoesNotRetry(t *testing.T) {
 			r := NewResolver(Config{RuleRouting: true, Main: servers}).Resolver
 			t.Cleanup(func() { unblock(); r.Close() })
 			query := routingTestQuery("dashboard-stop.example", 71)
-			ctx := r.cacheControl.Context(routingTestContext(leaf, routingTestOrigin()))
+			observations := dnsstats.New()
+			ctx := r.cacheControl.Context(dnsstats.WithManager(routingTestContext(leaf, routingTestOrigin()), observations))
 			prepared, _, err := r.prepareDNSRouting(ctx, query)
 			if err != nil {
 				t.Fatal(err)
@@ -212,6 +214,10 @@ func TestDNSRuleRoutingNativeDashboardCloseDoesNotRetry(t *testing.T) {
 			}
 			if statistic.DefaultManager.Get(tracker.ID()) != nil {
 				t.Fatal("manually closed query remained visible")
+			}
+			upstreams := observations.Upstreams().Items
+			if len(upstreams) != 1 || upstreams[0].Attempts != 1 || upstreams[0].Canceled != 1 || upstreams[0].Errors != 0 {
+				t.Fatalf("manual close was not attributed to cancellation: %+v", upstreams)
 			}
 			unblock()
 			// Terminal cancellation belongs only to the old logical request.

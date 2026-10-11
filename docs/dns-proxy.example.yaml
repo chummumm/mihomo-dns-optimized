@@ -41,6 +41,7 @@ dns:
   # 以下为显式启用的可选优化；测速/双栈优选/预取缺省均关闭。
   # 仅 DIRECT/Compatible 的自动上游集合测速；代理与签名回答跳过。
   speed-check-mode: [tcp:443, tcp:80, ping]
+  response-mode: first-ping
   speed-check-timeout: 1000       # 毫秒；0采用1000，最大5000
   speed-check-concurrency: 16    # 0采用16，最大256
   dualstack-ip-selection: true

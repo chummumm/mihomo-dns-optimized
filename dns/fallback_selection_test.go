@@ -135,7 +135,7 @@ func selectionTestConfig() Config {
 		Main:              []NameServer{{Addr: "192.0.2.53:53"}},
 		Fallback:          []NameServer{{Addr: "198.51.100.53:53"}},
 		FallbackLazyQuery: true,
-		SpeedCheck:        SpeedCheckConfig{Mode: []string{"tcp:443"}, Timeout: time.Second, Concurrency: 4},
+		SpeedCheck:        SpeedCheckConfig{Mode: []string{"tcp:443"}, Timeout: time.Second, Concurrency: 4, ResponseMode: ResponseModeFastestIP},
 	}
 }
 

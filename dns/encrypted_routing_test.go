@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -23,6 +24,7 @@ import (
 	"github.com/metacubex/http/httptest"
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/component/ca"
+	"github.com/metacubex/mihomo/component/dnsstats"
 	C "github.com/metacubex/mihomo/constant"
 	icontext "github.com/metacubex/mihomo/context"
 	"github.com/metacubex/mihomo/tunnel"
@@ -651,7 +653,8 @@ func TestDNSRuleRoutingEncryptedCancellationKeepsMultiplexedSibling(t *testing.T
 			t.Cleanup(r.Close)
 			firstGroup := &routingTestGroup{routingTestBase: &routingTestBase{name: "cancel-group", kind: C.Selector}, leaf: routingTestProxy(leaf)}
 			secondGroup := &routingTestGroup{routingTestBase: &routingTestBase{name: "survive-group", kind: C.Fallback}, leaf: routingTestProxy(leaf)}
-			ctx, cancelAll := context.WithTimeout(routingTestContext(firstGroup, routingTestOrigin()), 8*time.Second)
+			observations := dnsstats.New()
+			ctx, cancelAll := context.WithTimeout(dnsstats.WithManager(routingTestContext(firstGroup, routingTestOrigin()), observations), 8*time.Second)
 			defer cancelAll()
 			siblingCtx := icontext.WithDNSFixedOutbound(ctx, secondGroup)
 			if _, err := encryptedRoutingRawExchange(r, ctx, routingTestQuery("warmup.example", 61)); err != nil {
@@ -681,8 +684,8 @@ func TestDNSRuleRoutingEncryptedCancellationKeepsMultiplexedSibling(t *testing.T
 			cancelOne()
 			select {
 			case err := <-canceled:
-				if err == nil {
-					t.Fatal("canceled encrypted query unexpectedly succeeded")
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("canceled encrypted I/O did not retain its cause: %v", err)
 				}
 			case <-time.After(2 * time.Second):
 				t.Fatal("canceling one encrypted query did not release its caller")
@@ -701,6 +704,11 @@ func TestDNSRuleRoutingEncryptedCancellationKeepsMultiplexedSibling(t *testing.T
 			}
 			if seen := server.next(t); seen.connection != warmup.connection || leaf.count() != initialDials {
 				t.Fatal("canceling a stream unnecessarily replaced the shared encrypted connection")
+			}
+			stats := observations.Upstreams()
+			if len(stats.Items) != 1 || stats.Items[0].Attempts != 4 || stats.Items[0].Successes != 3 || stats.Items[0].Canceled != 1 || stats.Items[0].Errors != 0 ||
+				stats.Items[0].Outbound != leaf.Name() || stats.Items[0].OutboundType != "proxy" {
+				t.Fatalf("real canceled exchange or same leaf across groups miscounted: %+v", stats)
 			}
 		})
 	}

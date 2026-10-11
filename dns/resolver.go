@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/common/arc"
@@ -239,12 +240,14 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 	canRetry := func() bool {
 		return !cacheBackground(ctx) && !dnsQueryClosed(ctx) && (r.cacheControl == nil || r.cacheControl.active(ctx))
 	}
-	exchange := func(ctx context.Context) (result *D.Msg, err error) {
+	exchange := func(ctx context.Context, publish func(*dnsExchangeResult) bool) (result *D.Msg, err error) {
 		release, admissionErr := admitDNSNativeWork(ctx)
 		if admissionErr != nil {
 			return &D.Msg{MsgHdr: D.MsgHdr{Opcode: retryMax}}, admissionErr
 		}
-		defer release()
+		var released sync.Once
+		releaseNative := func() { released.Do(release) }
+		defer releaseNative()
 		// Shared work keeps aggregate scope, never its first caller's mutable event.
 		workContext := dnsstats.DetachQuery(ctx)
 		if !cacheBackground(ctx) {
@@ -252,8 +255,17 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 		}
 		ctx, cancel := context.WithTimeout(workContext, resolver.DefaultDNSTimeout)
 		defer cancel()
+		ctx, cancelSelection := context.WithCancelCause(ctx)
+		defer cancelSelection(nil)
 		ctx = withDNSAnswerLifetimes(ctx)
+		if r.speedChecker != nil {
+			ctx = withSpeedCheckDeadline(ctx, r.speedChecker.timeout)
+		}
 		cache := false
+		publisher := &dnsResponsePublisher{r: r, ctx: ctx, query: m, key: key,
+			publish: publish, release: releaseNative, cancel: cancelSelection}
+		defer publisher.Close()
+		ctx = withDNSEarlyResponse(ctx, publisher.offer)
 
 		defer func() {
 			if err != nil {
@@ -269,7 +281,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 			inheritDNSLocalAnswer(ctx, result, original)
 			if cache {
 				if r.cacheControl != nil {
-					r.cacheControl.Store(ctx, key, q, result)
+					r.cacheControl.Store(publisher.storeContext(ctx), key, q, result)
 				} else {
 					putMsgToCacheWithExpiry(r.cache, key, q, result, dnsAnswerExpires(ctx, result))
 				}
@@ -295,13 +307,13 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 		result, cache, err = r.exchangeBatch(ctx, main, m)
 		return
 	}
-	fn := func() (*dnsExchangeResult, error) {
+	fn := func(publish func(*dnsExchangeResult) bool) (*dnsExchangeResult, error) {
 		local := &dnsLocalAnswers{}
-		message, err := exchange(context.WithValue(ctx, dnsLocalAnswersKey{}, local))
+		message, err := exchange(context.WithValue(ctx, dnsLocalAnswersKey{}, local), publish)
 		return &dnsExchangeResult{Msg: message, local: local.has(message)}, err
 	}
 
-	ch := r.group.DoChan(flightKey, fn)
+	ch := r.group.DoChanEarly(flightKey, fn)
 
 	var result singleflight.Result[*dnsExchangeResult]
 
@@ -318,7 +330,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 					result := <-ch
 					ret, err, shared := result.Val, result.Err, result.Shared
 					if err != nil && !shared && ret.Opcode < retryMax && canRetry() { // retry
-						r.group.DoChan(flightKey, fn)
+						r.group.DoChanEarly(flightKey, fn)
 					}
 				}()
 			}
@@ -328,7 +340,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 
 	ret, err, shared := result.Val, result.Err, result.Shared
 	if err != nil && !shared && ret.Opcode < retryMax && canRetry() { // retry
-		r.group.DoChan(flightKey, fn)
+		r.group.DoChanEarly(flightKey, fn)
 	}
 
 	if err == nil {
@@ -342,6 +354,9 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 		}
 		if shared {
 			msg = msg.Copy()
+		}
+		if !ret.receivedAt.IsZero() {
+			msg = ageDNSAnswerAt(msg, ret.receivedAt, time.Now())
 		}
 		msg.Id = m.Id
 	}
@@ -415,8 +430,12 @@ func (r *Resolver) ipExchange(ctx context.Context, m *D.Msg) (msg *D.Msg, err er
 	}
 
 	var fallbackMsg <-chan *result
+	var fallbackGate *dnsEarlyResponseGate
 	if !r.fallbackLazyQuery {
-		fallbackMsg = r.asyncExchange(ctx, fallback, m)
+		var fallbackContext context.Context
+		fallbackContext, fallbackGate = newDNSEarlyResponseGate(ctx)
+		defer fallbackGate.stop()
+		fallbackMsg = r.asyncExchange(fallbackContext, fallback, m)
 	}
 	res := <-msgCh
 	if res.Error == nil && (filterBeforeSelection || r.acceptMainResponse(res.Msg)) {
@@ -428,6 +447,8 @@ func (r *Resolver) ipExchange(ctx context.Context, m *D.Msg) (msg *D.Msg, err er
 
 	if fallbackMsg == nil {
 		fallbackMsg = r.asyncExchange(ctx, fallback, m)
+	} else if early := fallbackGate.activate(); early != nil {
+		return early, nil
 	}
 	res = <-fallbackMsg
 	msg, err = res.Msg, res.Error

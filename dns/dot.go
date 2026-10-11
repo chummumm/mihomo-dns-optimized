@@ -3,14 +3,14 @@ package dns
 import (
 	"context"
 	"fmt"
-	"github.com/metacubex/mihomo/component/resolver"
 	"net"
 	"runtime"
 	"sync"
-	"time"
 
 	"github.com/metacubex/mihomo/common/deque"
+	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/component/ca"
+	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 
 	"github.com/metacubex/tls"
@@ -43,105 +43,82 @@ func (t *dnsOverTLS) ExchangeContext(ctx context.Context, m *D.Msg) (response *D
 	if answer, err, handled := exchangeNativeTransport(ctx, m, t); handled {
 		return answer, err
 	}
-	attempt := observeDNSUpstream(ctx, t.Address())
+	attempt := observeDNSUpstream(ctx, t.Address(), t.dialer)
 	defer func() { finishDNSUpstream(attempt, response, err) }()
-	// miekg/dns ExchangeContext doesn't respond to context cancel.
-	// this is a workaround
-	type result struct {
-		msg *D.Msg
-		err error
-	}
-	ch := make(chan result, 1)
-
-	go func() {
-		var msg *D.Msg
-		var err error
-		defer func() { ch <- result{msg, err} }()
-		for { // retry loop; only retry when reusing old conn
-			err = ctx.Err() // check context first
+	for { // retry loop; only retry when reusing old conn
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// A reused socket may already have failed before cancellation.
+			// If its retry has not started, keep that actual failure.
 			if err != nil {
-				return
+				return response, err
 			}
-
-			var conn net.Conn
-			isOldConn := true
-
-			if !t.disableReuse {
-				t.access.Lock()
-				if t.connections.Len() > 0 {
-					conn = t.connections.PopBack()
-				}
-				t.access.Unlock()
-			}
-
-			if conn == nil {
-				conn, err = t.dialContext(ctx)
-				if err != nil {
-					return
-				}
-				isOldConn = false
-			}
-
-			dClient := &D.Client{
-				UDPSize: 4096,
-				Timeout: 5 * time.Second,
-			}
-			dConn := &D.Conn{
-				Conn:    conn,
-				UDPSize: dClient.UDPSize,
-			}
-
-			stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
-			msg, _, err = dClient.ExchangeWithConn(m, dConn)
-			stopped := stop()
-			if !stopped || ctx.Err() != nil {
-				_ = conn.Close()
-				err = ctx.Err()
-				if err == nil {
-					err = context.Canceled
-				}
-				return
-			}
-			if err != nil {
-				_ = conn.Close()
-				conn = nil
-				if isOldConn { // retry
-					continue
-				}
-				return
-			}
-
-			if !t.disableReuse {
-				t.access.Lock()
-				if t.native.isClosed() || ctx.Err() != nil {
-					t.access.Unlock()
-					_ = conn.Close()
-					return
-				}
-				if t.connections.Len() >= maxOldDotConns {
-					oldConn := t.connections.PopFront()
-					go oldConn.Close() // close in a new goroutine, not blocking the current task
-				}
-				t.connections.PushBack(conn)
-				t.access.Unlock()
-			} else {
-				_ = conn.Close()
-			}
-			return
+			return nil, ctxErr
 		}
-	}()
 
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case ret := <-ch:
-		return ret.msg, ret.err
+		var conn net.Conn
+		isOldConn := true
+		if !t.disableReuse {
+			t.access.Lock()
+			if t.connections.Len() > 0 {
+				conn = t.connections.PopBack()
+			}
+			t.access.Unlock()
+		}
+		if conn == nil {
+			conn, err = t.dialContext(ctx)
+			if err != nil {
+				return nil, err
+			}
+			isOldConn = false
+		}
+
+		response, err = exchangeDNSWithConn(ctx, m, conn)
+		if err != nil {
+			abortDNSConn(conn)
+			if isOldConn && ctx.Err() == nil {
+				continue
+			}
+			return response, err
+		}
+		// Complete before cleanup or pool-lock contention. A late cancellation
+		// can retire the socket but cannot replace this completed DNS response.
+		finishDNSUpstream(attempt, response, nil)
+		if !t.disableReuse {
+			t.access.Lock()
+			if t.native.isClosed() || ctx.Err() != nil {
+				t.access.Unlock()
+				abortDNSConn(conn)
+				return response, nil
+			}
+			if t.connections.Len() >= maxOldDotConns {
+				oldConn := t.connections.PopFront()
+				go oldConn.Close() // close in a new goroutine, not blocking the current task
+			}
+			t.connections.PushBack(conn)
+			t.access.Unlock()
+		} else {
+			if t.native.isClosed() || ctx.Err() != nil {
+				abortDNSConn(conn)
+			} else {
+				// Normal non-reuse keeps a graceful TLS close. If cancellation
+				// arrives after Exchange stopped its I/O guard, interrupt this
+				// cleanup too, without changing the completed response.
+				guard := N.NewDNSCancelGuard(ctx, func() { abortDNSConn(conn) })
+				_ = conn.Close()
+				guard.Stop()
+			}
+		}
+		return response, nil
 	}
 }
 
 func (t *dnsOverTLS) dialContext(ctx context.Context) (net.Conn, error) {
 	conn, err := t.dialer.DialContext(ctx, "tcp", net.JoinHostPort(t.host, t.port))
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		_ = conn.Close()
 		return nil, err
 	}
 

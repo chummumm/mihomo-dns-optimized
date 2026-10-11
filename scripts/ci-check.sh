@@ -12,7 +12,7 @@ case "${1:-test}" in
     python3 scripts/test-upstream-sync.py
     python3 scripts/test-release-build.py
     CGO_ENABLED=0 go test -tags with_gvisor -count=1 -timeout=5m \
-      ./adapter ./common/arc/... ./common/lru/... ./component/trie/... ./component/fakeip/... ./component/dnsmessage/... ./component/dnsstats/... ./component/process/... ./component/resolver/... ./component/updater/... ./context/... ./dns/... ./listener/sing_tun/... ./transport/socks4/... ./transport/socks5/... \
+      ./adapter ./common/arc/... ./common/lru/... ./common/net/... ./common/singleflight/... ./component/trie/... ./component/fakeip/... ./component/dnsmessage/... ./component/dnsstats/... ./component/process/... ./component/resolver/... ./component/updater/... ./context/... ./dns/... ./listener/sing_tun/... ./transport/socks4/... ./transport/socks5/... \
       ./tunnel/... ./rules/logic/... ./rules/provider/... ./config/... \
       ./hub/route/... ./hub/executor/...
     CGO_ENABLED=0 go test -tags with_gvisor ./dns -run '^$' \
@@ -22,13 +22,14 @@ case "${1:-test}" in
     CGO_ENABLED=0 go test -tags with_gvisor -count=1 -timeout=5m ./adapter/outbound \
       -run 'DNSObservability'
     CGO_ENABLED=1 go test -race -tags with_gvisor -count=1 -timeout=5m ./component/dnsstats/...
+    CGO_ENABLED=1 go test -race -tags with_gvisor -count=1 -timeout=5m ./common/net/... ./common/singleflight/...
     CGO_ENABLED=1 go test -race -tags with_gvisor -count=1 -timeout=5m ./adapter/outbound \
       -run 'DNSObservability'
     CGO_ENABLED=1 go test -race -tags with_gvisor -count=1 -timeout=5m \
       ./adapter ./common/arc/... ./common/lru/... ./component/trie/... ./component/dnsmessage/... ./component/process/... ./component/resolver/... ./component/updater/... ./context/... ./dns/... \
       ./listener/sing_tun/... ./tunnel/... ./rules/logic/... ./rules/provider/... \
       ./config/... ./hub/route/... ./hub/executor/... \
-      -run 'DNSRouting|DNSRuleRouting|DNSProxy|DNSDrop|DNSDirectProbe|DNSOptimization|DNSObservability|DNSMarker|SpeedCheck|DualStack|CacheControl|ARCDelete|DNSPerf|DNSCandidate|DNSCachedTTL|DNSAnswerLifetime|DNSResolverDoesNotRestartTTL|DNSFallback|DNSIndependentDirectPool|CoreUpdater|ProcessLookup|RedirHostFilter|LRUClone'
+      -run 'DNSRouting|DNSRuleRouting|DNSProxy|DNSDrop|DNSDirectProbe|DNSOptimization|DNSObservability|DNSClient|DNSDoT|DNSDoHLateCancellation|DNSQUICCancellation|DNSObservedOutbound|DNSMarker|DNSResponseMode|SpeedCheck|DualStack|CacheControl|ARCDelete|DNSPerf|DNSCandidate|DNSCachedTTL|DNSAnswerLifetime|DNSResolverDoesNotRestartTTL|DNSFallback|DNSIndependentDirectPool|CoreUpdater|ProcessLookup|RedirHostFilter|LRUClone'
     # A single green rerun cannot validate detached HTTP/2 dial shutdown.
     # Repeat the lifecycle barriers with different Go scheduler parallelism.
     for procs in 1 4; do

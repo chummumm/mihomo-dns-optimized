@@ -3,13 +3,16 @@ package dns
 import (
 	"context"
 	"errors"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/metacubex/mihomo/component/dnsstats"
 	"github.com/metacubex/mihomo/component/resolver"
 	icontext "github.com/metacubex/mihomo/context"
+	"github.com/metacubex/mihomo/tunnel"
 
 	D "github.com/miekg/dns"
 )
@@ -79,7 +82,7 @@ func finishDNSObservation(observation *dnsstats.Query, record dnsstats.Record, c
 		case errors.Is(err, context.DeadlineExceeded):
 			record.Outcome = dnsstats.Error.String()
 			record.Error = "timeout"
-		case errors.Is(err, context.Canceled):
+		case errors.Is(err, context.Canceled), errors.Is(err, tunnel.ErrDNSNativeQueryClosed):
 			record.Outcome = dnsstats.Error.String()
 			record.Error = "canceled"
 		default:
@@ -169,18 +172,29 @@ func summarizeDNSAnswers(records []D.RR) ([]dnsstats.Answer, bool) {
 
 // Measure concrete protocol-client exchanges below all DNS answer/candidate
 // caches. Protocol recovery retries remain one resolver exchange.
-func observeDNSUpstream(ctx context.Context, address string) *dnsstats.Attempt {
-	return dnsstats.StartUpstream(ctx, address)
+func observeDNSUpstream(ctx context.Context, address string, dialers ...*dnsDialer) *dnsstats.Attempt {
+	var outbound dnsstats.Outbound
+	// Infrastructure lookups may carry their caller's route in context while
+	// deliberately using another resolver. Never attribute that inherited exit.
+	if !icontext.DNSBootstrap(ctx) {
+		if len(dialers) != 0 {
+			outbound = dialers[0].ObservabilityOutbound()
+		} else if route := queryRoute(ctx); route != nil && route.err == nil {
+			outbound = route.plan.ObservabilityOutbound()
+		}
+	}
+	return dnsstats.StartUpstream(ctx, address, outbound)
 }
 
 func finishDNSUpstream(attempt *dnsstats.Attempt, message *D.Msg, err error) {
 	if attempt == nil {
 		return
 	}
+	var timeout net.Error
 	switch {
-	case errors.Is(err, context.Canceled):
+	case errors.Is(err, context.Canceled), errors.Is(err, tunnel.ErrDNSNativeQueryClosed):
 		attempt.Complete(dnsstats.UpstreamCanceled)
-	case errors.Is(err, context.DeadlineExceeded):
+	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()):
 		attempt.Complete(dnsstats.UpstreamTimeout)
 	case err != nil || message == nil:
 		attempt.Complete(dnsstats.UpstreamError)
@@ -198,7 +212,8 @@ func finishDNSUpstream(attempt *dnsstats.Attempt, message *D.Msg, err error) {
 // answer. No DNS message field, matcher, or first-client event is changed.
 type dnsExchangeResult struct {
 	*D.Msg
-	local bool
+	local      bool
+	receivedAt time.Time
 }
 
 type dnsLocalAnswersKey struct{}

@@ -2,10 +2,12 @@ package dns
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
 	"strings"
 	"sync/atomic"
 
+	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/component/dnsmessage"
 	"github.com/metacubex/mihomo/component/dnsstats"
 	"github.com/metacubex/mihomo/component/resolver"
@@ -204,6 +206,9 @@ func (c *client) exchangeRouted(ctx context.Context, message *D.Msg, route *dnsQ
 	exchange := func() (*D.Msg, error) {
 		response, err := route.plan.Exchange(ctx, wire, destination)
 		if err != nil {
+			if route.closed.Load() && N.DNSClosedIO(err) {
+				return nil, fmt.Errorf("%w: %w", tunnel.ErrDNSNativeQueryClosed, err)
+			}
 			return nil, err
 		}
 		result := new(D.Msg)

@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/metacubex/mihomo/common/contextutils"
+	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/pool"
 	"github.com/metacubex/mihomo/component/ca"
 	"github.com/metacubex/mihomo/component/dnsmessage"
@@ -97,7 +97,7 @@ func (doq *dnsOverQUIC) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.M
 	if answer, err, handled := exchangeNativeTransport(ctx, m, doq); handled {
 		return answer, err
 	}
-	attempt := observeDNSUpstream(ctx, "quic://"+doq.Address())
+	attempt := observeDNSUpstream(ctx, "quic://"+doq.Address(), doq.dialer)
 	defer func() { finishDNSUpstream(attempt, msg, err) }()
 	// When sending queries over a QUIC connection, the DNS Message ID MUST be
 	// set to zero.
@@ -196,15 +196,15 @@ func (doq *dnsOverQUIC) exchangeQUIC(ctx context.Context, msg *D.Msg) (resp *D.M
 	// sends extra data or leaves the response stream open after its one frame.
 	defer stream.CancelRead(0)
 
-	stop := contextutils.AfterFunc(ctx, func() {
+	guard := N.NewDNSCancelGuard(ctx, func() {
 		stream.CancelRead(0)
 		stream.CancelWrite(0)
 	})
-	defer stop()
+	defer guard.Stop()
 
 	_, err = stream.Write(buf[:2+len(b)])
 	if err != nil {
-		return nil, fmt.Errorf("failed to write to a QUIC stream: %w", err)
+		return nil, fmt.Errorf("failed to write to a QUIC stream: %w", dnsQUICCancelError(guard, err))
 	}
 
 	// The client MUST send the DNS query over the selected stream, and MUST
@@ -217,7 +217,7 @@ func (doq *dnsOverQUIC) exchangeQUIC(ctx context.Context, msg *D.Msg) (resp *D.M
 	var respLen uint16
 	err = binary.Read(stream, binary.BigEndian, &respLen)
 	if err != nil {
-		return nil, fmt.Errorf("reading response length from %s: %w", doq.Address(), err)
+		return nil, fmt.Errorf("reading response length from %s: %w", doq.Address(), dnsQUICCancelError(guard, err))
 	}
 	if respLen == 0 {
 		return nil, fmt.Errorf("received empty response from %s", doq.Address())
@@ -228,7 +228,7 @@ func (doq *dnsOverQUIC) exchangeQUIC(ctx context.Context, msg *D.Msg) (resp *D.M
 
 	_, err = io.ReadFull(stream, buf[:respLen])
 	if err != nil {
-		return nil, fmt.Errorf("reading response from %s: %w", doq.Address(), err)
+		return nil, fmt.Errorf("reading response from %s: %w", doq.Address(), dnsQUICCancelError(guard, err))
 	}
 
 	if doq.native.bound {
@@ -245,6 +245,12 @@ func (doq *dnsOverQUIC) exchangeQUIC(ctx context.Context, msg *D.Msg) (resp *D.M
 	}
 
 	return resp, nil
+}
+
+func dnsQUICCancelError(guard *N.DNSCancelGuard, err error) error {
+	var streamErr *quic.StreamError
+	interrupted := errors.As(err, &streamErr) && !streamErr.Remote && streamErr.ErrorCode == 0
+	return guard.Error(err, interrupted)
 }
 
 // shouldRetry checks what error we received and decides whether it is required
@@ -331,7 +337,7 @@ func (doq *dnsOverQUIC) openStream(ctx context.Context, conn *quic.Conn) (*quic.
 		return stream, nil
 	}
 	if ctx.Err() != nil {
-		return nil, ctx.Err()
+		return nil, err
 	}
 
 	// We can get here if the old QUIC connection is not valid anymore.  We
