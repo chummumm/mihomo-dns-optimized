@@ -10,13 +10,13 @@
 
 ## 解决什么问题
 
-原生 DNS 收到查询后，用 Question 中的域名（QNAME）匹配已有 `rules` / `rule-providers`，选出实际出站，再选择 DNS 上游：
+原生 DNS 需要真实解析时，用 Question 中的域名（QNAME）匹配已有 `rules` / `rule-providers`，选出实际出站，再选择 DNS 上游。hosts 与 FakeIP 的本地回答优先完成，不进入这一步：
 
 | 实际选中的出站 | 内置 DNS 使用的上游 |
 | --- | --- |
 | DIRECT / Compatible | `direct-nameserver`；通常填写国内可达的解析器 |
 | 代理节点 | `nameserver`，以及按原设置适用的 `fallback` |
-| REJECT / REJECT-DROP | 自动查询在读取缓存前拒绝 / 静默丢弃；显式传输例外见下文 |
+| REJECT / REJECT-DROP | 进入真实解析的自动查询在读取缓存前拒绝 / 静默丢弃；显式传输例外见下文 |
 
 判断依据是**策略组最终选择的实际出口类型**，组名和节点名不参与这个判断。组切到 DIRECT 就走直连池，选择代理节点就走代理池。`direct-nameserver` 为空时，保留原 `nameserver` / `fallback` 行为。
 
@@ -35,11 +35,11 @@ DNS 分流通过内置解析器提供，普通代理连接保持原转发行为�
 
 UDP、TCP 和 DoT 上游在实际出口固定时共享连接，多个查询通过独立请求 ID 分发，不再每次普通查询都重新建连。单个查询超时或取消只取消自身；ID 在同一连接整个生命周期内不重复使用，旧回复不会串到后续查询。共享仍按出口、路由代次、接口和 mark 隔离；动态或无法冻结的出口保留独占方式。DoH/HTTP3/DoQ 继续使用原有多路复用。
 
-开启 `dns-rule-routing` 时，DNS 规则执行使用派生视图和 classical 纯域名连续段索引，仍按原业务规则顺序判断 SRC / PROCESS / IN。成功的自动查询应答可以在同一来源、进程和入站作用域内跨临时源端口复用；每个请求仍先匹配当前规则，在途查询保持独立取消语义。DIRECT 探测使用共享有界任务池、同出口目标 IP 合并及短期结果复用，代理结果不进行本地探测。
+开启 `dns-rule-routing` 时，真实 DNS 解析的规则执行使用派生视图和 classical 纯域名连续段索引，仍按原业务规则顺序判断 SRC / PROCESS / IN。成功的自动查询应答可以在同一来源、进程和入站作用域内跨临时源端口复用；每个进入真实解析的请求仍先匹配当前规则，在途查询保持独立取消语义。DIRECT 探测使用共享有界任务池、同出口目标 IP 合并及短期结果复用，代理结果不进行本地探测。
 
 新增的 DNS 面板数据由本机控制器提供，查询记录、趋势和上游统计只保存在进程内存中，不写数据库或日志文件，也不发送遥测。无需维护第二份分流规则；观测不会改变 DNS 回答和出口选择。优化范围、缓存安全边界及测试方式见 [DNS 性能说明](docs/dns-performance.md)。
 
-正式版本采用 **`mihomo-optimized-vX.Y.Z`**，当前为 `mihomo-optimized-v1.0.2`。tag、发行标题、`version.txt` 和运行内核版本一致；`PROJECT_VERSION` 记录独立项目版本，上游 mihomo 的版本与提交另存于 `UPSTREAM_VERSION` / `UPSTREAM_COMMIT`。源码哈希保留在 BUILDINFO 中。**旧版 `v1.19.32-optimized-N` 及更早内核首次切换到新系列，需要手动安装一次**；新系列随后可通过 YAML 启用内核后台检查和更新，详见[更新说明](docs/releases.md#内核自动更新)。
+正式版本采用 **`mihomo-optimized-vX.Y.Z`**，当前为 `mihomo-optimized-v1.0.3`。tag、发行标题、`version.txt` 和运行内核版本一致；`PROJECT_VERSION` 记录独立项目版本，上游 mihomo 的版本与提交另存于 `UPSTREAM_VERSION` / `UPSTREAM_COMMIT`。源码哈希保留在 BUILDINFO 中。**旧版 `v1.19.32-optimized-N` 及更早内核首次切换到新系列，需要手动安装一次**；新系列随后可通过 YAML 启用内核后台检查和更新，详见[更新说明](docs/releases.md#内核自动更新)。
 
 ## DNS 状态与原版面板
 
@@ -204,6 +204,30 @@ rules:
 
 `enhanced-mode: redir-host` 返回真实 IP，并保留 IP 到历史查询域名的映射，供只有 IP 的连接辅助匹配。若不需要这层反查，可改为 `enhanced-mode: normal`；正常 DNS 解析、正向回答缓存和本项目的原生优化仍保留。透明代理若拿不到域名，需要依赖嗅探或其他规则；模式区别与可选 TLS / HTTP 全端口嗅探示例见[使用说明](docs/dns-proxy.md#enhanced-mode-与域名嗅探)。
 
+### FakeIP 与 DNS 分流同时使用
+
+从内核 `mihomo-optimized-v1.0.3` 起，可同时开启 FakeIP 和 DNS 分流。将下面字段并入自己的配置，保留已有节点、规则与其他 DNS 设置：
+
+```yaml
+dns-rule-routing: true
+dns:
+  enable: true
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter-mode: blacklist
+  fake-ip-filter:
+    - '+.lan'
+    - time.example.org
+  fake-ip-ttl: 1
+  default-nameserver: [223.5.5.5, 119.29.29.29]
+  direct-nameserver: [223.5.5.5, 119.29.29.29]
+  nameserver: [https://cloudflare-dns.com/dns-query]
+```
+
+处理顺序沿用 **hosts → FakeIP → 真实 DNS 解析**。应该返回虚拟地址的查询直接合成，使用 `fake-ip-ttl`，不会为了 DNS 分流先查询真实 IP，也不会参与真实答案缓存、IP 测速或预取。`fake-ip-filter` 要求真实解析的域名，以及 TXT / MX 等未由 FakeIP 本地处理的记录，继续按已有规则选 DNS 上游和出口。
+
+FakeIP 的 IPv6 与 HTTPS / SVCB 处理也保持原行为：应使用虚拟地址的 AAAA 查询在 IPv6 未启用或没有 FakeIPv6 地址池时返回空答案；未被过滤的 HTTPS / SVCB 返回空答案。FakeIP 已合成的 DNS 回答不执行 DNS 阶段的 REJECT，后续访问虚拟地址时仍恢复域名并按业务规则拒绝连接；要求真实解析的查询仍可在 DNS 阶段拒绝。具体组合见[FakeIP 优先级说明](docs/dns-proxy.md#fakeip-与真实查询的优先级)。
+
 ## 只有直连路径才做 IP 测速
 
 这里优选的是 **DNS 回答中的目标 IP**，不是代理节点速度，也不是 DNS 服务器所在地。
@@ -289,18 +313,16 @@ dns:
 
 ## 旧配置迁移与停用范围
 
-下面只列本项目功能对应的旧字段和行为。**永久忽略、条件停用和校验拒绝是不同处理**，不应把它们一并删除或当成全局失效：
+下面只列本项目功能对应的旧字段和行为。**永久忽略和条件停用是不同处理**，不应把它们一并删除或当成全局失效：
 
 | 旧字段或设置 | 当前处理 | 迁移方式 / 恢复条件 |
 | --- | --- | --- |
 | 顶层 `external-ui`、`external-ui-url`、`external-ui-name` | 始终忽略；关闭自动更新也不会恢复旧目录或来源 | 面板固定使用工作目录的 `ui` 和本仓库 `clash-dashboard-dist`；工作目录由 `-d` 指定 |
 | 命令行 `-ext-ui`，含其旧环境变量 `CLASH_OVERRIDE_EXTERNAL_UI_DIR` | 接受旧入口但忽略路径值 | 改用 `-d` 选择内核工作目录，面板始终放在其中的 `ui` |
 | 旧浏览器保存的面板 / 内核自动更新偏好 | 自面板 `0.4.0` 起不再生效，更新控件与浏览器更新计时器已移除 | 将策略迁移为上面的四个 YAML 顶层字段；在 YAML 编辑器“保存并重新加载”，或手工修改文件后完整重载 |
-| 顶层 `dns-proxy-port` | **非 `0` 会被校验拒绝**；`0` 仅兼容旧配置，不创建监听器 | 删除旧字段；使用 `dns.listen` 或显式 TUN `dns-hijack` 接入内置 DNS |
 | `dns.nameserver-policy` | 仅在 `dns-rule-routing: true` 时停用 | 改用原业务 `rules`；设 `dns-rule-routing: false` 并完整重载后，原 DNS 策略恢复 |
 | `dns.direct-nameserver-follow-policy` | 仅在 `dns-rule-routing: true` 时停用 | 同上；未开启本项目路由时保留原行为 |
 | `dns.fallback-filter.domain` / `dns.fallback-filter.geosite` | 仅在 `dns-rule-routing: true` 时停用对应域名筛选 | 同上；`fallback` 及仍适用的 IP 过滤保留 |
-| `dns.enhanced-mode: fake-ip` | 仅在 `dns.enable: true` 与 `dns-rule-routing: true` 同时开启时冲突并报错 | 自动 QNAME 分流使用 `normal` 或 `redir-host`；关闭 `dns-rule-routing` 后可按原行为使用 FakeIP |
 
 `default-nameserver`、`proxy-server-nameserver`、`proxy-server-nameserver-policy`、hosts、缓存以及可适用的 fallback IP 过滤没有被这张表中的域名策略停用一并移除。`respect-rules` 也没有永久失效：自动 QNAME 计划覆盖其范围内的按解析器地址二次选路，其他原有模式保持原行为。
 
@@ -308,7 +330,7 @@ dns:
 
 自动 QNAME 选路只在 **开关开启、Rule 模式、入站没有固定 `proxy:`** 时接管；固定出站和 Global / Direct 保留原优先级。入站 `rule:` 仍作为子规则入口，已经选定业务叶子的内部解析继承该叶子，bootstrap 独立执行。
 
-- **使用真实 DNS 回答。** 内置 DNS 可使用 `normal` 或 `redir-host`；`dns.enable` 和 `dns-rule-routing` 同时开启时不能使用 `fake-ip`，否则校验报错。不增加 listener 类型或专用 DNS 代理端口。
+- **FakeIP 与真实解析各自生效。** 内置 DNS 可使用 `normal`、`redir-host` 或 `fake-ip`。hosts 和 FakeIP 本地回答优先；需要真实查询时才进入 DNS 分流。监听仍使用 `dns.listen` 或显式 TUN DNS 劫持。
 - **规则顺序不变。** IN / SRC / PROCESS、端口和网络属性仍可参与；QNAME 用于域名规则。网站目标 IP / GEOIP / ASN 尚未知，不拿解析器 IP 代替，也不为选路递归解析同一个名字。
 - **按 QNAME 分流的入口是内置 DNS。** 内置 DNS 已知 QNAME，配置的 UDP / TCP 任意端口及 DoH / DoT / DoQ / H3 均可自动选池和选出口。普通代理入站不自动接管明文 DNS，也不解密客户端 DoH；显式 TUN DNS 劫持仍可将请求送入内置 DNS。
 - **显式 DNS 传输仍是例外。** `#Group` / `#DIRECT` / `#interface` 等保留旧行为；先选池，再判断该池的例外。混有显式上游时，显式分支可独立回答；未选池不会削弱自动分支的拒绝动作。

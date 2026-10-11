@@ -93,6 +93,7 @@ type routingTestOutbound struct {
 	questions  chan string
 	gate       <-chan struct{}
 	truncate   bool
+	answer     func(*D.Msg) *D.Msg
 }
 
 func newRoutingTestOutbound(name string) *routingTestOutbound {
@@ -124,7 +125,7 @@ func (a *routingTestOutbound) DialContext(ctx context.Context, md *C.Metadata) (
 		}
 		a.questions <- query.Question[0].Name
 		a.queryCount.Add(1)
-		_ = conn.WriteMsg(routingTestAnswer(query, false))
+		_ = conn.WriteMsg(a.reply(query, false))
 	}()
 	return &routingTestTCPConn{ExtendedConn: N.NewExtendedConn(client), routingTestConnection: routingTestConnection{chain: C.Chain{a.Name()}}}, nil
 }
@@ -143,6 +144,13 @@ func routingTestAnswer(query *D.Msg, truncated bool) *D.Msg {
 		answer.Answer = []D.RR{&D.A{Hdr: D.RR_Header{Name: query.Question[0].Name, Rrtype: D.TypeA, Class: D.ClassINET, Ttl: 60}, A: net.IPv4(192, 0, 2, 99)}}
 	}
 	return answer
+}
+
+func (a *routingTestOutbound) reply(query *D.Msg, truncated bool) *D.Msg {
+	if a.answer != nil && !truncated {
+		return a.answer(query)
+	}
+	return routingTestAnswer(query, truncated)
 }
 
 type routingTestPacket struct {
@@ -173,7 +181,7 @@ func (c *routingTestPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	}
 	c.outbound.queryCount.Add(1)
 	c.outbound.questions <- query.Question[0].Name
-	wire, err := routingTestAnswer(query, c.outbound.truncate).Pack()
+	wire, err := c.outbound.reply(query, c.outbound.truncate).Pack()
 	if err != nil {
 		return 0, err
 	}

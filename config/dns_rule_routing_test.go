@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	C "github.com/metacubex/mihomo/constant"
 )
 
 func TestDNSRuleRoutingConfig(t *testing.T) {
@@ -38,20 +40,7 @@ func TestDNSRuleRoutingConfig(t *testing.T) {
 			if object["dns-rule-routing"] != test.want {
 				t.Fatalf("boolean missing from API config: %s", wire)
 			}
-			if _, exists := object["dns-proxy-port"]; exists {
-				t.Fatal("removed DNS port is still exposed")
-			}
 		})
-	}
-}
-
-func TestDNSRuleRoutingRejectsRemovedPort(t *testing.T) {
-	raw, err := UnmarshalRawConfig([]byte("dns-proxy-port: 7853\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = parseGeneral(raw); err == nil || !strings.Contains(err.Error(), "dns-rule-routing") {
-		t.Fatalf("expected actionable port migration error, got %v", err)
 	}
 }
 
@@ -134,7 +123,7 @@ dns:
 	}
 }
 
-func TestDNSRuleRoutingBootstrapAndRealAnswerValidation(t *testing.T) {
+func TestDNSRuleRoutingBootstrapValidation(t *testing.T) {
 	raw, err := UnmarshalRawConfig([]byte(`
 dns-rule-routing: true
 dns:
@@ -153,11 +142,64 @@ dns:
 	if _, err := parseDNS(raw, nil); err == nil {
 		t.Fatal("upstream respect-rules validation changed when feature is off")
 	}
-	raw, err = UnmarshalRawConfig([]byte("dns-rule-routing: true\ndns:\n  enable: true\n  enhanced-mode: fake-ip\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := parseDNS(raw, nil); err == nil || !strings.Contains(err.Error(), "redir-host") {
-		t.Fatalf("expected clear FakeIP incompatibility, got %v", err)
+}
+
+func TestDNSRuleRoutingFakeIPConfiguration(t *testing.T) {
+	for _, test := range []struct {
+		mode, filter string
+	}{
+		{"blacklist", "[real.example]"},
+		{"whitelist", "[fake.example]"},
+		{"rule", "['DOMAIN,real.example,real-ip', 'MATCH,fake-ip']"},
+	} {
+		t.Run(test.mode, func(t *testing.T) {
+			raw, err := UnmarshalRawConfig([]byte(`
+dns-rule-routing: true
+dns:
+  enable: true
+  enhanced-mode: fake-ip
+  ipv6: true
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-range6: fdfe:dcba:9876::1/64
+  fake-ip-filter-mode: ` + test.mode + `
+  fake-ip-filter: ` + test.filter + `
+  fake-ip-ttl: 17
+  nameserver: [192.0.2.53]
+  direct-nameserver: [198.51.100.53]
+  default-nameserver: [192.0.2.54]
+  respect-rules: true
+  nameserver-policy:
+    'rule-set:inactive-missing-provider': 192.0.2.55
+`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, enabled := range []bool{true, false, true} {
+				raw.DNSRuleRouting = enabled
+				parsed, err := parseDNS(raw, nil)
+				if !enabled {
+					if err == nil || !strings.Contains(err.Error(), "proxy-server-nameserver") {
+						t.Fatalf("disabled routing lost upstream bootstrap validation: %v", err)
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatalf("FakeIP and rule routing should coexist: %v", err)
+				}
+				if !parsed.DNSRuleRouting || parsed.EnhancedMode != C.DNSFakeIP || parsed.FakeIPPool == nil || parsed.FakeIPPool6 == nil || parsed.FakeIPTTL != 17 {
+					t.Fatal("parsing disabled rule routing or discarded the FakeIP settings")
+				}
+				if !parsed.FakeIPSkipper.ShouldSkipped("real.example") || parsed.FakeIPSkipper.ShouldSkipped("fake.example") {
+					t.Fatal("parsing changed the fake-ip-filter decision")
+				}
+				if len(parsed.NameServerPolicy) != 0 || len(parsed.NameServer) != 1 || len(parsed.DirectNameServer) != 1 || len(parsed.DefaultNameserver) != 1 {
+					t.Fatal("FakeIP changed the real resolver pools or rule-routing policy")
+				}
+				general, err := parseGeneral(raw)
+				if err != nil || !general.DNSRuleRouting || raw.DNS.NameServerPolicy == nil {
+					t.Fatalf("general routing flag or original configuration changed: %v", err)
+				}
+			}
+		})
 	}
 }

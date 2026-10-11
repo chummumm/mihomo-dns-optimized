@@ -2,7 +2,7 @@
 
 ## 目标和配置边界
 
-顶层 `dns-rule-routing` 默认关闭，开启后复用已有业务 `rules` / `rule-providers`。内置 DNS 首次收到业务查询时取得一次 QNAME 路由计划，以实际叶子选择 `direct-nameserver` 或 `nameserver`。原生自动上游包括配置的 UDP / TCP 任意端口、DoT、DoH（HTTP/2 / HTTP/3）和 DoQ；普通代理入站不再自动识别或接管目标 53 的 DNS。无需 SmartDNS、独立 DNS 域名策略表、专用监听类型或 `dns-proxy-port`。
+顶层 `dns-rule-routing` 默认关闭，开启后复用已有业务 `rules` / `rule-providers`。内置 DNS 需要真实解析时取得一次 QNAME 路由计划，以实际叶子选择 `direct-nameserver` 或 `nameserver`；hosts 与 FakeIP 先按原有顺序处理。原生自动上游包括配置的 UDP / TCP 任意端口、DoT、DoH（HTTP/2 / HTTP/3）和 DoQ；普通代理入站不再自动识别或接管目标 53 的 DNS。无需 SmartDNS、独立 DNS 域名策略表或专用监听类型。
 
 用户配置和示例见 [使用说明](dns-proxy.md)、[原生 DNS 示例](dns-proxy.example.yaml)。本功能只提供文档描述的选路、IP 优选和缓存控制，不声称完整实现 SmartDNS 的配置、插件或所有行为。
 
@@ -11,6 +11,7 @@
 | 场景 | 行为 |
 | --- | --- |
 | 开关关闭 | 原版 DNS 与普通转发行为 |
+| hosts / FakeIP 本地回答 | 优先返回，不创建真实 DNS 路由计划；FakeIP 过滤后和其他未本地处理的查询继续进入真实解析 |
 | Global / Direct 模式 | 不创建新增 QNAME 计划；原 DNSDialer / respect-rules 行为保留 |
 | 普通代理入站，包括固定 `proxy:` | 仍按普通连接规则或固定出站转发，不检查载荷中的 DNS Question |
 | 内置解析来源带 SpecialProxy | 新增选池旁路，保留旧固定出站处理 |
@@ -34,7 +35,7 @@ SRC-IP 是入口实际取得的来源。客户端直接访问 DNS 监听或入�
 
 ### 内置 DNS
 
-在缓存读取和 singleflight 合并之前创建计划，解开策略组得到实际叶子。计划及组级 UDP 能力冻结于本次逻辑请求。
+在 hosts / FakeIP 未直接回答时进入真实 resolver，在真实答案缓存读取和 singleflight 合并之前创建计划，解开策略组得到实际叶子。计划及组级 UDP 能力冻结于本次逻辑请求。
 
 | 实际叶子 | 选择的客户端集合 |
 | --- | --- |
@@ -61,7 +62,9 @@ SRC-IP 是入口实际取得的来源。客户端直接访问 DNS 监听或入�
 
 保留 nameserver、direct-nameserver、实际 main 路径的 fallback / IP 过滤、hosts、系统 hosts、缓存及回答类型控制。自动原生交换用 QNAME 计划代替按解析器地址执行的 respect-rules / #RULES 二次选择。基础 TLS / HTTP / QUIC 客户端保留解析器的服务器名、证书验证和协议设置，不把业务 QNAME 用作实际拨号目标或 TLS 名称。
 
-proxy-server-nameserver 及其 policy 保持节点解析作用。未配置时使用独立 default bootstrap，不能退回正在建立的业务代理。FakeIP 与启用的内置 DNS 自动路由配置互斥；normal 与 redir-host 都可使用原生优化，区别在于是否保留真实 IP 的历史域名映射。
+proxy-server-nameserver 及其 policy 保持节点解析作用。未配置时使用独立 default bootstrap，不能退回正在建立的业务代理。FakeIP 可与内置 DNS 自动路由同时开启，配置层不关闭任一功能，也不改变 fake-ip-filter 的黑名单、白名单或规则模式。normal 与 redir-host 都可使用原生优化，区别在于是否保留真实 IP 的历史域名映射。
+
+FakeIP 直接合成 A / AAAA 时使用 fake-ip-ttl，不进入真实答案缓存、TTL 调整、IP 测速、双栈优选或预取。应使用虚拟地址却没有有效 FakeIPv6 池的 AAAA，以及未被过滤的 HTTPS / SVCB，仍本地返回空答案；其他未本地处理的类型继续真实解析。真实查询才执行 DNS 阶段 REJECT / DROP。FakeIP 后续业务连接恢复域名并正常匹配规则；内部拨号解析直接使用真实 resolver，不返回虚拟地址，已选业务出站与 bootstrap 隔离保持原约定。
 
 ## 5. 可选 IP 优选
 
@@ -119,7 +122,8 @@ DO / CD 查询、AD / RRSIG / SIG / TSIG 保护、截断或不匹配回答跳过
 
 | 维度 | 必须确认 |
 | --- | --- |
-| 优先级 | flag × Rule/Global/Direct × fixed proxy / SpecialRules；关闭恢复原流程 |
+| 优先级 | flag × Rule/Global/Direct × fixed proxy / SpecialRules；关闭恢复原流程；hosts / FakeIP 本地应答优先 |
+| FakeIP 组合 | A / AAAA 合成与反向映射、缺少 IPv6 池空答、三种 filter 模式的真实查询、CNAME/HTTPS/SVCB/TXT/MX、DNS REJECT 时机、真实缓存/测速/预取及 TTL 隔离 |
 | 首次选池 | QNAME→DIRECT/Compatible/direct；QNAME→代理/main；名字不能代替类型；direct 空沿用 main |
 | 冻结 | TC、main/fallback、重试及并发单次选组；直连失败不串池；切组分离缓存 |
 | 规则与来源 | 原域名算法、真实 IN/SRC/PROCESS、来源规则优先级、转发器来源不冒充原设备、未知目标 IP 逻辑、PASS/禁用/命中计数 |
