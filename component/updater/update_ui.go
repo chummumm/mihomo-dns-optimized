@@ -29,6 +29,9 @@ const (
 	uiUpdateLimit = 90 * time.Second
 	maxUIMetadata = 64 * 1024
 	maxUIArchive  = 64 * 1024 * 1024
+	// Dashboard files are a managed part of this distribution, not a
+	// configurable download source.
+	UIArchiveURL = "https://github.com/chummumm/mihomo-optimized/archive/refs/heads/clash-dashboard-dist.zip"
 )
 
 var (
@@ -104,7 +107,7 @@ func SetUIUpdater(u *UIUpdater) {
 	if previous == u {
 		return
 	}
-	if previous != nil && previous.key() == u.key() {
+	if previous != nil && previous.key() == u.key() && previous.active() {
 		u.activeCtx, u.activeCancel = previous.activeCtx, previous.activeCancel
 	} else {
 		if previous != nil && previous.activeCancel != nil {
@@ -127,7 +130,7 @@ type UIUpdater struct {
 	automatic      *uiAutomaticUpdate
 
 	// Test-only injection; neither requests nor filesystem functions are API or
-	// YAML options. Production always uses the configured external-ui-url.
+	// YAML options. Production always uses UIArchiveURL and UIPath().
 	coordinator  *uiUpdateCoordinator
 	request      func(context.Context, string, map[string][]string) (*http.Response, error)
 	rename       func(string, string) error
@@ -136,29 +139,29 @@ type UIUpdater struct {
 	newTicker    func(time.Duration) (<-chan time.Time, func())
 }
 
-func NewUiUpdater(externalUI, externalUIURL, externalUIName string) *UIUpdater {
-	return NewUiUpdaterWithAutoUpdate(externalUI, externalUIURL, externalUIName, false, defaultUIUpdateInterval)
+// UIPath is shared by the installer and HTTP server. -d selects HomeDir; legacy
+// external-ui, external-ui-url, and external-ui-name values are ignored.
+func UIPath() string { return filepath.Join(C.Path.HomeDir(), "ui") }
+
+func NewUiUpdater(_, _, _ string) *UIUpdater {
+	return NewFixedUIUpdater(false, defaultUIUpdateInterval)
 }
 
 // NewUiUpdaterWithAutoUpdate creates an immutable source and scheduling policy.
 // SetUIUpdater activates it; constructing or parsing a configuration never starts
 // a timer or a network request. updateInterval is expressed in hours.
-func NewUiUpdaterWithAutoUpdate(externalUI, externalUIURL, externalUIName string, autoUpdate bool, updateInterval int) *UIUpdater {
+func NewUiUpdaterWithAutoUpdate(_, _, _ string, autoUpdate bool, updateInterval int) *UIUpdater {
+	return NewFixedUIUpdater(autoUpdate, updateInterval)
+}
+
+func NewFixedUIUpdater(autoUpdate bool, updateInterval int) *UIUpdater {
 	if updateInterval <= 0 || updateInterval > int((1<<63-1)/time.Hour) {
 		updateInterval = defaultUIUpdateInterval
 	}
-	u := &UIUpdater{externalUIURL: externalUIURL, autoUpdateUI: autoUpdate, updateInterval: updateInterval}
-	if externalUI != "" {
-		u.autoDownloadUI = true
-		u.externalUIPath = C.Path.Resolve(externalUI)
-	} else {
-		u.externalUIPath = filepath.Join(C.Path.HomeDir(), "ui")
+	return &UIUpdater{
+		externalUIURL: UIArchiveURL, externalUIPath: UIPath(), autoDownloadUI: true,
+		autoUpdateUI: autoUpdate, updateInterval: updateInterval,
 	}
-	if externalUIName != "" {
-		u.autoDownloadUI = true
-		u.externalUIPath = filepath.Join(u.externalUIPath, externalUIName)
-	}
-	return u
 }
 
 func (u *UIUpdater) state() *uiUpdateCoordinator {
@@ -431,7 +434,7 @@ func canonicalUIPath(name string) (string, error) {
 
 func (u *UIUpdater) prepareSnapshot(ctx context.Context, previous uiSnapshot) (snapshot uiSnapshot, err error) {
 	if !u.sourceValid() {
-		return snapshot, errors.New("external-ui-url must be a valid HTTP or HTTPS URL")
+		return snapshot, errors.New("managed dashboard source is not a valid HTTP or HTTPS URL")
 	}
 	target, err := u.target()
 	if err != nil {
@@ -558,19 +561,31 @@ func readUIBuildInfo(root string) uiBuildInfo {
 	return info
 }
 
-func (u *UIUpdater) AutoDownloadUI() {
+// StartAutoDownloadUI does the cheap directory check before scheduling work.
+// Reloading an already installed panel does not create a bootstrap goroutine.
+func (u *UIUpdater) StartAutoDownloadUI() {
+	if u.needsInitialDownload() {
+		go u.AutoDownloadUI()
+	}
+}
+
+func (u *UIUpdater) needsInitialDownload() bool {
 	if !u.autoDownloadUI {
-		return
+		return false
 	}
 	entries, err := os.ReadDir(u.externalUIPath)
 	if err != nil && !os.IsNotExist(err) {
 		log.Errorln("Cannot inspect external UI directory")
+		return false
+	}
+	return len(entries) == 0
+}
+
+func (u *UIUpdater) AutoDownloadUI() {
+	if !u.needsInitialDownload() {
 		return
 	}
-	if len(entries) > 0 {
-		return
-	}
-	if err = u.DownloadUI(); err != nil && !errors.Is(err, ErrUIUpdateBusy) {
+	if err := u.installUIContext(context.Background(), false, true); err != nil && !errors.Is(err, ErrUIUpdateBusy) {
 		log.Errorln("Error downloading UI: %s", err)
 	}
 }
@@ -586,12 +601,25 @@ func (u *UIUpdater) DownloadUIContext(ctx context.Context) error {
 	return u.downloadUIContext(ctx, false)
 }
 
-func (u *UIUpdater) downloadUIContext(ctx context.Context, onlyNewer bool) (err error) {
+func (u *UIUpdater) downloadUIContext(ctx context.Context, onlyNewer bool) error {
+	return u.installUIContext(ctx, onlyNewer, false)
+}
+
+func (u *UIUpdater) installUIContext(ctx context.Context, onlyNewer, onlyEmpty bool) (err error) {
 	state, key := u.state(), u.key()
 	if !state.operation.TryLock() {
 		return ErrUIUpdateBusy
 	}
 	defer state.operation.Unlock()
+	if onlyEmpty {
+		entries, readErr := os.ReadDir(u.externalUIPath)
+		if readErr != nil && !os.IsNotExist(readErr) {
+			return readErr
+		}
+		if len(entries) > 0 {
+			return nil
+		}
+	}
 	state.updating.Store(true)
 	defer state.updating.Store(false)
 	if !u.active() {
@@ -692,7 +720,16 @@ func (u *UIUpdater) downloadUIContext(ctx context.Context, onlyNewer bool) (err 
 		if err == nil {
 			err = ctx.Err()
 		}
-		if err == nil && (!onlyNewer || u.updateAvailable(snapshot)) {
+		canInstall := !onlyNewer || u.updateAvailable(snapshot)
+		if err == nil && onlyEmpty {
+			var entries []os.DirEntry
+			entries, err = os.ReadDir(target)
+			if os.IsNotExist(err) {
+				err = nil
+			}
+			canInstall = len(entries) == 0
+		}
+		if err == nil && canInstall {
 			err = installUIDirectory(snapshot.root, target, rename, removeAll)
 			installed = err == nil
 		}

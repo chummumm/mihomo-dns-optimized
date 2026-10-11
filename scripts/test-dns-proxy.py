@@ -529,58 +529,134 @@ def check_builtin_dns(config, api_port, upstream_a, upstream_b):
         udp.settimeout(3)
 
         check_rule_control_actions(dns_port, upstream_b.answer)
-        for index, network in enumerate(("udp", "tcp")):
-            if network == "tcp":
-                # Change the actual upstream protocol while keeping a UDP
-                # client. Reload clears the answer cache for the second probe.
-                tcp_config = builtin_config.replace("nameserver: [203.0.113.53]",
-                                                    "nameserver: ['tcp://203.0.113.53']")
-                api_request(api_port, "/configs", {"payload": tcp_config}, "PUT")
-                api_request(api_port, "/proxies/Chosen", {"name": "B"}, "PUT")
-            with upstream_b.hold("visible.example", network) as gate:
-                query = question("visible.example", 540 + index)
-                udp.sendto(query, ("127.0.0.1", dns_port))
-                expected_upload = len(query) + (2 if network == "tcp" else 0)
-                deadline = time.monotonic() + 3
-                while True:
-                    matches = [item for item in (api_request(api_port, "/connections").get("connections") or [])
-                               if item.get("dns") is True and
-                               item["metadata"].get("network") == network and
-                               item["metadata"].get("destinationIP") == "203.0.113.53" and
-                               int(item["metadata"]["destinationPort"]) == 53 and
-                               item.get("chains", [])[:1] == ["B"] and
-                               item["upload"] == expected_upload]
-                    if matches:
-                        break
-                    if time.monotonic() >= deadline:
-                        raise AssertionError("built-in DNS upstream missing its explicit DNS connection marker")
-                    time.sleep(0.03)
-                assert len(matches) == 1, matches
-                entry = matches[0]
-                metadata = entry["metadata"]
-                assert metadata["type"] == "Inner" and metadata["inboundName"] == "DNS-TRANSPORT", metadata
-                for field in ("host", "sniffHost", "sourceIP", "inboundIP", "inboundUser", "process",
-                              "processPath", "specialProxy", "specialRules", "sourceGeoIP", "sourceIPASN"):
-                    assert not metadata.get(field), (field, metadata)
-                for field in ("sourcePort", "inboundPort", "uid"):
-                    assert int(metadata[field]) == 0, (field, metadata)
-                assert not entry["rule"] and not entry["rulePayload"], entry
-                assert entry["chains"][:3] == ["B", "Chosen", "DNSOuter"], entry
-                assert entry["download"] == 0, entry
-                gate.set()
-                check_answer(udp.recvfrom(65535)[0], query, upstream_b.answer)
-                active = api_request(api_port, "/connections").get("connections") or []
-                assert all(item["id"] != entry["id"] for item in active), "completed upstream remained active"
 
-                # Transport identity must not erase the actual caller from the
-                # independent, memory-only DNS query record.
-                records = api_request(api_port, "/dns/observability/queries?qname=visible.example&limit=1")["items"]
+        def wait_connections(predicate, message):
+            deadline = time.monotonic() + 3
+            while True:
+                active = api_request(api_port, "/connections").get("connections") or []
+                if predicate(active):
+                    return active
+                if time.monotonic() >= deadline:
+                    raise AssertionError(f"{message}: {active}")
+                time.sleep(0.03)
+
+        def upstream_connections(active, network=None):
+            return [item for item in active
+                    if item.get("dns") is True and
+                    (network is None or item["metadata"].get("network") == network) and
+                    item["metadata"].get("destinationIP") == "203.0.113.53" and
+                    int(item["metadata"]["destinationPort"]) == 53]
+
+        def reload_shared_config(payload):
+            active = api_request(api_port, "/connections").get("connections") or []
+            old_ids = {item["id"] for item in upstream_connections(active)}
+            api_request(api_port, "/configs", {"payload": payload}, "PUT")
+            api_request(api_port, "/proxies/Chosen", {"name": "B"}, "PUT")
+            active = wait_connections(lambda items: not any(item["id"] in old_ids for item in items),
+                                      "reload retained an old DNS transport")
+            assert not upstream_connections(active), "reload did not isolate the next DNS transport probe"
+
+        for index, network in enumerate(("udp", "tcp")):
+            # Start both protocol scenarios with an empty resolver pool and
+            # answer cache. Distinct QNAMEs must share the same frozen route.
+            shared_config = builtin_config.replace("  - DOMAIN,visible.example,DNSOuter\n",
+                                                   "  - DOMAIN-SUFFIX,shared-visible.example,DNSOuter\n"
+                                                   "  - DOMAIN,visible.example,DNSOuter\n")
+            if network == "tcp":
+                shared_config = shared_config.replace("nameserver: [203.0.113.53]",
+                                                       "nameserver: ['tcp://203.0.113.53']")
+            reload_shared_config(shared_config)
+            transport_id = None
+            retired_id = None
+            expected_upload = expected_download = 0
+            query_ids = set()
+            framing = 2 if network == "tcp" else 0
+
+            for probe, label in enumerate(("first", "second-longer", "after-reload")):
+                if probe == 2:
+                    # Completed queries leave the shared transport alive;
+                    # resolver replacement must close that exact connection.
+                    retired_id = transport_id
+                    reload_shared_config(shared_config)
+                    transport_id = None
+                    expected_upload = expected_download = 0
+                name = f"{label}.{network}.shared-visible.example"
+                query = question(name, 540 + index * 10 + probe)
+                before_upload, before_download = expected_upload, expected_download
+                expected_upload += len(query) + framing
+
+                def logical_queries(active):
+                    return [item for item in active if item["metadata"].get("host") == name]
+
+                with upstream_b.hold(name, network) as gate:
+                    udp.sendto(query, ("127.0.0.1", dns_port))
+                    active = wait_connections(
+                        lambda items: len(upstream_connections(items, network)) == 1 and
+                        upstream_connections(items, network)[0]["upload"] >= expected_upload and
+                        len(logical_queries(items)) == 1,
+                        "built-in DNS missing its marked shared transport or independent query")
+                    entry = upstream_connections(active, network)[0]
+                    if transport_id is None:
+                        transport_id = entry["id"]
+                        assert transport_id != retired_id, "reload resurrected the old DNS transport"
+                    assert entry["id"] == transport_id, "uncached QNAMEs opened separate upstream connections"
+                    metadata = entry["metadata"]
+                    assert metadata["type"] == "Inner" and metadata["inboundName"] == "DNS-TRANSPORT", metadata
+                    for field in ("host", "sniffHost", "sourceIP", "inboundIP", "inboundUser", "process",
+                                  "processPath", "specialProxy", "specialRules", "sourceGeoIP", "sourceIPASN"):
+                        assert not metadata.get(field), (field, metadata)
+                    for field in ("sourcePort", "inboundPort", "uid"):
+                        assert int(metadata[field]) == 0, (field, metadata)
+                    assert not entry["rule"] and not entry["rulePayload"], entry
+                    assert entry["chains"][:3] == ["B", "Chosen", "DNSOuter"], entry
+                    assert entry["upload"] == expected_upload and entry["download"] == before_download, entry
+                    assert entry["upload"] - before_upload == len(query) + framing, entry
+
+                    logical = logical_queries(active)[0]
+                    metadata = logical["metadata"]
+                    assert logical.get("dns") is not True, "logical query was marked as a physical transport"
+                    assert logical["id"] != transport_id and logical["id"] not in query_ids, logical
+                    query_ids.add(logical["id"])
+                    assert metadata["type"] == "Inner" and metadata["inboundName"] == "DNS", metadata
+                    assert metadata["host"] == name and metadata["sniffHost"] == name, metadata
+                    assert metadata["network"] == "udp", "upstream protocol replaced the real client protocol"
+                    assert metadata["sourceIP"] == "127.0.0.1" and int(metadata["sourcePort"]) == udp.getsockname()[1], metadata
+                    assert metadata["inboundIP"] == "127.0.0.1" and int(metadata["inboundPort"]) == dns_port, metadata
+                    assert metadata["destinationIP"] == "203.0.113.53" and int(metadata["destinationPort"]) == 53, metadata
+                    assert logical["chains"][:3] == ["B", "Chosen", "DNSOuter"], logical
+                    assert logical["rule"] == "DomainSuffix" and logical["rulePayload"] == "shared-visible.example", logical
+                    assert logical["upload"] == len(query) and logical["download"] == 0, logical
+
+                    gate.set()
+                    response = udp.recvfrom(65535)[0]
+                    check_answer(response, query, upstream_b.answer)
+                    expected_download += len(make_answer(query, upstream_b.answer)) + framing
+                    active = wait_connections(
+                        lambda items: all(item["id"] != logical["id"] for item in items) and
+                        any(item["id"] == transport_id and item["download"] >= expected_download for item in items),
+                        "query completion removed the shared transport or retained its logical query")
+                    matches = upstream_connections(active, network)
+                    assert len(matches) == 1 and matches[0]["id"] == transport_id, matches
+                    after = matches[0]
+                    assert after["upload"] == expected_upload and after["download"] == expected_download, after
+                    assert after["download"] - before_download == len(make_answer(query, upstream_b.answer)) + framing, after
+
+                # Each query keeps the actual caller in its own completed
+                # memory-only record, independently of the neutral socket.
+                records = api_request(api_port, f"/dns/observability/queries?qname={name}&limit=10")["items"]
                 assert len(records) == 1, records
                 record = records[0]
-                assert record["client"] == "127.0.0.1" and record["qname"] == "visible.example", record
+                assert record["client"] == "127.0.0.1" and record["qname"] == name, record
                 assert record["protocol"] == "udp" and record["source"] == "DNS", record
                 assert record["rcode"] == "NOERROR" and record["outcome"] == "upstream", record
-    print("PASS built-in DNS TCP/UDP: original QNAME/IN/SRC rules and query observations, neutral physical upstream identity, exact traffic and completion cleanup, disabled nameserver-policy, selector-aware cache/ID and REJECT/DROP")
+
+            # The replacement transport also remains visible after completion
+            # and the existing dashboard close must release it explicitly.
+            api_request(api_port, f"/connections/{transport_id}", method="DELETE")
+            active = wait_connections(lambda items: all(item["id"] != transport_id for item in items),
+                                      "dashboard close retained the shared DNS transport")
+            assert not upstream_connections(active, network), "closed DNS transport was silently replaced"
+    print("PASS built-in DNS TCP/UDP: original QNAME/IN/SRC rules, shared physical connection IDs and exact cumulative/incremental traffic, independent query/source observations, neutral transport metadata, reload/API-close cleanup, disabled nameserver-policy, selector-aware cache/ID and REJECT/DROP")
 
 
 @contextlib.contextmanager
@@ -1033,6 +1109,9 @@ rules:
     try:
         with tempfile.TemporaryDirectory(prefix="dns-rule-routing-e2e-") as tmp:
             config_dir = pathlib.Path(tmp)
+            # Keep this DNS-only fixture independent of first-start UI downloads.
+            (config_dir / "ui").mkdir()
+            (config_dir / "ui" / "index.html").write_text("<!doctype html><title>DNS test</title>", encoding="utf-8")
             config_file = config_dir / "config.yaml"
             config_file.write_text(config, encoding="utf-8")
             subprocess.run([str(binary), "-t", "-d", str(config_dir), "-f", str(config_file)],

@@ -11,30 +11,38 @@ import (
 )
 
 const (
-	coreReleaseURL        = "https://github.com/chummumm/mihomo-dns-optimized/releases/"
-	coreAssetPrefix       = "mihomo-"
-	legacyCoreAssetPrefix = "mihomo-dns-"
+	coreReleaseURL          = "https://github.com/chummumm/mihomo-optimized/releases/"
+	coreAssetPrefix         = "mihomo-optimized-"
+	previousCoreAssetPrefix = "mihomo-"
+	legacyCoreAssetPrefix   = "mihomo-dns-"
 )
 
-// New releases use -optimized-N. Accept the previous spelling when comparing
-// installed versions or reading an older pinned release; never rewrite the
-// advertised tag, which also determines its immutable asset names.
+// The project version is independent of UPSTREAM_VERSION. The generation
+// component makes every branded release newer than historical fork versions,
+// including historical upstream numbers greater than the new project version.
+// Never rewrite an advertised tag: downloads are pinned to its exact identity.
+var optimizedReleaseVersion = regexp.MustCompile("^mihomo-optimized-v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")
 var dnsReleaseVersion = regexp.MustCompile("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)-(?:dns-)?optimized-([1-9][0-9]*)$")
 
-type releaseVersion [4]uint64
+type releaseVersion [5]uint64
 
 func parseReleaseVersion(value string) (releaseVersion, error) {
 	var version releaseVersion
-	match := dnsReleaseVersion.FindStringSubmatch(value)
-	if match == nil {
-		return version, fmt.Errorf("unsupported DNS optimized release version %q", value)
+	match := optimizedReleaseVersion.FindStringSubmatch(value)
+	if match != nil {
+		version[0] = 1
+	} else {
+		match = dnsReleaseVersion.FindStringSubmatch(value)
 	}
-	for i := range version {
-		number, err := strconv.ParseUint(match[i+1], 10, 64)
+	if match == nil {
+		return version, fmt.Errorf("unsupported mihomo-optimized release version %q", value)
+	}
+	for i, component := range match[1:] {
+		number, err := strconv.ParseUint(component, 10, 64)
 		if err != nil {
-			return version, fmt.Errorf("invalid DNS optimized release version: %w", err)
+			return version, fmt.Errorf("invalid mihomo-optimized release version: %w", err)
 		}
-		version[i] = number
+		version[i+1] = number
 	}
 	return version, nil
 }
@@ -72,7 +80,7 @@ func coreTarget(goos, goarch string, settings map[string]string) (string, error)
 		case "v2", "v3":
 			target += "-" + level
 		default:
-			return "", fmt.Errorf("no DNS optimized update for GOAMD64=%s", level)
+			return "", fmt.Errorf("no mihomo-optimized update for GOAMD64=%s", level)
 		}
 	case "386":
 		switch mode := settings["GO386"]; mode {
@@ -80,7 +88,7 @@ func coreTarget(goos, goarch string, settings map[string]string) (string, error)
 		case "softfloat":
 			target += "-softfloat"
 		default:
-			return "", fmt.Errorf("no DNS optimized update for GO386=%s", mode)
+			return "", fmt.Errorf("no mihomo-optimized update for GO386=%s", mode)
 		}
 	case "arm":
 		level := settings["GOARM"]
@@ -104,7 +112,7 @@ func coreTarget(goos, goarch string, settings map[string]string) (string, error)
 		target += "-" + mode
 	case "mips64", "mips64le":
 		if mode := settings["GOMIPS64"]; mode != "" && mode != "hardfloat" {
-			return "", fmt.Errorf("no DNS optimized update for GOMIPS64=%s", mode)
+			return "", fmt.Errorf("no mihomo-optimized update for GOMIPS64=%s", mode)
 		}
 	case "loong64":
 		target += "-abi2"
@@ -123,7 +131,7 @@ func coreTarget(goos, goarch string, settings map[string]string) (string, error)
 		"android-386", "android-amd64", "android-armv7", "android-arm64-v8":
 		return target, nil
 	default:
-		return "", fmt.Errorf("no DNS optimized release target for %s", target)
+		return "", fmt.Errorf("no mihomo-optimized release target for %s", target)
 	}
 }
 
@@ -171,6 +179,10 @@ type coreReleaseAsset struct {
 // are selected only when the canonical checksum is absent, never after a
 // download, checksum or archive validation failure.
 func selectCoreReleaseAsset(contents []byte, target, version string, windows bool) (coreReleaseAsset, error) {
+	parsed, err := parseReleaseVersion(version)
+	if err != nil {
+		return coreReleaseAsset{}, err
+	}
 	checksums, err := releaseChecksums(contents)
 	if err != nil {
 		return coreReleaseAsset{}, err
@@ -179,7 +191,18 @@ func selectCoreReleaseAsset(contents []byte, target, version string, windows boo
 	if windows {
 		extension = ".zip"
 	}
-	for _, prefix := range []string{coreAssetPrefix, legacyCoreAssetPrefix} {
+	if parsed[0] == 1 {
+		name := version + "-" + target + extension
+		if checksum, exists := checksums[name]; exists {
+			executable := coreAssetPrefix + target
+			if windows {
+				executable += ".exe"
+			}
+			return coreReleaseAsset{name: name, executable: executable, checksum: checksum}, nil
+		}
+		return coreReleaseAsset{}, fmt.Errorf("release does not contain a checksum for target %s at %s", target, version)
+	}
+	for _, prefix := range []string{previousCoreAssetPrefix, legacyCoreAssetPrefix} {
 		coreName := prefix + target
 		name := coreName + "-" + version + extension
 		if checksum, exists := checksums[name]; exists {

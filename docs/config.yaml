@@ -89,15 +89,15 @@ external-controller-routing-mark: 0
 
 # tcp-concurrent: true # TCP 并发连接所有 IP, 将使用最快握手的 TCP
 
-# 配置 WEB UI 目录，使用 http://{{external-controller}}/ui 访问
-external-ui: /path/to/ui/folder/
-external-ui-name: xd
-# 目前支持下载zip,tgz格式的压缩包
-external-ui-url: "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip"
-
-# 内核后台按小时检查 external-ui-url；无需打开面板，远端版本更高时更新
+# 面板固定下载到配置主目录（-d）下的 ui，使用 http://{{external-controller}}/ui/ 访问
+# 固定来源：https://github.com/chummumm/mihomo-optimized 的 clash-dashboard-dist 分支
+# 空目录会在后台首次安装；下面两项控制已有面板的周期更新，远端版本更高时安装
 external-ui-auto-update: false
-external-ui-update-interval: 24
+external-ui-update-interval: 24 # 正整数小时，启用后首次检查等待一个完整周期
+
+# 内核从固定仓库 Releases 检查严格新版；校验 SHA256 后安装并重启内核
+core-auto-update: false
+core-update-interval: 24 # 正整数小时，与面板分别计时，无需打开浏览器
 
 # 在RESTful API端口上开启DOH服务器
 # ！！！该URL不会验证secret， 如果开启请自行保证安全问题 ！！！

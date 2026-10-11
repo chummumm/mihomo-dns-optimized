@@ -49,13 +49,19 @@ emit() {
 base_commit=$(git rev-parse HEAD)
 current_tag=$(cat UPSTREAM_VERSION)
 current_commit=$(cat UPSTREAM_COMMIT)
-current_revision=$(cat OPTIMIZED_REVISION)
+current_project=$(cat PROJECT_VERSION)
 [[ "$current_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 [[ "$current_commit" =~ ^[0-9a-f]{40}$ ]]
-[[ "$current_revision" =~ ^[1-9][0-9]*$ ]] || {
-  printf 'OPTIMIZED_REVISION must be a positive integer without leading zeros.\n' >&2
-  exit 1
-}
+python3 - "$current_tag" "$tag" "$current_project" <<'PY'
+import re
+import sys
+for value, prefix, name in [(sys.argv[1], 'v', 'UPSTREAM_VERSION'),
+                            (sys.argv[2], 'v', 'upstream tag'),
+                            (sys.argv[3], '', 'PROJECT_VERSION')]:
+    match = re.fullmatch(re.escape(prefix) + r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', value)
+    if not match or any(int(part) >= 1 << 64 for part in match.groups()):
+        sys.exit(f'{name} must contain three canonical uint64 components.')
+PY
 git merge-base --is-ancestor "$current_commit" "$base_commit" || {
   printf 'Recorded upstream commit is not an ancestor of this fork.\n' >&2
   exit 1
@@ -66,15 +72,15 @@ if [[ "$tag" == "$current_tag" ]]; then
   printf 'Already tracking upstream %s.\n' "$tag"
   exit 0
 fi
-next_revision=$(python3 - "$current_tag" "$tag" "$current_revision" <<'PY'
+next_project=$(python3 - "$current_tag" "$tag" "$current_project" <<'PY'
 import sys
 old, new = (tuple(map(int, tag[1:].split('.'))) for tag in sys.argv[1:3])
 if new <= old:
     sys.exit('Refusing to replace the tracked stable version with an older release.')
-revision = int(sys.argv[3])
-if revision >= (1 << 64) - 1:
-    sys.exit('OPTIMIZED_REVISION cannot be incremented within the updater uint64 range.')
-print(revision + 1)
+major, minor, patch = map(int, sys.argv[3].split('.'))
+if patch >= (1 << 64) - 1:
+    sys.exit('PROJECT_VERSION patch cannot be incremented within the updater uint64 range.')
+print(f'{major}.{minor}.{patch + 1}')
 PY
 )
 
@@ -124,7 +130,7 @@ preserved=(
   packaging
   UPSTREAM_VERSION
   UPSTREAM_COMMIT
-  OPTIMIZED_REVISION
+  PROJECT_VERSION
 )
 git restore --source="$base_commit" --staged --worktree -- "${preserved[@]}"
 conflicts=$(git diff --name-only --diff-filter=U)
@@ -134,12 +140,12 @@ if [[ -n "$conflicts" ]]; then
 fi
 git diff --exit-code "$base_commit" -- .github/workflows \
   scripts/upstream-sync.sh scripts/ci-check.sh scripts/test-upstream-sync.py \
-  scripts/release-build.py scripts/test-release-build.py packaging OPTIMIZED_REVISION
+  scripts/release-build.py scripts/test-release-build.py packaging PROJECT_VERSION
 
 printf '%s\n' "$tag" > UPSTREAM_VERSION
 printf '%s\n' "$upstream_commit" > UPSTREAM_COMMIT
-printf '%s\n' "$next_revision" > OPTIMIZED_REVISION
-git add UPSTREAM_VERSION UPSTREAM_COMMIT OPTIMIZED_REVISION
+printf '%s\n' "$next_project" > PROJECT_VERSION
+git add UPSTREAM_VERSION UPSTREAM_COMMIT PROJECT_VERSION
 emit changed true
 emit upstream_commit "$upstream_commit"
 printf 'Prepared %s. Test this candidate before committing or pushing.\n' "$tag"

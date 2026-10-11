@@ -30,14 +30,19 @@ type dhcpClient struct {
 	done      chan struct{}
 	clients   []dnsClient
 	err       error
+	closed    bool
+	cancel    context.CancelFunc
 }
 
 var _ dnsClient = (*dhcpClient)(nil)
 
 // Address implements dnsClient
 func (d *dhcpClient) Address() string {
+	d.lock.Lock()
+	clients := append([]dnsClient(nil), d.clients...)
+	d.lock.Unlock()
 	addrs := make([]string, 0)
-	for _, c := range d.clients {
+	for _, c := range clients {
 		addrs = append(addrs, c.Address())
 	}
 	return strings.Join(addrs, ",")
@@ -54,13 +59,36 @@ func (d *dhcpClient) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg,
 }
 
 func (d *dhcpClient) ResetConnection() {
-	for _, client := range d.clients {
+	d.lock.Lock()
+	clients := append([]dnsClient(nil), d.clients...)
+	d.lock.Unlock()
+	for _, client := range clients {
 		client.ResetConnection()
 	}
 }
 
+func (d *dhcpClient) Close() error {
+	d.lock.Lock()
+	d.closed = true
+	if d.cancel != nil {
+		d.cancel()
+	}
+	clients := d.clients
+	d.clients = nil
+	d.err = net.ErrClosed
+	d.lock.Unlock()
+	for _, client := range clients {
+		closeNativeClient(client)
+	}
+	return nil
+}
+
 func (d *dhcpClient) resolve(ctx context.Context) ([]dnsClient, error) {
 	d.lock.Lock()
+	if d.closed {
+		d.lock.Unlock()
+		return nil, net.ErrClosed
+	}
 
 	invalidated, err := d.invalidate()
 	if err != nil {
@@ -69,9 +97,10 @@ func (d *dhcpClient) resolve(ctx context.Context) ([]dnsClient, error) {
 		done := make(chan struct{})
 
 		d.done = done
+		ctx, cancel := context.WithTimeout(context.Background(), DHCPTimeout)
+		d.cancel = cancel
 
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), DHCPTimeout)
 			defer cancel()
 
 			var res []dnsClient
@@ -90,13 +119,19 @@ func (d *dhcpClient) resolve(ctx context.Context) ([]dnsClient, error) {
 			}
 
 			d.lock.Lock()
-			defer d.lock.Unlock()
-
+			old := d.clients
+			if d.closed {
+				old, res, err = res, nil, net.ErrClosed
+			}
 			close(done)
-
 			d.done = nil
+			d.cancel = nil
 			d.clients = res
 			d.err = err
+			d.lock.Unlock()
+			for _, client := range old {
+				closeNativeClient(client)
+			}
 		}()
 	}
 

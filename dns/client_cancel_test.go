@@ -17,6 +17,22 @@ import (
 	D "github.com/miekg/dns"
 )
 
+// These existing I/O-boundary regressions exercise exchange-owned sockets.
+// Shared sockets have a separate waiter-completion boundary and are covered by
+// shared_transport_test.go; canceling one of their waiters must not close them.
+type dedicatedDNSDoTTestClient struct{ *dnsOverTLS }
+
+func (c dedicatedDNSDoTTestClient) ExchangeContext(ctx context.Context, m *D.Msg) (*D.Msg, error) {
+	return c.exchangeDedicated(ctx, m)
+}
+
+func dedicatedDNSExchange(c dnsClient, ctx context.Context, m *D.Msg) (*D.Msg, error) {
+	if dot, ok := c.(*dnsOverTLS); ok {
+		return dot.exchangeDedicated(ctx, m)
+	}
+	return c.ExchangeContext(ctx, m)
+}
+
 type dnsCancelOutbound struct {
 	*routingTestOutbound
 	tcp    net.Conn
@@ -144,7 +160,7 @@ func TestDNSClientLateCancellationPreservesIOResult(t *testing.T) {
 				if protocol == "udp" {
 					packet := &routingTestPacketConn{outbound: base, packets: make(chan routingTestPacket, 1), closed: make(chan struct{})}
 					outbound.packet = &dnsBoundaryPacketConn{PacketConn: packet, boundary: boundary}
-					dc = newClient("192.0.2.53:1053", nil, protocol, nil, outbound, "")
+					dc = newClient("192.0.2.53:1053", nil, protocol, map[string]string{"disable-reuse": "true"}, outbound, "")
 				} else {
 					conn, server := net.Pipe()
 					wire, err := routingTestAnswer(query, false).Pack()
@@ -168,15 +184,15 @@ func TestDNSClientLateCancellationPreservesIOResult(t *testing.T) {
 						// A pooled DoT socket exposes decrypted DNS frames. Real TLS
 						// handshakes are covered by encrypted_routing_test.go.
 						client.connections.PushBack(outbound.tcp)
-						dc = client
+						dc = dedicatedDNSDoTTestClient{client}
 					} else {
-						dc = newClient("192.0.2.53:1053", nil, protocol, nil, outbound, "")
+						dc = newClient("192.0.2.53:1053", nil, protocol, map[string]string{"disable-reuse": "true"}, outbound, "")
 					}
 				}
 				t.Cleanup(func() { closeNativeClient(dc) })
 				result := make(chan dnsCancelExchangeResult, 1)
 				go func() {
-					message, err := dc.ExchangeContext(ctx, query)
+					message, err := dedicatedDNSExchange(dc, ctx, query)
 					result <- dnsCancelExchangeResult{message, err}
 				}()
 				waitDNSCancelSignal(t, boundary.acquired, "socket did not obtain a reply/native failure")
@@ -209,7 +225,7 @@ func TestDNSClientCancellationClosesTCPFallback(t *testing.T) {
 	conn, server := net.Pipe()
 	boundary := newDNSReadBoundary(t, nil)
 	outbound := &dnsCancelOutbound{routingTestOutbound: base, tcp: &dnsBoundaryConn{Conn: conn, boundary: boundary, remaining: 1}}
-	dc := newClient("192.0.2.53:1053", nil, "udp", nil, outbound, "")
+	dc := newClient("192.0.2.53:1053", nil, "udp", map[string]string{"disable-reuse": "true"}, outbound, "")
 	t.Cleanup(func() { closeNativeClient(dc); _ = conn.Close(); _ = server.Close() })
 	queryRead, serverDone := make(chan struct{}), make(chan struct{})
 	go func() {
@@ -263,7 +279,7 @@ func TestDNSDoTCompletedReplyBeforePoolReturn(t *testing.T) {
 	}()
 	result := make(chan dnsCancelExchangeResult, 1)
 	go func() {
-		message, err := dc.ExchangeContext(ctx, query)
+		message, err := dedicatedDNSExchange(dc, ctx, query)
 		result <- dnsCancelExchangeResult{message, err}
 	}()
 	waitDNSCancelSignal(t, boundary.acquired, "DoT reply did not arrive")
@@ -337,7 +353,7 @@ func TestDNSDoTLateCancellationDuringFailedSocketCleanup(t *testing.T) {
 			}()
 			result := make(chan dnsCancelExchangeResult, 1)
 			go func() {
-				message, err := dc.ExchangeContext(ctx, routingTestQuery("failed-cleanup.example", 76))
+				message, err := dc.exchangeDedicated(ctx, routingTestQuery("failed-cleanup.example", 76))
 				result <- dnsCancelExchangeResult{message, err}
 			}()
 			// ExchangeWithConn has already returned its real failure. Cleanup

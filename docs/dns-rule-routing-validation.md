@@ -16,7 +16,7 @@
 | H2 / QUIC 连接跨出口复用 | 每配置上游保留最多 64 个按实际叶子、组、UDP 能力、epoch 隔离的私有协议客户端；QNAME / source-port 不作为连接键 |
 | LRU 关闭仍有查询的共享客户端 | 活动引用计数阻止淘汰；全部繁忙时有界等待并服从调用取消；reset / close 取消作用域生命周期 |
 | H2 拨号在关闭后迟到 | 实际测试发现 HTTP 会分离拨号与原请求取消；私有 dialer 绑定池生命周期，迟到返回的连接立即关闭 |
-| 取消一个加密查询影响兄弟 | H2/H3/DoQ 按请求或 stream 取消，保留共享连接；DoT 取消关闭本次独占连接且不得放回池 |
+| 取消一个加密查询影响兄弟 | 当时 H2/H3/DoQ 按请求或 stream 取消，DoT 关闭本次独占连接；从 `mihomo-optimized-v1.0.0` 起普通 DoT 并发共享且取消不关闭兄弟查询，独占关闭语义仅保留在 `disable-reuse` 等专用分支 |
 | 面板关闭 DNS 后又自动重试 | 原生 53 与加密查询引入仅属于本次请求的关闭标记；阻止 singleflight 重试 / 后台复活，后续独立查询正常 |
 | 面板长期显示首次 QNAME / 重复统计 | 逻辑查询展示当前 QNAME / source / rule；DNS-TRANSPORT 展示真实上游连接，全局线路字节只统计一次；真实 DNS 客户端的 NETWORK 在逻辑记录中保留 |
 | SRC / IN / PROCESS 被域名强制覆盖 | 复用原规则顺序，真实 source / source-port / IN / process 元数据保留；只把未知业务目标 IP 清空，不拿 DNS 服务器 IP 代替 |
@@ -75,4 +75,4 @@ Global / Direct、入站固定出口、子规则入口和 bootstrap 保持原优
 - 传递 DNSSEC 数据不等于校验 DNSSEC 签名；速度反映探测时的握手或 ICMP 耗时，不保证下载吞吐或全部 SmartDNS 行为等价。
 - 普通 SSH 的反向 IP→域名显示仍可能受原映射影响；用户配置可用窄 IP＋TCP＋22 规则确定实际出口，不能用面板显示名证明 SSH 请求了该域名。
 
-构建记录见 [Actions](https://github.com/chummumm/mihomo-dns-optimized/actions/workflows/build.yml)，下载见 [Releases](https://github.com/chummumm/mihomo-dns-optimized/releases)；完整安装包说明见[发行文档](releases.md)。
+构建记录见 [Actions](https://github.com/chummumm/mihomo-optimized/actions/workflows/build.yml)，下载见 [Releases](https://github.com/chummumm/mihomo-optimized/releases)；完整安装包说明见[发行文档](releases.md)。

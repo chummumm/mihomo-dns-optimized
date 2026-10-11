@@ -92,6 +92,9 @@ def run(binary, expect_shared, count):
     try:
         with tempfile.TemporaryDirectory(prefix='mihomo-dns-perf-') as directory:
             root=Path(directory)
+            # First-start UI installation is covered separately from DNS traffic.
+            (root/'ui').mkdir()
+            (root/'ui'/'index.html').write_text('<!doctype html><title>DNS test</title>')
             config=f'''mode: rule
 log-level: silent
 dns-rule-routing: true

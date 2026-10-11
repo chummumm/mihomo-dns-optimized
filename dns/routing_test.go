@@ -18,6 +18,7 @@ import (
 	icontext "github.com/metacubex/mihomo/context"
 	RC "github.com/metacubex/mihomo/rules/common"
 	"github.com/metacubex/mihomo/tunnel"
+	"github.com/metacubex/mihomo/tunnel/statistic"
 
 	D "github.com/miekg/dns"
 )
@@ -84,13 +85,14 @@ type routingTestCall struct {
 
 type routingTestOutbound struct {
 	*routingTestBase
-	kind      atomic.Int32
-	udp       atomic.Int32
-	tcp       atomic.Int32
-	calls     chan routingTestCall
-	questions chan string
-	gate      <-chan struct{}
-	truncate  bool
+	kind       atomic.Int32
+	udp        atomic.Int32
+	tcp        atomic.Int32
+	queryCount atomic.Int32
+	calls      chan routingTestCall
+	questions  chan string
+	gate       <-chan struct{}
+	truncate   bool
 }
 
 func newRoutingTestOutbound(name string) *routingTestOutbound {
@@ -121,6 +123,7 @@ func (a *routingTestOutbound) DialContext(ctx context.Context, md *C.Metadata) (
 			return
 		}
 		a.questions <- query.Question[0].Name
+		a.queryCount.Add(1)
 		_ = conn.WriteMsg(routingTestAnswer(query, false))
 	}()
 	return &routingTestTCPConn{ExtendedConn: N.NewExtendedConn(client), routingTestConnection: routingTestConnection{chain: C.Chain{a.Name()}}}, nil
@@ -168,6 +171,7 @@ func (c *routingTestPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	if err := query.Unpack(p); err != nil {
 		return 0, err
 	}
+	c.outbound.queryCount.Add(1)
 	c.outbound.questions <- query.Question[0].Name
 	wire, err := routingTestAnswer(query, c.outbound.truncate).Pack()
 	if err != nil {
@@ -255,22 +259,64 @@ func routingTestNextCall(t *testing.T, a *routingTestOutbound) routingTestCall {
 	}
 }
 
+func routingTestNextQuestion(t *testing.T, a *routingTestOutbound) string {
+	t.Helper()
+	select {
+	case name := <-a.questions:
+		return name
+	case <-time.After(3 * time.Second):
+		t.Fatal("DNS upstream did not receive a query")
+		return ""
+	}
+}
+
+func routingTestLogicalMetadata(t *testing.T, name, leaf string) *C.Metadata {
+	t.Helper()
+	var metadata *C.Metadata
+	statistic.DefaultManager.Range(func(item statistic.Tracker) bool {
+		if _, ok := item.(*tunnel.DNSNativeQueryTracker); ok && item.Info().Metadata.Host == name && item.Info().Chain.Last() == leaf {
+			metadata = item.Info().Metadata.Clone()
+			return false
+		}
+		return true
+	})
+	if metadata == nil {
+		t.Fatal("logical DNS query lost its independent tracker")
+	}
+	return metadata
+}
+
 func TestDNSRuleRoutingCacheScopeAndRealDestination(t *testing.T) {
 	routingTestEnable(t)
 	a, b := newRoutingTestOutbound("a"), newRoutingTestOutbound("b")
 	r, md := routingTestResolver(), routingTestOrigin()
+	t.Cleanup(r.Close)
 	ctx := routingTestContext(a, md)
-	routingTestExchange(t, r, ctx, routingTestQuery("claude.ai", 1))
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	a.gate = release
+	first := sharedDNSAsync(r, ctx, routingTestQuery("claude.ai", 1))
+	routingTestNextQuestion(t, a)
+	logical := routingTestLogicalMetadata(t, "claude.ai", a.Name())
+	if logical.SrcIP != md.SrcIP || logical.SrcPort != md.SrcPort || logical.InName != md.InName || logical.InUser != md.InUser || logical.Process != md.Process || logical.NetWork != C.UDP {
+		t.Fatalf("logical query lost its source identity: %+v", logical)
+	}
+	unblock()
+	if got := sharedDNSResult(t, first); got.err != nil {
+		t.Fatal(got.err)
+	}
 	routingTestExchange(t, r, ctx, routingTestQuery("claude.ai", 2))
-	if a.udp.Load() != 1 {
+	if a.udp.Load() != 1 || a.queryCount.Load() != 1 {
 		t.Fatal("identical scope did not reuse its cache")
 	}
 	call := routingTestNextCall(t, a)
 	if call.metadata.Host != "" || call.metadata.SniffHost != "" || call.metadata.DstIP.String() != "192.0.2.53" || call.metadata.DstPort != 53 {
 		t.Fatalf("business QNAME escaped into actual resolver dialing: %+v", call.metadata)
 	}
-	if call.metadata.SrcIP != md.SrcIP || call.metadata.SrcPort != md.SrcPort || call.metadata.InName != md.InName || call.metadata.InUser != md.InUser || call.metadata.Process != md.Process || call.metadata.NetWork != C.UDP {
-		t.Fatalf("actual source or DNS transport lost: %+v", call.metadata)
+	if call.metadata.SrcIP.IsValid() || call.metadata.SrcPort != 0 || call.metadata.InName != "DNS-TRANSPORT" || call.metadata.InUser != "" || call.metadata.Process != "" || call.metadata.NetWork != C.UDP {
+		t.Fatalf("shared socket inherited one query's client identity: %+v", call.metadata)
 	}
 	md.SrcIP = netip.MustParseAddr("192.0.2.11")
 	routingTestExchange(t, r, routingTestContext(a, md), routingTestQuery("claude.ai", 3))
@@ -279,8 +325,8 @@ func TestDNSRuleRoutingCacheScopeAndRealDestination(t *testing.T) {
 	query := routingTestQuery("claude.ai", 5)
 	query.SetEdns0(1232, true)
 	routingTestExchange(t, r, routingTestContext(a, md), query)
-	if a.udp.Load() != 4 {
-		t.Fatalf("source/sub-rule/EDNS scopes shared answers: got %d queries", a.udp.Load())
+	if a.queryCount.Load() != 4 || a.udp.Load() != 1 {
+		t.Fatalf("source/sub-rule/EDNS answers or socket reuse lost: queries=%d sockets=%d", a.queryCount.Load(), a.udp.Load())
 	}
 	routingTestExchange(t, r, routingTestContext(b, md), query)
 	if b.udp.Load() != 1 {
@@ -351,8 +397,9 @@ func TestDNSRuleRoutingBootstrapAndExplicitExitExemptions(t *testing.T) {
 			if len(got.Answer) != 1 {
 				t.Fatal("inherited business REJECT overrode explicit/bootstrap resolver")
 			}
-			if call := routingTestNextCall(t, explicit); call.bootstrap != test.boot {
-				t.Fatalf("bootstrap marker=%v, want %v", call.bootstrap, test.boot)
+			prepared, _, err := test.r.prepareDNSRouting(ctx, routingTestQuery("node.example", 20))
+			if err != nil || icontext.DNSBootstrap(prepared) != test.boot {
+				t.Fatalf("bootstrap marker=%v, want %v, err=%v", icontext.DNSBootstrap(prepared), test.boot, err)
 			}
 		})
 	}
@@ -405,7 +452,7 @@ func TestDNSRuleRoutingSingleflightSeparatesSources(t *testing.T) {
 	}
 	close(start)
 	for index := 0; index < 3; index++ {
-		routingTestNextCall(t, a)
+		routingTestNextQuestion(t, a)
 	}
 	release()
 	for index := 0; index < 10; index++ {
@@ -418,8 +465,8 @@ func TestDNSRuleRoutingSingleflightSeparatesSources(t *testing.T) {
 			t.Fatal("shared query did not complete")
 		}
 	}
-	if a.udp.Load() != 3 {
-		t.Fatalf("expected one shared + two isolated lookups, got %d", a.udp.Load())
+	if a.queryCount.Load() != 3 || a.udp.Load() != 1 {
+		t.Fatalf("expected one coalesced + two isolated lookups on one socket, got queries=%d sockets=%d", a.queryCount.Load(), a.udp.Load())
 	}
 }
 
@@ -429,6 +476,11 @@ func TestDNSRuleRoutingStaleRefreshPreservesCancelledSource(t *testing.T) {
 	md := routingTestOrigin()
 	md.SpecialRules = "refresh-tenant"
 	ctx, cancel := context.WithCancel(routingTestContext(a, md))
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(func() { unblock(); r.Close() })
+	a.gate = release
 	query := routingTestQuery("refresh.example", 200)
 	prepared, _, err := r.prepareDNSRouting(ctx, query)
 	if err != nil {
@@ -438,9 +490,12 @@ func TestDNSRuleRoutingStaleRefreshPreservesCancelledSource(t *testing.T) {
 	cancel()
 	routingTestExchange(t, r, ctx, query)
 	call := routingTestNextCall(t, a)
-	if call.metadata.SrcIP != md.SrcIP || call.metadata.Process != md.Process || call.fixed != a || call.bootstrap {
+	routingTestNextQuestion(t, a)
+	logical := routingTestLogicalMetadata(t, "refresh.example", a.Name())
+	if logical.SrcIP != md.SrcIP || logical.Process != md.Process || logical.SpecialRules != md.SpecialRules || call.fixed != a || call.bootstrap || call.metadata.InName != "DNS-TRANSPORT" {
 		t.Fatalf("background refresh lost its business scope: %+v", call)
 	}
+	unblock()
 	// Wait for the refresh to finish before restoring global test state.
 	deadline := time.Now().Add(3 * time.Second)
 	for {
@@ -478,7 +533,7 @@ func TestDNSRuleRoutingQNAMEAndModePriority(t *testing.T) {
 	}
 	md.SpecialProxy = "first"
 	routingTestExchange(t, r, icontext.WithDNSRoutingMetadata(context.Background(), md), routingTestQuery("claude.ai", 304))
-	if first.udp.Load() != 2 {
+	if first.queryCount.Load() != 2 || first.udp.Load() != 1 {
 		t.Fatal("inbound explicit outbound lost priority")
 	}
 }

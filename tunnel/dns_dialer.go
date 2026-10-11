@@ -18,11 +18,14 @@ import (
 const DnsRespectRules = "RULES"
 
 type DNSDialer struct {
-	r            resolver.Resolver
-	proxyAdapter C.ProxyAdapter
-	proxyName    string
-	plan         *DNSRoutingPlan
-	lifetime     context.Context
+	r               resolver.Resolver
+	proxyAdapter    C.ProxyAdapter
+	proxyName       string
+	plan            *DNSRoutingPlan
+	lifetime        context.Context
+	sharedSnapshot  bool
+	sharedInterface string
+	sharedMark      int
 }
 
 func NewDNSDialer(r resolver.Resolver, proxyAdapter C.ProxyAdapter, proxyName string) *DNSDialer {
@@ -65,10 +68,16 @@ func (d *DNSDialer) DialContext(ctx context.Context, network, addr string) (net.
 	proxyName := d.proxyName
 	proxyAdapter := d.proxyAdapter
 	var opts []dialer.Option
+	if d.sharedSnapshot {
+		opts = append(opts, dialer.WithInterface(d.sharedInterface), dialer.WithRoutingMark(d.sharedMark))
+	}
 	var rule C.Rule
 	metadata := &C.Metadata{
 		NetWork: C.TCP,
 		Type:    C.INNER,
+	}
+	if d.sharedSnapshot {
+		metadata.InName = "DNS-TRANSPORT"
 	}
 	err := metadata.SetRemoteAddress(addr) // tcp can resolve host by remote
 	if err != nil {
@@ -135,7 +144,7 @@ func (d *DNSDialer) DialContext(ctx context.Context, network, addr string) (net.
 		}
 		logMetadata(metadata, rule, conn)
 
-		conn = statistic.NewDNSTCPTracker(conn, statistic.DefaultManager, metadata, rule, 0, 0, false)
+		conn = statistic.NewDNSTCPTracker(conn, statistic.DefaultManager, metadata, rule, 0, 0, d.sharedSnapshot)
 
 		return conn, nil
 	} else {
@@ -154,7 +163,7 @@ func (d *DNSDialer) DialContext(ctx context.Context, network, addr string) (net.
 		}
 		logMetadata(metadata, rule, packetConn)
 
-		packetConn = statistic.NewDNSUDPTracker(packetConn, statistic.DefaultManager, metadata, rule, 0, 0, false)
+		packetConn = statistic.NewDNSUDPTracker(packetConn, statistic.DefaultManager, metadata, rule, 0, 0, d.sharedSnapshot)
 
 		return N.NewBindPacketConn(packetConn, metadata.UDPAddr()), nil
 	}

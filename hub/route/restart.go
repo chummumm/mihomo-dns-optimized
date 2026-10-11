@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"syscall"
 
+	"github.com/metacubex/mihomo/component/updater"
 	"github.com/metacubex/mihomo/hub/executor"
 	"github.com/metacubex/mihomo/log"
 
@@ -14,6 +15,14 @@ import (
 	"github.com/metacubex/chi/render"
 	"github.com/metacubex/http"
 )
+
+func init() {
+	updater.DefaultCoreUpdater.SetAutomaticRestartHandler(automaticCoreRestart)
+}
+
+func automaticCoreRestart(execPath string, commit func() error) error {
+	return executor.ApplyUpdateAndRestart(commit, func() { restartProcess(execPath) })
+}
 
 func restartRouter() http.Handler {
 	r := chi.NewRouter()
@@ -43,8 +52,12 @@ func restart(w http.ResponseWriter, r *http.Request) {
 }
 
 func restartExecutable(execPath string) {
-	var err error
 	executor.Shutdown()
+	restartProcess(execPath)
+}
+
+func restartProcess(execPath string) {
+	var err error
 	if runtime.GOOS == "windows" {
 		cmd := exec.Command(execPath, os.Args[1:]...)
 		log.Infoln("restarting: %q %q", execPath, os.Args[1:])

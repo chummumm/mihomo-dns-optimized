@@ -38,10 +38,14 @@ func upgradeCore(w http.ResponseWriter, r *http.Request) {
 	channel := query.Get("channel")
 	force := query.Get("force") == "true"
 
-	err = updater.DefaultCoreUpdater.Update(execPath, channel, force)
+	err = updater.DefaultCoreUpdater.UpdateContext(r.Context(), execPath, channel, force)
 	if err != nil {
 		log.Warnln("%s", err)
-		render.Status(r, http.StatusInternalServerError)
+		status := http.StatusInternalServerError
+		if errors.Is(err, updater.ErrCoreUpdateBusy) {
+			status = http.StatusConflict
+		}
+		render.Status(r, status)
 		render.JSON(w, r, newError(fmt.Sprintf("%s", err)))
 		return
 	}

@@ -15,6 +15,9 @@ import (
 func (c *systemClient) getDnsClients() ([]dnsClient, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return nil, net.ErrClosed
+	}
 	var err error
 	if time.Since(c.lastFlush) > SystemDnsFlushTime {
 		var nameservers []string
@@ -48,6 +51,7 @@ func (c *systemClient) getDnsClients() ([]dnsClient, error) {
 				} else {
 					if sdc.disableTimes > SystemDnsDeleteTimes {
 						delete(c.dnsClients, nameserver) // drop too old dnsClient
+						closeNativeClient(sdc.dnsClient)
 					} else {
 						sdc.disableTimes++
 					}
@@ -70,4 +74,4 @@ func (c *systemClient) getDnsClients() ([]dnsClient, error) {
 	return nil, err
 }
 
-func (c *systemClient) ResetConnection() {}
+func (c *systemClient) ResetConnection() { c.resetClients() }

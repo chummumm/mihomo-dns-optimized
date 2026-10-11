@@ -21,7 +21,7 @@ func TestDNSPerfReplyCacheSharesPortsButNotWork(t *testing.T) {
 	secondCtx := routingTestContext(a, md.Clone())
 	query.Id++
 	routingTestExchange(t, r, secondCtx, query)
-	if got := a.udp.Load(); got != 1 {
+	if got := a.queryCount.Load(); got != 1 || a.udp.Load() != 1 {
 		t.Fatalf("same authorized path changed source port: %d upstream calls", got)
 	}
 	x, _, err := r.prepareDNSRouting(firstCtx, query)
@@ -40,12 +40,12 @@ func TestDNSPerfReplyCacheSharesPortsButNotWork(t *testing.T) {
 	}
 	md.InUser = "other-user"
 	routingTestExchange(t, r, routingTestContext(a, md.Clone()), query)
-	if a.udp.Load() != 2 {
+	if a.queryCount.Load() != 2 || a.udp.Load() != 1 {
 		t.Fatal("authentication scope was lost")
 	}
 	md.Process = "other-process"
 	routingTestExchange(t, r, routingTestContext(a, md.Clone()), query)
-	if a.udp.Load() != 3 {
+	if a.queryCount.Load() != 3 || a.udp.Load() != 1 {
 		t.Fatal("process scope was lost")
 	}
 }

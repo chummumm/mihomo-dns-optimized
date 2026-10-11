@@ -66,7 +66,7 @@ func TestCoreUpdaterTargetMatrix(t *testing.T) {
 		}
 	}
 	nativeTarget, err := coreTarget(runtime.GOOS, runtime.GOARCH, coreBuildSettings())
-	if err != nil || DefaultCoreUpdater.CoreBaseName() != "mihomo-"+nativeTarget {
+	if err != nil || DefaultCoreUpdater.CoreBaseName() != "mihomo-optimized-"+nativeTarget {
 		t.Fatalf("updater lost the canonical target asset name: %v", err)
 	}
 }
@@ -127,6 +127,12 @@ func TestCoreUpdaterAssetNameSelection(t *testing.T) {
 
 func TestCoreUpdaterNumericVersions(t *testing.T) {
 	for _, pair := range [][2]string{
+		{"mihomo-optimized-v1.0.0", "v999.999.999-optimized-999"},
+		{"mihomo-optimized-v1.0.0", "v1.19.32-dns-optimized-13"},
+		{"mihomo-optimized-v1.0.12", "mihomo-optimized-v1.0.2"},
+		{"mihomo-optimized-v1.1.0", "mihomo-optimized-v1.0.99"},
+		{"mihomo-optimized-v2.0.0", "mihomo-optimized-v1.99.99"},
+		{"mihomo-optimized-v18446744073709551615.0.0", "mihomo-optimized-v2.0.0"},
 		{"v1.19.32-dns-optimized-12", "v1.19.32-dns-optimized-2"},
 		{"v1.19.32-optimized-12", "v1.19.32-optimized-2"},
 		{"v1.19.32-optimized-8", "v1.19.32-dns-optimized-7"},
@@ -158,6 +164,11 @@ func TestCoreUpdaterNumericVersions(t *testing.T) {
 		}
 	}
 	for _, invalid := range []string{
+		"mihomo-optimized-v1.0.0-rc1", "mihomo-optimized-v1.0.0+build.1",
+		"mihomo-optimized-v01.0.0", "mihomo-optimized-v1.01.0", "mihomo-optimized-v1.0.01",
+		"mihomo-optimized-v1.0", "mihomo-optimized-v1.0.0/../core", "mihomo-optimized-v1.0.0\n",
+		"mihomo-optimized-v1.0.18446744073709551616", "mihomo-optimized-v1.18446744073709551616.0",
+		"mihomo-optimized-v18446744073709551616.0.0", "mihomo-optimized-v１.0.0", "mihomo-optimized-v1.-1.0",
 		"v1.19.32", "alpha", "v1.19.32-dns.2", "v1.19.32-dns-optimized-0",
 		"v1.19.32-dns-optimized-01", "v1.19.32-dns-optimized-1/../core",
 		"v1.19.32-dns-optimized-1\nother", "v1.19.32-dns-optimized-18446744073709551616",
@@ -171,6 +182,40 @@ func TestCoreUpdaterNumericVersions(t *testing.T) {
 	} {
 		if _, err := parseReleaseVersion(invalid); err == nil {
 			t.Fatalf("accepted unsafe/non-fork release %q", invalid)
+		}
+	}
+}
+
+func TestCoreUpdaterBrandedAssetRequiresExactTagAndTarget(t *testing.T) {
+	const version = "mihomo-optimized-v1.0.0"
+	sum := strings.Repeat("1", 64)
+	for _, platform := range []struct {
+		target  string
+		windows bool
+	}{{"linux-arm64", false}, {"windows-amd64-v3", true}} {
+		ext, member := ".gz", "mihomo-optimized-"+platform.target
+		if platform.windows {
+			ext, member = ".zip", member+".exe"
+		}
+		name := version + "-" + platform.target + ext
+		line := sum + "  " + name + "\n"
+		asset, err := selectCoreReleaseAsset([]byte(line), platform.target, version, platform.windows)
+		if err != nil || asset.name != name || asset.executable != member {
+			t.Fatalf("branded asset mismatch: %+v %v", asset, err)
+		}
+		for _, invalid := range []string{
+			line + line,
+			sum + "  mihomo-" + platform.target + "-" + version + ext + "\n",
+			sum + "  mihomo-dns-" + platform.target + "-" + version + ext + "\n",
+			sum + "  mihomo-optimized-" + platform.target + ".deb\n",
+			sum + "  mihomo-optimized-v1.0.1-" + platform.target + ext + "\n",
+			sum + "  " + version + "-wrong-target" + ext + "\n",
+			sum + "  ../" + name + "\n",
+			line + "bad-checksum  mihomo-" + platform.target + "-" + version + ext + "\n",
+		} {
+			if asset, err := selectCoreReleaseAsset([]byte(invalid), platform.target, version, platform.windows); err == nil {
+				t.Fatalf("accepted ambiguous or ineligible branded asset: %+v", asset)
+			}
 		}
 	}
 }
@@ -229,7 +274,7 @@ func TestCoreUpdaterPinnedReleaseAndFailurePreservesExecutable(t *testing.T) {
 			if err := os.WriteFile(current, oldCore, 0o751); err != nil {
 				t.Fatal(err)
 			}
-			base := DefaultCoreUpdater.CoreBaseName()
+			base := "mihomo-" + strings.TrimPrefix(DefaultCoreUpdater.CoreBaseName(), "mihomo-optimized-")
 			legacyBase := "mihomo-dns-" + strings.TrimPrefix(base, "mihomo-")
 			if fault == "legacy-asset" {
 				base = legacyBase
@@ -409,17 +454,18 @@ func TestCoreUpdaterReleaseFormatMigrationAndForce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	base := DefaultCoreUpdater.CoreBaseName()
-	member, extension := base, ".gz"
-	if runtime.GOOS == "windows" {
-		member, extension = base+".exe", ".zip"
-	}
-	archive := testCoreArchive(t, payload, member, runtime.GOOS == "windows")
-	sum := sha256.Sum256(archive)
 	for _, test := range []struct {
 		name, installed, advertised, wantError string
 		force                                  bool
 	}{
+		{name: "previous-project-to-branded", installed: "v1.19.32-optimized-13", advertised: "mihomo-optimized-v1.0.0"},
+		{name: "legacy-project-to-branded", installed: "v1.19.32-dns-optimized-8", advertised: "mihomo-optimized-v1.0.0"},
+		{name: "branded-upgrade", installed: "mihomo-optimized-v1.0.2", advertised: "mihomo-optimized-v1.0.12"},
+		{name: "branded-equal", installed: "mihomo-optimized-v1.0.0", advertised: "mihomo-optimized-v1.0.0", wantError: "already using latest version"},
+		{name: "branded-no-downgrade", installed: "mihomo-optimized-v1.0.12", advertised: "mihomo-optimized-v1.0.2", wantError: "downgrade"},
+		{name: "branded-no-legacy-rollback", installed: "mihomo-optimized-v1.0.0", advertised: "v9.99.99-optimized-999", wantError: "downgrade"},
+		{name: "force-branded-reinstall", installed: "mihomo-optimized-v1.0.0", advertised: "mihomo-optimized-v1.0.0", force: true},
+		{name: "force-branded-still-validates", installed: "mihomo-optimized-v1.0.0", advertised: "mihomo-optimized-v1.0.1/../core", wantError: "unsupported", force: true},
 		{name: "legacy-to-current", installed: "v1.19.32-dns-optimized-7", advertised: "v1.19.32-optimized-8"},
 		{name: "current-to-current", installed: "v1.19.32-optimized-8", advertised: "v1.19.32-optimized-12"},
 		{name: "current-to-newer-legacy", installed: "v1.19.32-optimized-8", advertised: "v1.19.32-dns-optimized-12"},
@@ -440,7 +486,18 @@ func TestCoreUpdaterReleaseFormatMigrationAndForce(t *testing.T) {
 			if err := os.WriteFile(current, original, 0o751); err != nil {
 				t.Fatal(err)
 			}
-			asset := base + "-" + test.advertised + extension
+			target := strings.TrimPrefix(DefaultCoreUpdater.CoreBaseName(), "mihomo-optimized-")
+			base, asset := "mihomo-"+target, "mihomo-"+target+"-"+test.advertised
+			if strings.HasPrefix(test.advertised, "mihomo-optimized-v") {
+				base, asset = "mihomo-optimized-"+target, test.advertised+"-"+target
+			}
+			member, extension := base, ".gz"
+			if runtime.GOOS == "windows" {
+				member, extension = base+".exe", ".zip"
+			}
+			asset += extension
+			archive := testCoreArchive(t, payload, member, runtime.GOOS == "windows")
+			sum := sha256.Sum256(archive)
 			pinned := "/releases/download/" + test.advertised + "/"
 			var mu sync.Mutex
 			var paths []string
@@ -543,7 +600,7 @@ func TestCoreUpdaterArchiveNamesAndChecksumValidation(t *testing.T) {
 	if actual, _ := os.ReadFile(output); !bytes.Equal(actual, payload) {
 		t.Fatal("gzip did not use the caller-selected output path")
 	}
-	for _, expected := range []string{"mihomo-windows-arm64.exe", "mihomo-dns-windows-arm64.exe"} {
+	for _, expected := range []string{"mihomo-optimized-windows-arm64.exe", "mihomo-windows-arm64.exe", "mihomo-dns-windows-arm64.exe"} {
 		for _, member := range []string{expected, "../" + expected, "nested/" + expected, "other.exe"} {
 			path := filepath.Join(dir, "core.zip")
 			if err := os.WriteFile(path, testCoreArchive(t, payload, member, true), 0o600); err != nil {

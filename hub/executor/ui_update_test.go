@@ -8,17 +8,23 @@ import (
 
 	"github.com/metacubex/mihomo/component/updater"
 	"github.com/metacubex/mihomo/config"
+	C "github.com/metacubex/mihomo/constant"
 )
 
 func TestUIUpdaterAppliedConfigAndTemporaryParsing(t *testing.T) {
 	previous := updater.CurrentUIUpdater()
+	previousHome := C.Path.HomeDir()
+	coreEnabled, coreInterval := updater.DefaultCoreUpdater.AutoUpdate(), updater.DefaultCoreUpdater.UpdateInterval()
 	geoEnabled, geoInterval := updater.GeoAutoUpdate(), updater.GeoUpdateInterval()
 	t.Cleanup(func() {
 		updater.SetUIUpdater(previous)
 		updater.SetGeoAutoUpdate(geoEnabled)
 		updater.SetGeoUpdateInterval(geoInterval)
+		updater.DefaultCoreUpdater.ConfigureAutoUpdate(coreEnabled, coreInterval)
+		C.SetHomeDir(previousHome)
 	})
-	uiDir := filepath.Join(t.TempDir(), "ui")
+	C.SetHomeDir(t.TempDir())
+	uiDir := updater.UIPath()
 	if err := os.MkdirAll(uiDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

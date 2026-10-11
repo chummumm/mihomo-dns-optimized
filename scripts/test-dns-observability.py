@@ -152,6 +152,9 @@ dns:
             return json.loads(raw) if raw else None
 
     def start(self):
+        # Avoid unrelated first-start UI downloads in this local DNS/API fixture.
+        (self.directory / "ui").mkdir(exist_ok=True)
+        (self.directory / "ui" / "index.html").write_text("<!doctype html><title>DNS test</title>", encoding="utf-8")
         (self.directory / "config.yaml").write_text(self.config())
         self.log = (self.directory / "process.log").open("w+")
         self.process = subprocess.Popen(

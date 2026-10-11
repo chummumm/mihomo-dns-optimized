@@ -1,20 +1,24 @@
-# 预编译文件与安装包
+# 预编译文件、安装包与内核更新
 
-`main` 包含源码、依赖或构建配置变更时，测试和完整编译成功后生成固定提交的 GitHub Release。下载页的 **Latest** 仅在该构建仍对应当前 `main` 时更新。PR 只产生 Actions artifacts；每天的稳定版上游同步先经过测试和 Linux amd64/arm64 构建，再触发同一套完整发行矩阵。
+项目使用独立版本 **`mihomo-optimized-vX.Y.Z`**，首版为 `mihomo-optimized-v1.0.0`。`main` 的源码、依赖或构建配置变更在全部测试和完整编译成功后生成固定提交的 GitHub Release。Latest 仅在该构建仍对应当前 `main` 时更新；PR 只生成 Actions artifacts。纯文档变更不消耗版本号，也不触发自动发布。
 
-仅修改 Markdown、MDX、reStructuredText、AsciiDoc、`docs/**`、展示图片 `Meta.png` 或 GitHub issue/PR 说明模板时，push 和 PR 不启动自动核心构建、性能验证或发布。`docs/**` 包含文档配图和说明用配置示例；实际打包配置 `packaging/**`、源码、依赖、脚本和工作流仍触发构建。文档与这些文件混合修改时照常执行。显式手动构建、发行标签和上游稳定版同步调用保留原有行为。
+## 文件名与固定下载入口
 
-从 `v1.19.32-optimized-9` 起，所有归档和安装包统一使用 `mihomo-<target>-<version>`，包含平台、CPU 和版本，例如：
+| 用途 | 文件名示例 |
+| --- | --- |
+| Linux 直接使用 / 内核自更新归档 | `mihomo-optimized-v1.0.0-linux-amd64.gz` |
+| Windows 归档 | `mihomo-optimized-v1.0.0-windows-amd64.zip` |
+| Debian 安装包 | `mihomo-optimized-linux-amd64.deb` |
+| RPM 安装包 | `mihomo-optimized-linux-amd64.rpm` |
+| Arch 安装包 | `mihomo-optimized-linux-amd64.pkg.tar.zst` |
 
-```text
-mihomo-linux-amd64-v1.19.32-optimized-9.gz
-mihomo-linux-arm64-v1.19.32-optimized-9.deb
-mihomo-windows-amd64-v1.19.32-optimized-9.zip
-```
+Windows ZIP 内为 `mihomo-optimized-<target>.exe`。deb、rpm、pkg 的对外文件名固定，不带版本；例如最新 Debian amd64 包始终可从以下入口下载：
 
-Windows ZIP 内的执行文件相应为 `mihomo-<target>.exe`。新 Release 只发布这一套文件名，不同时附加 `mihomo-dns-` 旧名副本。已发布的 `v1.19.32-optimized-8` 继续使用原始文件名和校验和；本次改名使用新的 v9 修订号，不覆盖既有 Release。
+<https://github.com/chummumm/mihomo-optimized/releases/latest/download/mihomo-optimized-linux-amd64.deb>
 
-`SHA256SUMS` 覆盖全部 66 个二进制归档/安装包，以及 `BUILDINFO.json` 和 `version.txt`。`BUILDINFO.json` 记录完整提交号、各目标的 Go 架构参数、工具链、CGO、编译标签以及每个文件的大小和 SHA-256。每个目标缺少文件或校验不一致时，整个 Release 发布失败。已有同名 Release 的文件不被覆盖；重新发布时也必须验证其文件集合和摘要一致。
+每个 Release 仍保存该次构建的安装包；固定文件名不代表覆盖历史版本。内核更新下载带完整 tag 的 `.gz` / `.zip`，精确固定版本与 CPU 变体，不下载 native 安装包。
+
+`SHA256SUMS` 覆盖全部 66 个二进制归档/安装包，以及 `BUILDINFO.json` 和 `version.txt`。BUILDINFO 记录完整源码提交、上游基线、Go 架构参数、工具链、CGO、编译标签及各文件大小和摘要。缺少任一必需文件、版本/提交不符或校验不一致时，发布失败。已发布 tag 和附件不覆盖；重跑也必须验证同一源码与同一文件集合。
 
 ## 支持矩阵
 
@@ -38,26 +42,28 @@ Windows ZIP 内的执行文件相应为 `mihomo-<target>.exe`。新 Release 只�
 
 这里覆盖上游常用现代平台与 CPU，但不重复上游所有下载项：不提供 Go 1.20～1.25 的旧系统兼容变体、不提供 LoongArch ABI1 专用工具链构建、不提供工具链/vendor 压缩包，也不重复 `amd64-compatible` 等别名。不要将这些 Go 1.26 文件当作旧 Windows/macOS/Linux 系统的兼容保证。
 
-## Debian / Ubuntu 安装
+## 安装包与现有安装迁移
 
-安装包内部名称继续保留 `mihomo-dns-optimized`，声明提供并替换 `mihomo`。仅发行文件名去掉 `dns`，包管理器仍将新版识别为同一个包的升级，原有配置和服务路径继续由原包管理。它与官方 `mihomo` 包使用同一路径，不作为第二套服务并存。切换前备份现有配置，并确认下载的 CPU 版本：
-
-```sh
-# 在保存下载文件的目录执行；将占位符替换为实际文件名。
-sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./mihomo-linux-amd64-<version>.deb
-```
-
-安装后的固定路径：
+包管理器内部名称为 `mihomo-optimized`，声明提供并替换旧 `mihomo-dns-optimized` 和官方 `mihomo` 包。可执行文件、配置目录和服务名继续兼容现有安装：
 
 | 用途 | 路径 |
 | --- | --- |
 | 可执行文件 | `/usr/bin/mihomo` |
 | 配置 | `/etc/mihomo/config.yaml` |
 | systemd unit | `/usr/lib/systemd/system/mihomo.service` |
-| 包内说明 / GPL 许可证 | `/usr/share/doc/mihomo-dns-optimized/README` / `/usr/share/licenses/mihomo-dns-optimized/LICENSE` |
+| 面板 | `/etc/mihomo/ui`（此 service 的工作目录由 `-d /etc/mihomo` 指定） |
+| 包内说明 / GPL 许可证 | `/usr/share/doc/mihomo-optimized/README` / `/usr/share/licenses/mihomo-optimized/LICENSE` |
 
-包内仅提供通用起始配置：监听本机 `127.0.0.1:7890`、`MATCH,DIRECT`，内置 DNS 与 `dns-rule-routing` 关闭，无 FakeIP、订阅或私人凭据。请将自己的配置放入 `/etc/mihomo/config.yaml`，检查成功后再显式启动：
+先下载对应 CPU 的包与同一个 Release 的 `SHA256SUMS`，核对后安装：
+
+```sh
+sha256sum --ignore-missing --check SHA256SUMS
+sudo apt install ./mihomo-optimized-linux-amd64.deb
+```
+
+RPM 使用 `sudo dnf install ./mihomo-optimized-<target>.rpm`，Arch 使用 `sudo pacman -U ./mihomo-optimized-<target>.pkg.tar.zst`。旧包和新包拥有相同运行路径，不并行安装为两套服务。按包管理器提示替换旧包；不要使用强制覆盖配置的选项。
+
+Debian 的 conffile、RPM 的 `%config(noreplace)` 和 Arch 的 `backup` 保留用户配置。新包只提供本机 `127.0.0.1:7890` mixed 与 `MATCH,DIRECT` 的通用起始配置；DNS、自动更新默认关闭，无私人节点或凭据。放入自己的配置并校验后启动：
 
 ```sh
 sudo mihomo -t -d /etc/mihomo
@@ -65,48 +71,59 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now mihomo
 ```
 
-安装包没有启动、启用或重启服务的安装脚本。升级已有运行中的服务后，需要自己安排 `sudo systemctl restart mihomo`。删除包也不会替用户管理当前进程，应先自行停止服务。
+包没有启动、启用或重启服务的安装脚本。使用包管理器更换二进制后，自行安排 `sudo systemctl restart mihomo`；删除包前自行停止服务。内核自动更新成功后的重启由内核完成。
 
-Debian 使用 conffile；RPM 使用 `%config(noreplace)`；Arch 使用 `backup` 标记。升级会保留用户修改的配置，冲突时由相应包管理器提示或保存 `.dpkg-dist` / `.rpmnew` / `.pacnew` 等候选文件。不要使用强制覆盖配置的包管理器选项。包内无个人配置、节点、API 密钥或认证信息。
+### 包内版本与实际内核版本
 
-安装包内部版本包含上游版本、UTC 提交时间和数字修订号，例如 `1.19.32+dns.20261010120000.9`。Debian、RPM 和 Arch 原有的包名称及版本序列均保留，使文件改名不影响已有包的升级顺序；具体下载文件名仍与 Release 版本一致。
+下载文件名固定，包内仍保留包管理器要求的版本信息。新系列永久使用 epoch `1`，让独立 `1.0.0` 排在历史 `1.19.32+dns...` 之后：
 
-## RPM / Arch 与直接使用核心
-
-RPM 系统用 `sudo dnf install ./mihomo-<target>-<version>.rpm`，Arch 系统用 `sudo pacman -U ./mihomo-<target>-<version>.pkg.tar.zst`。两者有相同的路径、配置保留和手动启动行为。替换官方包时应阅读包管理器的冲突/替换提示。
-
-直接使用归档时，解压对应文件即可；Linux/macOS/FreeBSD/Android 的 `.gz` 是单个可执行文件，解压后需要 `chmod +x`。Windows `.zip` 内为 `.exe`。使用自己的数据目录运行，例如 `./mihomo -d /path/to/config-dir`。
-
-构建脚本会检查每个包的架构、版本、配置保留标记、无生命周期脚本、文件清单/权限，以及包内二进制与该目标编译结果完全一致。Linux amd64 还实际执行 `-v`、通用配置 `-t` 和本地 DNS 端到端测试。安装包没有在测试宿主机上执行安装或启动服务。
-
-开发者可运行 `python3 scripts/release-build.py matrix` 查看 Actions 矩阵，或通过 `bash scripts/ci-check.sh build <target> <绝对输出目录> <版本> <ISO时间>` 复现一个目标；`amd64` / `arm64` 仍是对应 Linux 目标的简写。测试/打包依赖 `dpkg-deb`、`rpm`/`rpmbuild`/`rpm2cpio`、`cpio`、`zstd`、Python 3.12 和 Go；Android 还需上述固定 NDK，并设置 `ANDROID_NDK_HOME`。
-
-## 数字修订版本
-
-新发行版本从 `v1.19.32-optimized-8` 开始，tag、Release 标题、`version.txt` 与 `mihomo -v` 使用相同版本。版本由源码中的 `UPSTREAM_VERSION` 和 `OPTIMIZED_REVISION` 共同确定，不再按提交次数推算。每次准备新的内核发行时递增修订号；纯文档更新不改编号，也不会触发构建或自动创建 Release。自动同步上游稳定版时，准备合并的脚本会将修订号加一并加入同一份待测试提交，候选构建与正式构建读取相同版本文件。
-
-已有修订号不能用于不同源码：CI 在完整平台构建前检查同名标签的目标提交，发布时再次检查标签和附件。已经发布的旧命名标签保留原样。提交 SHA 保留于 `BUILDINFO.json` 和提交记录，便于核对和重现构建。
-
-包管理器版本保留 UTC 构建时间前缀以保证从已有带哈希版本正常升级，其末尾改为数字修订号。安装包不会自动重启服务，升级后仍需校验配置并手动重启。
-
-## 内核一键更新
-
-本版本的核心 `/upgrade` 使用 **chummumm/mihomo-dns-optimized** 的正式 Release。默认、`auto` 和 `release` 通道都先读取本仓库 Latest 的 `version.txt`，再将校验和及对应架构归档的下载固定到该版本标签；下载过程中 Latest 改变不会混用版本。未提供本仓库 alpha 发行，显式请求 `alpha` 会提示使用 `release`，不会跳转官方仓库。
-
-更新保留当前平台和 CPU 变体，包括 amd64 v1/v2/v3、386 softfloat、ARM、MIPS 浮点 ABI、LoongArch ABI2 和 Android 文件名。不存在对应发行目标时明确失败。新版更新器同时识别 `vX.Y.Z-optimized-N` 和旧 `vX.Y.Z-dns-optimized-N`，按上游版本和数字修订号比较；未设置 `force` 时不会降级。下载使用发行元数据给出的原始标签，不通过改写版本字符串猜测下载地址。
-
-从 v9 起，新更新器只在固定标签的 `SHA256SUMS` 中选择当前目标、同一版本的精确归档名：优先 `mihomo-<target>-<version>.gz` / `.zip`；只有清单没有新名、且包含合法旧名时，才读取历史 `mihomo-dns-<target>-<version>` 归档。两种名称都存在时始终选新名；清单重复或格式错误直接失败。新名归档的 HTTP、SHA256 或解压验证失败后，不再尝试旧名，也不跳转其他版本或官方源。
-
-归档必须通过本版本 `SHA256SUMS` 校验，解压到独立临时目录后才替换内核；HTTP 错误、版本格式错误、缺失校验、摘要不符或无效归档不会覆盖当前文件。原内核保存在同目录 `meta-backup/`。一键更新成功后仍沿用现有接口的重启行为，配置文件不被替换。
-
-**已经安装的 `v1.19.32-optimized-8` 及更早内核，首次升级 v9 需要手动安装一次。** 两次命名迁移涉及不同限制：
-
-| 已安装内核 | 首次升级 v9 的限制 |
+| 格式 | `mihomo-optimized-v1.0.0` 的内部版本 |
 | --- | --- |
-| `v1.19.32-optimized-8` | 能识别新版本号，但编译内置的更新器仍要求 `mihomo-dns-` 资产名；新清单没有该名称，因缺少对应校验而停止，保留原内核。 |
-| `v1.19.32-dns-optimized-N`、`v1.19.32-dns.2` 等旧版本 | 旧版本解析规则和旧资产名均已编译进文件，不能依靠新源码改变其行为。 |
-| 已安装本仓库 v9 或后续新版 | 使用新更新器，从本仓库固定版本的校验和清单选择资产，可继续通过原入口升级。 |
+| Debian | `1:1.0.0` |
+| RPM | epoch `1`、version `1.0.0`、release `1` |
+| Arch `.PKGINFO` 的 `pkgver` | `1:1.0.0-1` |
 
-新更新器兼容历史文件名，只对已经安装新代码的内核生效。`force` 不会绕过版本格式或 SHA256 校验。为保持新 Release 只有一套清晰的文件名，本项目采用手动安装 v9 的一次迁移，不增加旧名副本或修改已发布的 v8。
+安装包负责首次安装、配置归属和卸载。安装后可启用内核自更新，无需每次下载新 deb/rpm/pkg。自更新只替换可执行文件，不改系统包管理器数据库，所以 `dpkg`/`rpm`/`pacman` 仍显示当初安装包的版本。实际版本以 `mihomo -v`、控制器 `/version` 或面板显示的内核版本为准。
 
-首次迁移时，下载并校验对应平台的新归档或安装包，按原来的安装方式替换内核并重启，用 `mihomo -v` 确认已运行 `v1.19.32-optimized-9` 或后续新版本。此后直接使用核心的用户可继续通过面板的内核更新入口升级；用 deb/rpm/pkg 安装的用户建议继续通过相应安装包升级，以保持包管理器记录一致。
+以后重新安装某个 native 包，会安装该包携带的二进制；选择与当前运行版本一致或更高的包。配置文件仍由包管理器保护。自动更新需要运行用户有权写入二进制所在目录；默认 systemd unit 沿用现有 root 运行方式。
+
+## 项目版本与构建
+
+`PROJECT_VERSION` 保存 `X.Y.Z`，tag、Release 标题、`version.txt` 与 `mihomo -v` 使用 `mihomo-optimized-vX.Y.Z`。`UPSTREAM_VERSION` / `UPSTREAM_COMMIT` 单独记录上游基线。三个版本分量必须是无前导零的非负 uint64；不使用预发行、构建后缀或提交次数充当正式版本。
+
+准备新内核发行时更新项目版本。自动同步上游稳定版会先合并，并将项目 patch 加一；候选通过规定测试和 Linux amd64/arm64 构建后才普通推送，再触发完整发行矩阵。冲突、版本溢出、失败测试或远端 main 变化都会停止；不强推或覆盖 fork 的工作流与发布脚本。
+
+已有版本不能用于不同源码。CI 在构建前与发布时检查同名 tag 的目标提交，并核对全部附件；旧版本保留原样。仅 Markdown、MDX、reStructuredText、AsciiDoc、`docs/**`、`Meta.png` 和 issue/PR 模板变化时不自动构建；与源码、`packaging/**`、依赖、脚本或工作流混合修改时照常执行。
+
+构建脚本检查每个 native 包的架构、版本、配置保护、文件清单/权限、无安装脚本，以及其二进制与对应归档完全一致。回归还在隔离 dpkg 根目录执行旧包到新包的真实迁移，验证本地修改的配置保留与文件归属。Linux amd64 产物实际执行 `-v`、`-t` 和本地模拟上游的 DNS 端到端回归；不会安装到测试宿主机或启动宿主服务。
+
+开发者可运行 `python3 scripts/release-build.py matrix` 查看 37 目标矩阵，或 `bash scripts/ci-check.sh build <target> <绝对输出目录> mihomo-optimized-v1.0.0 <ISO时间>` 构建单个目标；`amd64` / `arm64` 是 Linux 别名。依赖 `dpkg-deb`、`rpm`/`rpmbuild`/`rpm2cpio`、`cpio`、`zstd`、`fakeroot`、Python 3.12 和 MetaCubeX Go；Android 还需矩阵指定的固定 NDK。
+
+## 内核自动更新
+
+在当前 YAML 顶层配置：
+
+```yaml
+core-auto-update: true
+core-update-interval: 24 # 小时；默认 24，最小 1
+external-ui-auto-update: true
+external-ui-update-interval: 24 # 面板检查间隔，小时
+```
+
+两个开关默认都是 `false`，检查无需打开面板。启用后按间隔检查；相同配置重载保留计时，改变策略或关闭功能会取消旧任务。core 开关启用同时表示允许成功安装后自动重启，重启会关闭当前连接、重建内存 DNS 状态。
+
+内核从本仓库 Latest 的 `version.txt` 读取远端版本，按数值比较当前实际项目版本，只有严格更高版本才自动安装。比如 `1.0.12 > 1.0.2`；相同版本、降级、非法版本或开发版不会触发自动替换。整个下载固定到首次确定的 tag，再读取该 tag 的 `SHA256SUMS` 与精确 `.gz` / `.zip`，Latest 在途中变化不会混用附件。
+
+选择保持现有操作系统、CPU 指令集与浮点 ABI。清单重复/格式错误、缺少该架构、HTTP 失败、摘要错误或解压失败都保留当前内核。通过校验后先暂存；最终替换前再次核对当前策略、版本与原文件身份/摘要，配置已经改变或二进制被外部更换时放弃该任务。操作串行化，并记录已安装版本与等待重启状态，避免使用尚未重启的旧 `C.Version` 重复安装。
+
+原文件保存在同目录 `meta-backup/`；替换后沿用现有进程重启流程。默认、`auto`、`release` 通道使用本仓库，不使用官方 alpha。兼容的 `/upgrade` API 保留给其他客户端，面板 `0.4.0` 不提供手动更新、安装或自动更新控制区，也不调用该 API。
+
+面板始终来自本仓库 `clash-dashboard-dist`，存于 HomeDir 下的 `ui`，跟随 `-d`。旧 `external-ui`、`external-ui-url`、`external-ui-name` 配置不再改变行为。面板通过本地和归档的 `build-info.json` SemVer 比较更新，仅替换静态资源，不重启内核或清理 DNS 数据。完整调度、首次安装和取消语义见[面板及内核维护说明](dashboard-management.md)。
+
+## 旧内核首次切换新系列
+
+**包括已发布 `v1.19.32-optimized-13` 在内的旧内核，首次切换到 `mihomo-optimized-v1.0.0` 需要手动安装一次。** 旧二进制内置解析器只支持旧版 tag；本次新源码不能改变已经安装的程序。仓库重命名重定向解决的是旧链接访问，不会改变旧版解析规则。
+
+下载并校验对应平台的新归档或 native 包，按原安装方式替换并重启，确认 `mihomo -v` 显示新系列，然后启用 YAML 自动更新。没有新增旧名 bridge Release 或复制旧资产；历史 tag 和文件不修改。
+
+新更新器仍能读取历史 `vX.Y.Z-optimized-N` / `vX.Y.Z-dns-optimized-N` 与 `mihomo-` / `mihomo-dns-` 归档，便于显式维护操作。新系列被视为比所有旧系列更新，自动更新不会退回旧系列。历史兼容只对已安装新更新器的程序生效；`force` 不会绕过 tag 格式、归档或 SHA256 校验。

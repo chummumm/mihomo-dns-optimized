@@ -100,7 +100,8 @@ func uiTestActivateUpdater(t *testing.T, u *UIUpdater) {
 }
 
 func uiTestAutomaticClone(u *UIUpdater, enabled bool, interval int) *UIUpdater {
-	v := NewUiUpdaterWithAutoUpdate(u.externalUIPath, u.externalUIURL, "", enabled, interval)
+	v := NewFixedUIUpdater(enabled, interval)
+	v.externalUIPath, v.externalUIURL = u.externalUIPath, u.externalUIURL
 	v.coordinator, v.request, v.newTicker = u.coordinator, u.request, u.newTicker
 	return v
 }
