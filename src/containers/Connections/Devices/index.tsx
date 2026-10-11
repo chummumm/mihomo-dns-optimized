@@ -32,11 +32,11 @@ interface SourceButtonProps {
 
 // The share ring and live rate carry no text nodes and stay out of the
 // accessible name, so a source still reads as "label (count)".
-function ShareMark ({ rate = 0, total = 0 }: { rate?: number, total?: number }) {
+function ShareMark ({ rate = 0, total = 0, present = true }: { rate?: number, total?: number, present?: boolean }) {
     const share = total > 0 ? Math.min(1, rate / total) : 0
     return <>
         <span className="device-ring" aria-hidden="true" style={{ '--share': share } as React.CSSProperties} />
-        <span className="device-rate" aria-hidden="true" data-rate={rate >= 1 ? `${Math.round(share * 100)}% · ${formatRate(rate)}` : '—'} />
+        <span className="device-rate" aria-hidden="true" style={{ visibility: present ? undefined : 'hidden' }} data-rate={rate >= 1 ? `${Math.round(share * 100)}% · ${formatRate(rate)}` : '—'} />
     </>
 }
 
@@ -61,8 +61,8 @@ const SourceButton = forwardRef<HTMLButtonElement, SourceButtonProps>(function S
             className={classnames('connections-devices-item', { selected })}
             onClick={() => { if (isPresent) props.onChange?.(props.sourceKey) }}>
             {selected && <motion.span className="device-highlight" layoutId="device-highlight" transition={springs.snap} aria-hidden="true" />}
-            <ShareMark rate={props.rate} total={props.total} />
-            <span className="device-label">{ props.label }</span> <span className="device-count">({ props.count })</span>
+            <ShareMark rate={props.rate} total={props.total} present={isPresent} />
+            <span className="device-label">{ props.label }</span> <span className="device-count" style={{ visibility: isPresent ? undefined : 'hidden' }}>({ props.count })</span>
         </motion.button>
     )
 })
