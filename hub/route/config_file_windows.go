@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -21,6 +22,8 @@ const (
 	configFileWindowsAddFile     = 0x0002 // FILE_ADD_FILE (same bit as FILE_WRITE_DATA)
 	configFileWindowsDeleteChild = 0x0040 // FILE_DELETE_CHILD
 )
+
+var configFileWindowsAccessCheck = windows.NewLazySystemDLL("advapi32.dll").NewProc("AccessCheck")
 
 func openConfigFile(path string) (*os.File, error) {
 	return openConfigFileWindows(path, windows.GENERIC_READ, false)
@@ -57,13 +60,77 @@ func openConfigFileWindows(path string, access uint32, directory bool) (*os.File
 }
 
 func configFileWindowsAccess(path string, info os.FileInfo, access uint32) bool {
-	file, err := openConfigFileWindows(path, access, info.IsDir())
+	openAccess := access
+	if info.IsDir() {
+		openAccess |= windows.READ_CONTROL
+	}
+	file, err := openConfigFileWindows(path, openAccess, info.IsDir())
 	if err != nil {
 		return false
 	}
 	defer file.Close()
 	current, err := file.Stat()
-	return err == nil && current.Mode()&os.ModeSymlink == 0 && os.SameFile(info, current)
+	if err != nil || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, current) {
+		return false
+	}
+	if !info.IsDir() {
+		return true
+	}
+	// Opening a directory requires BACKUP_SEMANTICS, which can bypass its DACL
+	// when backup/restore privileges are enabled. Creating our temporary file
+	// does not use backup semantics: check the caller's ordinary access too.
+	return configFileWindowsDirectoryAccess(file, access)
+}
+
+func configFileWindowsDirectoryAccess(file *os.File, access uint32) bool {
+	security, err := windows.GetSecurityInfo(windows.Handle(file.Fd()), windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil || configFileWindowsAccessCheck.Find() != nil {
+		return false
+	}
+	// AccessCheck requires an impersonation token. Copy the effective token;
+	// never impersonate or enable privileges on the process or calling thread.
+	var effective windows.Token
+	err = windows.OpenThreadToken(windows.CurrentThread(), windows.TOKEN_QUERY|windows.TOKEN_DUPLICATE, true, &effective)
+	if err == windows.ERROR_NO_TOKEN {
+		err = windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY|windows.TOKEN_DUPLICATE, &effective)
+	}
+	if err != nil {
+		return false
+	}
+	defer effective.Close()
+	var token windows.Token
+	if err := windows.DuplicateTokenEx(effective, windows.TOKEN_QUERY, nil,
+		windows.SecurityIdentification, windows.TokenImpersonation, &token); err != nil {
+		return false
+	}
+	defer token.Close()
+
+	// GENERIC_MAPPING and PRIVILEGE_SET use DWORD-aligned fields on every
+	// Windows architecture. Callers request specific FILE_* rights; the mapping
+	// supplies the equivalent masks for any generic rights in the descriptor.
+	mapping := struct{ Read, Write, Execute, All uint32 }{
+		windows.FILE_GENERIC_READ,
+		windows.FILE_GENERIC_WRITE,
+		windows.FILE_GENERIC_EXECUTE,
+		windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x01ff, // FILE_ALL_ACCESS
+	}
+	privileges := make([]uint32, 8)
+	for {
+		size := uint32(len(privileges) * 4)
+		var granted, allowed uint32
+		ok, _, callErr := configFileWindowsAccessCheck.Call(
+			uintptr(unsafe.Pointer(security)), uintptr(token), uintptr(access),
+			uintptr(unsafe.Pointer(&mapping)), uintptr(unsafe.Pointer(&privileges[0])),
+			uintptr(unsafe.Pointer(&size)), uintptr(unsafe.Pointer(&granted)), uintptr(unsafe.Pointer(&allowed)))
+		if ok != 0 {
+			return allowed != 0 && granted&access == access
+		}
+		if callErr != windows.ERROR_INSUFFICIENT_BUFFER || size <= uint32(len(privileges)*4) || size > 65536 {
+			return false
+		}
+		privileges = make([]uint32, (size+3)/4)
+	}
 }
 
 func configFileWindowsPrivilegeEnabled(token windows.Token, name string) bool {

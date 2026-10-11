@@ -123,7 +123,23 @@ func TestConfigFileWindowsReadOnlyBeforeEditing(t *testing.T) {
 			configFileWindowsDeny(t, path, windows.FILE_WRITE_DATA|windows.FILE_APPEND_DATA)
 		}},
 		{"directory ACL", func(t *testing.T, path string) {
-			configFileWindowsDeny(t, filepath.Dir(path), configFileWindowsAddFile)
+			directory := filepath.Dir(path)
+			configFileWindowsDeny(t, directory, configFileWindowsAddFile)
+			token := windows.GetCurrentThreadEffectiveToken()
+			t.Logf("directory ACL fixture: SeBackupPrivilege=%v SeRestorePrivilege=%v",
+				configFileWindowsPrivilegeEnabled(token, "SeBackupPrivilege"),
+				configFileWindowsPrivilegeEnabled(token, "SeRestorePrivilege"))
+			// Prove this fixture actually denies the creation used by atomic save,
+			// independently of the production permission preflight.
+			probe, err := os.CreateTemp(directory, "config-permission-fixture-*")
+			if err == nil {
+				_ = probe.Close()
+				_ = os.Remove(probe.Name())
+				t.Fatal("directory ACL fixture unexpectedly allowed temporary file creation")
+			}
+			if !errors.Is(err, os.ErrPermission) {
+				t.Fatalf("directory ACL fixture failed for an unrelated reason: %v", err)
+			}
 		}},
 		{"replacement ACL", func(t *testing.T, path string) {
 			configFileWindowsDeny(t, path, windows.DELETE)
