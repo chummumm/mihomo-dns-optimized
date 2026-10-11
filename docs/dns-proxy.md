@@ -1,6 +1,6 @@
 # DNS 按查询域名分流
 
-开启顶层 `dns-rule-routing: true` 后，Mihomo 的内置 DNS 先用 Question 中的域名匹配已有 `rules` / `rule-providers`，取得一次实际出站，再选择 DNS 上游池。无需 SmartDNS，也无需维护另一份 DNS 域名规则。
+开启顶层 `dns-rule-routing: true` 后，Mihomo 的内置 DNS 在需要真实解析时，用 Question 中的域名匹配已有 `rules` / `rule-providers`，取得一次实际出站，再选择 DNS 上游池。hosts 与 FakeIP 的本地回答保持优先。无需 SmartDNS，也无需维护另一份 DNS 域名规则。
 
 原生上游支持配置的 UDP / TCP 任意端口、DoT、DoH、DoH 的 HTTP/3 和 DoQ。**IP 测速与双栈优选只用于实际 DIRECT / Compatible，代理路径不做本地 IP 探测。** 普通代理入站不再自动识别和接管目标 53 的 DNS 报文；需要按查询域名分流时，使用内置 DNS 监听或显式 DNS 劫持。
 
@@ -19,7 +19,26 @@ dns:
 
 以上均为文档保留地址，使用前须替换成可达的 DNS 服务器。建议把国内解析器放入 `direct-nameserver`，海外解析器放入 `nameserver`；程序根据实际出站类型选池，不根据这些地址推测国家或地区。完整示例见 [dns-proxy.example.yaml](dns-proxy.example.yaml)，其中保留原 mixed 入口，并显式开启可选的 IP 测速、预取和过期回答设置。
 
-开关默认 `false`。本功能使用真实 DNS 回答；同时启用内置 FakeIP 会被配置校验拒绝，内置 DNS 可使用 `normal` 或 `redir-host`。
+开关默认 `false`。内置 DNS 可使用 `normal`、`redir-host` 或 `fake-ip`；从内核 `mihomo-optimized-v1.0.3` 起，FakeIP 与 DNS 分流可以同时开启，只有需要真实解析的查询才进入 DNS 分流。
+
+## FakeIP 与真实查询的优先级
+
+配置 `dns-rule-routing: true` 与 `dns.enhanced-mode: fake-ip` 时，沿用 **hosts → FakeIP → 真实 resolver** 的顺序。两个开关均保持生效，无需增加第三个兼容开关；FakeIP 不会被强制改成 redir-host，也不会全局关闭真实查询的 DNS 分流。可直接使用 [README 中的组合示例](../README.md#fakeip-与-dns-分流同时使用)。
+
+| 查询情况 | 行为 |
+| --- | --- |
+| hosts 提供静态答案 | 保留 hosts 优先级；域名别名按原处理链继续处理 |
+| A / AAAA 应使用 FakeIP，且对应地址池可用 | 直接分配虚拟地址，保留 `fake-ip-ttl` 和反向域名映射，不查真实 IP |
+| 应使用 FakeIP 的 AAAA，但 IPv6 未启用或未配置 FakeIPv6 池 | 保留本地空答案，不改成真实 AAAA 查询 |
+| `fake-ip-filter` 决定使用真实 IP | 进入现有 DNS 分流，按实际出口选 direct 或 main / fallback 池 |
+| 未被过滤的 HTTPS / SVCB | 保持 FakeIP 的本地空答案行为 |
+| 被过滤的 HTTPS / SVCB，或 TXT / MX 等未由 FakeIP 处理的记录 | 正常真实查询，继续按 DNS 分流选择池和出口 |
+
+`fake-ip-filter-mode` 的黑名单、白名单和规则模式含义均不变。真实解析的 AAAA 仍受原有 IPv6 开关限制；解析器自身域名与代理节点域名的 bootstrap 始终使用独立真实解析路径。
+
+本地生成的 FakeIP 不进入真实答案缓存、TTL 调整、DIRECT 测速、双栈优选或预取。随后业务连接访问虚拟地址时，内核恢复域名并正常匹配业务规则；需要本地解析真实目标的拨号直接调用真实 resolver，并继承已选出站，不再次生成 FakeIP。支持远端域名解析的代理保留原行为，不被强迫提前做本地查询。
+
+**REJECT 的生效阶段取决于是否需要真实解析。** FakeIP 已合成的回答不会先执行 DNS 阶段的 REJECT / REJECT-DROP，后续业务连接仍按规则拒绝；过滤后进入真实解析的自动查询仍可在读取真实答案缓存前返回 REFUSED 或静默丢弃。hosts 的本地回答同样保持原优先级。
 
 ## enhanced-mode 与域名嗅探
 
@@ -29,7 +48,7 @@ dns:
 | --- | --- |
 | `normal` | 返回真实 DNS 回答，不建立真实 IP 到历史查询域名的反查映射 |
 | `redir-host` | 返回真实 DNS 回答，并维护真实 IP 到域名的映射，供缺少目标域名的连接辅助匹配 |
-| `fake-ip` | 分配虚拟地址并在连接时恢复域名；当前不能与已启用内置 DNS 的 `dns-rule-routing` 同时使用 |
+| `fake-ip` | 优先分配虚拟地址并在连接时恢复域名；被过滤而需真实解析的域名和未本地处理的记录继续使用 DNS 分流 |
 
 `normal` 仍保留正常解析、正向回答缓存、QNAME 选池和按配置启用的 DIRECT 测速等优化。SOCKS / HTTP 代理握手已经提供目标域名时，域名规则照常匹配。TUN / TProxy / redir 等入口只提供真实 IP 时，若没有成功嗅探到域名，就需依靠 IP、来源、进程、入站或兜底规则。真实 IP 映射可能因多个域名共用同一 IP 而产生歧义，不能将历史映射视为该连接真实请求域名的保证。
 
@@ -80,14 +99,14 @@ dns:
 
 ## 内置 DNS 如何选择上游
 
-`dns.listen`、TUN DNS 劫持以及适用的内部解析，共用已有 QNAME 选路核心。在 Rule 模式中，先选出实际叶子，再按下表处理：
+`dns.listen`、TUN DNS 劫持以及适用的内部解析，在需要真实查询时共用已有 QNAME 选路核心。在 Rule 模式中，先选出实际叶子，再按下表处理：
 
 | 选路结果 | 内置 DNS 上游与传输 |
 | --- | --- |
 | 实际叶子是 DIRECT 或 Compatible，且 `direct-nameserver` 非空 | 只使用直连池，通过本次选中的实际出站交换；失败不借用 nameserver / fallback |
 | 实际叶子是代理节点 | 使用 `nameserver`，按原设置决定是否使用 `fallback`；自动上游均继承本次出站 |
 | `direct-nameserver` 为空 | 保留原 nameserver / fallback 行为，DIRECT 查询不会凭空生成第二个池 |
-| REJECT / REJECT-DROP | 自动查询在缓存前返回 REFUSED / 静默丢弃；所选集合中的显式传输例外见下文 |
+| REJECT / REJECT-DROP | 进入真实解析的自动查询在缓存前返回 REFUSED / 静默丢弃；所选集合中的显式传输例外见下文 |
 
 判断依据是实际叶子的类型，不是组名或节点名。策略组选择了 DIRECT，就使用直连池；把代理节点命名为 DIRECT 不会把它当作直连。组选择、上游重试、main / fallback 与 UDP 截断后的 TCP 重试共用同一计划，不再次推进负载均衡。
 
@@ -287,7 +306,7 @@ payload:
   - '+.telemetry.example'
 ```
 
-`+.` 匹配域名本身及其子域名，不扩大到父域。将这条 REJECT 放到需要优先拦截的位置；自动 DNS 在缓存前返回 REFUSED，有域名信息的业务连接也受同一规则约束。无需再复制成 `nameserver-policy`。固定入站出口和非 Rule 模式的优先级仍保留。
+`+.` 匹配域名本身及其子域名，不扩大到父域。将这条 REJECT 放到需要优先拦截的位置；进入真实解析的自动 DNS 在缓存前返回 REFUSED，有域名信息的业务连接也受同一规则约束。hosts / FakeIP 已本地回答的查询不进入 DNS 拒绝阶段；访问 FakeIP 时恢复域名后，业务连接仍受 REJECT 约束。无需再复制成 `nameserver-policy`。固定入站出口和非 Rule 模式的优先级仍保留。
 
 ## SmartDNS 旧接法迁移
 
@@ -307,7 +326,7 @@ payload:
 
 切换到不同叶子不会复用旧叶子的连接；只回收空闲作用域，全部在用时等待空位或超时。重载会取消和关闭旧池。普通 53 路径继续使用原来的逐交换传输。
 
-连接池复用与回答缓存隔离是两件事：每次查询仍先执行当前规则和拒绝检查，再选择实际叶子。不同来源或组可以共享同一条符合出口约束的解析器连接，正式答案缓存和在途查询仍保留原组、来源、认证、进程、入站及查询内容的作用域，不因连接共享而放宽。
+连接池复用与回答缓存隔离是两件事：每次进入真实解析的自动查询仍先执行当前规则和拒绝检查，再选择实际叶子。不同来源或组可以共享同一条符合出口约束的解析器连接，正式答案缓存和在途查询仍保留原组、来源、认证、进程、入站及查询内容的作用域，不因连接共享而放宽。FakeIP 本地合成不创建上游连接。
 
 共享原生传输仍有逻辑查询和实际连接两层：逻辑记录保留本次 QNAME、真实来源、入站和 DNS 负载计数，不设置 `dns: true`；底层长连接的入站标签为 `DNS-TRANSPORT`，保留真实解析器和实际端口，不用首个业务域名冒充后续查询。内核只对内置解析器真正创建的上游连接显式标记 `dns: true`，包括普通 UDP / TCP 和原生加密传输。普通代理转发到 53 或其他端口的客户端连接、名字含 DNS 的入站，以及其他 `Inner` 连接，都不会据此获得 DNS 标记。
 
@@ -317,7 +336,7 @@ payload:
 
 关闭一条这样的逻辑查询会中断该交换，不关闭同一 HTTP/2 或 QUIC 连接上的其他查询，也不触发该查询的自动重试或后台刷新。正常完成后逻辑记录离开活动列表，共享传输可以继续存在。经普通代理转发的 DNS 显示为普通连接，不再生成逐查询 QNAME 记录。普通 SSH 的反向映射或嗅探显示不在本功能修改范围内。
 
-更改 `dns-rule-routing` 应重新加载完整配置。`GET /configs` 返回生效值，`PATCH /configs` 不接受该字段；可通过原 `PUT /configs` 完整重载。省略开关等同于关闭。旧 `dns-proxy-port` 应删除，不再新增专用 DNS listener。
+更改 `dns-rule-routing` 应重新加载完整配置。`GET /configs` 返回生效值，`PATCH /configs` 不接受该字段；可通过原 `PUT /configs` 完整重载。省略开关等同于关闭。DNS 接入使用已有 `dns.listen` 或显式 TUN DNS 劫持。
 
 完整配置重载（`PUT /configs` 或 SIGHUP）会重建当前配置的主、直连、节点域名和 bootstrap 解析器的答案缓存，以及候选缓存、测速和预取状态，即使 DNS 配置内容没有变化也一样。真实 IP → 域名映射按上述黑名单约束继承；fake-IP 有单独的继承与持久化逻辑。`PATCH /configs` 修改部分运行设置不等于完整重载，`force=true` 也不是“强制清空全部 DNS 缓存”的开关。客户端系统和浏览器自己的 DNS 缓存不受内核 reload 控制。
 

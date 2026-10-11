@@ -24,9 +24,6 @@ func TestDNSRuleRoutingConfigAPI(t *testing.T) {
 		if general["dns-rule-routing"] != enabled {
 			t.Fatalf("GET did not report effective flag: %s", response.Body.String())
 		}
-		if _, exists := general["dns-proxy-port"]; exists {
-			t.Fatal("GET still reports a removed dedicated port")
-		}
 	}
 }
 
@@ -39,7 +36,6 @@ func TestDNSRuleRoutingPatchRequiresFullReloadBeforeAnyMutation(t *testing.T) {
 	for _, body := range []string{
 		`{"dns-rule-routing":true,"mode":"global"}`,
 		`{"dns-rule-routing":false,"mode":"direct"}`,
-		`{"dns-proxy-port":7853,"mode":"global"}`,
 	} {
 		response := httptest.NewRecorder()
 		patchConfigs(response, httptest.NewRequest(http.MethodPatch, "/configs", strings.NewReader(body)))

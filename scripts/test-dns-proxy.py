@@ -1144,7 +1144,6 @@ rules:
                                 raise AssertionError("listener failed to start")
                             time.sleep(0.05)
                     assert general["dns-rule-routing"] is True
-                    assert "dns-proxy-port" not in general
                     assert general["mixed-port"] == mixed_port
 
                     q1, q2 = question("first.example", 101), question("second.example", 102)

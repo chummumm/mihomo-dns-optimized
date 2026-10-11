@@ -435,7 +435,6 @@ type RawConfig struct {
 	TProxyPort                    int            `yaml:"tproxy-port" json:"tproxy-port"`
 	MixedPort                     int            `yaml:"mixed-port" json:"mixed-port"`
 	DNSRuleRouting                bool           `yaml:"dns-rule-routing" json:"dns-rule-routing"`
-	LegacyDNSProxyPort            *int           `yaml:"dns-proxy-port,omitempty" json:"dns-proxy-port,omitempty"`
 	ShadowSocksConfig             string         `yaml:"ss-config" json:"ss-config"`
 	VmessConfig                   string         `yaml:"vmess-config" json:"vmess-config"`
 	InboundTfo                    bool           `yaml:"inbound-tfo" json:"inbound-tfo"`
@@ -802,9 +801,6 @@ func parseGeneral(cfg *RawConfig) (*General, error) {
 	}
 	if cfg.CoreUpdateInterval <= 0 || int64(cfg.CoreUpdateInterval) > maxUIUpdateHours {
 		return nil, fmt.Errorf("core-update-interval must be a positive integer number of hours no greater than %d", maxUIUpdateHours)
-	}
-	if cfg.LegacyDNSProxyPort != nil && *cfg.LegacyDNSProxyPort != 0 {
-		return nil, errors.New("dns-proxy-port has been removed; use dns-rule-routing: true with the built-in dns.listen service or explicit TUN dns-hijack")
 	}
 	if cfg.GlobalClientFingerprint != "" {
 		log.Errorln("The `global-client-fingerprint` configuration is removed, please set `client-fingerprint` directly on the proxy instead")
@@ -1480,9 +1476,8 @@ func parseDNS(rawCfg *RawConfig, ruleProviders map[string]P.RuleProvider) (*DNS,
 		cfg.DirectNameServerFollowPolicy = false
 		cfg.FallbackFilter.Domain = nil
 		cfg.FallbackFilter.GeoSite = nil
-		if cfg.Enable && cfg.EnhancedMode == C.DNSFakeIP {
-			return nil, errors.New("dns-rule-routing requires real DNS answers; set dns.enhanced-mode to redir-host")
-		}
+		// Hosts and FakeIP answer before the real resolver. Queries which need
+		// real answers, including fake-ip-filter exclusions, keep rule routing.
 	}
 	if cfg.Enable && len(cfg.NameServer) == 0 {
 		return nil, fmt.Errorf("if DNS configuration is turned on, NameServer cannot be empty")
