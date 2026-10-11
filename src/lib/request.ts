@@ -19,6 +19,7 @@ export interface ConfigFile {
     content: string
     revision: string
     max_size: number
+    writable?: boolean
 }
 
 export interface Rules {

@@ -23,12 +23,22 @@ test('file cap counts UTF-8 bytes, not JavaScript code units, without splitting 
 
 test('old, malformed and oversized endpoint responses cannot enable saving', () => {
     const valid = { path: '/fixture/config.yaml', revision: 'revision-1', content: 'mode: rule\n', max_size: MAX_CONFIG_FILE_BYTES }
-    assert.deepEqual(readConfigFile(valid), valid)
+    assert.deepEqual(readConfigFile(valid), { ...valid, writable: true })
     for (const response of [null, '', '<html>old kernel</html>', {}, { ...valid, revision: '' }, { ...valid, max_size: 0 }, { ...valid, max_size: 1.1 }, { ...valid, content: 1 }, { ...valid, content: 'a'.repeat(MAX_CONFIG_FILE_BYTES + 1) }]) {
         assert.equal(readConfigFile(response), undefined)
     }
     assert.equal(readConfigFile({ ...valid, max_size: MAX_CONFIG_FILE_BYTES * 4 }).max_size, MAX_CONFIG_FILE_BYTES)
     assert.equal(readConfigFile({ ...valid, max_size: 4 }), undefined)
+})
+
+test('file write capability supports old cores and rejects malformed permissions', () => {
+    const valid = { path: '/fixture/config.yaml', revision: 'revision-1', content: 'mode: rule\n', max_size: MAX_CONFIG_FILE_BYTES }
+    assert.equal(readConfigFile(valid).writable, true)
+    assert.deepEqual(readConfigFile({ ...valid, writable: true }), { ...valid, writable: true })
+    assert.deepEqual(readConfigFile({ ...valid, writable: false }), { ...valid, writable: false })
+    for (const writable of [null, undefined, 0, 1, 'true', 'false', {}, []]) {
+        assert.equal(readConfigFile({ ...valid, writable }), undefined)
+    }
 })
 
 test('cursor lookup matches text boundaries and uses a bounded index even for newline-heavy files', () => {

@@ -11,7 +11,7 @@ const dist = path.resolve(process.env.UI_DIST_DIR || path.join(__dirname, '../di
 const cap = 4 * 1024 * 1024
 const privateMarker = 'config-editor-private-fixture'
 const initial = `mode: rule\r\nport: 7890\r\nsecret: ${privateMarker}\r\n`
-const firstFile = { path: '/fixture/first.yaml', content: initial, revision: 'revision-1', max_size: cap }
+const firstFile = { path: '/fixture/first.yaml', content: initial, revision: 'revision-1', max_size: cap, writable: true }
 const secondFile = { path: '/fixture/second.yaml', content: 'mode: direct\n# second-controller\n', revision: 'second-1', max_size: cap }
 const reads = []
 const saves = []
@@ -67,6 +67,7 @@ function handle(req, res) {
         reads.push(req.socket.localPort)
         if (!secondary && getMode === 'hold') { heldRead = res; return }
         if (getMode === 'unsupported') { json(res, 404, { message: 'Not found' }); return }
+        if (getMode === 'fileAccess') { json(res, 403, { code: 'config_file_access_denied', message: 'PRIVATE-SERVER-ERROR-MARKER' }); return }
         json(res, 200, file); return
     }
     if (pathname === '/configs/file' && req.method === 'PUT') {
@@ -83,6 +84,11 @@ function handle(req, res) {
             if (saveMode === 'path') { json(res, 422, { message: 'PRIVATE-SERVER-ERROR-MARKER' }); return }
             if (saveMode === 'busy') { json(res, 503, { message: 'PRIVATE-SERVER-ERROR-MARKER' }); return }
             if (saveMode === 'network') { json(res, 500, { message: 'PRIVATE-SERVER-ERROR-MARKER' }); return }
+            if (saveMode === 'unauthorized') { json(res, 403, { message: 'PRIVATE-SERVER-ERROR-MARKER' }); return }
+            if (saveMode === 'readOnly' || saveMode === 'fileAccess') {
+                file.writable = false
+                json(res, 403, { code: saveMode === 'readOnly' ? 'config_file_read_only' : 'config_file_access_denied', message: 'PRIVATE-SERVER-ERROR-MARKER' }); return
+            }
             if (saveMode === 'malformed') { json(res, 200, { ...file, revision: '', content: 'PRIVATE-SERVER-ERROR-MARKER' }); return }
             completeSave({ res, payload, file, port })
         })
@@ -157,6 +163,14 @@ async function main() {
         await editor.waitFor()
     }
     const waitLoaded = async value => { await page.waitForFunction(value => document.querySelector('.config-editor-text')?.value === value && !document.querySelector('.config-editor-text')?.disabled, value) }
+    const assertFileStart = async () => {
+        await page.waitForFunction(() => {
+            const area = document.querySelector('.config-editor-text')
+            return area && document.activeElement === area && area.selectionStart === 0 && area.selectionEnd === 0 && area.scrollTop === 0 && area.scrollLeft === 0
+        })
+        assert.match(await editor.locator('.config-editor-status').textContent(), /Ln 1 · Col 1/)
+        assert.equal((await editor.locator('.config-editor-gutter pre').textContent()).trim().split('\n')[0], '1')
+    }
     const assertDrawnIcon = async (container, label) => {
         const paths = await container.locator('svg path').evaluateAll(paths => paths.map(path => path.getAttribute('d')?.trim()))
         assert.ok(paths.length > 0 && paths.every(Boolean), label + ' renders nonempty SVG paths')
@@ -177,6 +191,7 @@ async function main() {
     await assertDrawnIcon(page.getByRole('button', { name: 'Edit configuration file', exact: true }), 'edit action')
     await open()
     await waitLoaded(initial.replaceAll('\r\n', '\n'))
+    await assertFileStart()
     await assertDrawnIcon(editor.locator('.config-editor-file'), 'configuration file')
     await assertDrawnIcon(save(), 'save and reload action')
     assert.equal(await save().isDisabled(), true, 'opening a CRLF file does not create an unsaved edit')
@@ -220,12 +235,14 @@ async function main() {
         ['path', /regular file with no symbolic links/],
         ['busy', /Another operation is using the configuration file/],
         ['network', /configuration file request could not be completed/],
+        ['unauthorized', /controller denied this request/],
         ['malformed', /did not return an editable configuration file/],
     ]) {
         saveMode = mode
         await save().click()
         await editor.getByRole('alert').getByText(message).waitFor()
         assert.equal(await text.inputValue(), badDraft, mode + ' errors preserve the draft')
+        if (mode === 'unauthorized') assert.equal(await text.evaluate(element => element.readOnly), false, 'controller authentication errors do not claim the file is read-only')
     }
     assert.equal(runtimeWrites.length, 1, 'rejected saves and malformed save responses never reload the configuration')
 
@@ -324,6 +341,62 @@ async function main() {
     generalMode = 'normal'
 
     await close().click()
+    firstFile.writable = false
+    await open()
+    await waitLoaded(firstFile.content)
+    await assertFileStart()
+    assert.equal(await text.evaluate(element => element.readOnly && !element.disabled), true, 'a readable but unwritable file supports selection and copying')
+    assert.equal((await editor.locator('.config-editor-state').textContent()).trim(), 'Read only')
+    await editor.getByText(/The kernel cannot write this configuration file/).waitFor()
+    const readonlyContents = await text.inputValue()
+    const savesBeforeReadonly = saves.length
+    const reloadsBeforeReadonly = runtimeWrites.length
+    for (const key of ['a', 'Backspace', 'Enter', 'Tab', 'Control+s', 'Meta+s']) await text.press(key)
+    await save().evaluate(element => element.click())
+    assert.equal(await text.inputValue(), readonlyContents, 'typing, deletion and indentation cannot alter a read-only document')
+    assert.equal(await save().isDisabled(), true)
+    assert.equal(saves.length, savesBeforeReadonly, 'read-only shortcuts and clicks never send a save')
+    assert.equal(runtimeWrites.length, reloadsBeforeReadonly)
+    await text.press('Control+a')
+    assert.equal(await text.evaluate(element => element.selectionEnd - element.selectionStart), readonlyContents.length, 'read-only text remains selectable')
+    await close().click()
+    await editor.waitFor({ state: 'detached' })
+
+    for (const mode of ['readOnly', 'fileAccess']) {
+        firstFile.writable = true
+        saveMode = mode
+        await open()
+        await waitLoaded(firstFile.content)
+        const permissionDraft = firstFile.content + '# permission-loss-draft\n'
+        await text.fill(permissionDraft)
+        const beforeSave = saves.length
+        const beforeReload = runtimeWrites.length
+        await save().click()
+        await editor.getByRole('alert').getByText(mode === 'readOnly' ? /can no longer write this configuration file/ : /cannot read this configuration file/).waitFor()
+        assert.equal(await text.inputValue(), permissionDraft, 'permission loss preserves the entire draft')
+        assert.equal(await text.evaluate(element => element.readOnly), true)
+        assert.equal(await save().isDisabled(), true)
+        await text.press('Control+s')
+        assert.equal(saves.length, beforeSave + 1, 'permission loss blocks another save until capabilities are reread')
+        assert.equal(runtimeWrites.length, beforeReload, 'a permission-denied save never reloads')
+        await editor.getByRole('button', { name: 'Read from file again', exact: true }).click()
+        await editor.getByRole('button', { name: 'Discard and read again', exact: true }).click()
+        await waitLoaded(firstFile.content)
+        assert.equal(await text.evaluate(element => element.readOnly), true)
+        firstFile.writable = true
+        await editor.getByRole('button', { name: 'Read from file again', exact: true }).click()
+        await page.waitForFunction(() => document.querySelector('.config-editor-text')?.readOnly === false)
+        await assertFileStart()
+        await close().click()
+    }
+    saveMode = 'normal'
+    getMode = 'fileAccess'
+    await open()
+    await editor.getByRole('alert').getByText(/The kernel cannot read this configuration file/).waitFor()
+    assert.equal(await text.isDisabled(), true, 'unreadable files have an explicit permission error and no editable content')
+    assert.equal(await save().isDisabled(), true)
+    await close().click()
+
     getMode = 'unsupported'
     await open()
     await editor.getByRole('alert').getByText(/does not support the configuration file editor/).waitFor()
@@ -334,12 +407,31 @@ async function main() {
     firstFile.content = '# large-file\n' + '# line\n'.repeat(20000)
     await open()
     await waitLoaded(firstFile.content)
+    await assertFileStart()
     await text.press('Control+End')
     await page.waitForFunction(() => document.querySelector('.config-editor-gutter pre')?.textContent.trim().endsWith('20002')).catch(async reason => {
         const metrics = await text.evaluate(element => ({ length: element.value.length, caret: element.selectionStart, scrollTop: element.scrollTop, height: element.clientHeight, scrollHeight: element.scrollHeight, lineHeight: getComputedStyle(element).lineHeight, gutter: document.querySelector('.config-editor-gutter pre')?.textContent, transform: document.querySelector('.config-editor-gutter pre')?.style.transform }))
         throw new Error(reason.message + '\nEditor viewport metrics: ' + JSON.stringify(metrics))
     })
     assert.ok((await editor.locator('.config-editor-gutter pre').textContent()).split('\n').length < 100, 'large files render only visible line numbers')
+    await editor.getByRole('button', { name: 'Read from file again', exact: true }).click()
+    await waitLoaded(firstFile.content)
+    await assertFileStart()
+    await text.press('Control+Home')
+    await page.keyboard.insertText('# preserve-reading-position\n')
+    assert.ok((await text.inputValue()).startsWith('# preserve-reading-position\n'), 'editing a large file updates its existing draft')
+    const readingPosition = await text.evaluate(element => {
+        element.setSelectionRange(2200, 2200)
+        element.scrollTop = 6000
+        element.scrollLeft = 0
+        element.dispatchEvent(new Event('scroll', { bubbles: true }))
+        return { caret: element.selectionStart, top: element.scrollTop, left: element.scrollLeft }
+    })
+    await save().click()
+    await saved().waitFor()
+    await page.waitForTimeout(180)
+    assert.deepEqual(await text.evaluate(element => ({ caret: element.selectionStart, top: element.scrollTop, left: element.scrollLeft })), readingPosition, 'a successful save does not reset the caret or reading position')
+    assert.equal(await text.evaluate(element => document.activeElement === element), false, 'a save response does not steal focus back from the action button')
     await close().click()
 
     getMode = 'hold'
@@ -351,6 +443,7 @@ async function main() {
     await editor.waitFor({ state: 'detached' })
     await open()
     await waitLoaded(secondFile.content)
+    assert.equal(await text.evaluate(element => element.readOnly), false, 'older cores without writable metadata retain their editing behavior')
     json(heldRead, 200, { ...firstFile, content: '# stale-first-controller-secret\n' }); heldRead = null
     assert.equal(await text.inputValue(), secondFile.content, 'an obsolete controller response cannot replace the new draft')
 
@@ -412,7 +505,43 @@ async function main() {
     assert.equal(persistent.includes(privateMarker) || persistent.includes('unique-unsaved-draft') || persistent.includes('revision-1'), false, 'configuration text, drafts and revisions never enter browser storage')
     assert.equal(await page.getByText('PRIVATE-SERVER-ERROR-MARKER', { exact: false }).count(), 0, 'save, reload and refresh exceptions never expose server text')
     assert.deepEqual(pageErrors, [], 'Ctrl-S failures and request cancellations do not produce unhandled rejections')
-    console.log(JSON.stringify({ passed: true, reads: reads.length, saves: saves.length, reloads: runtimeWrites.length, sequentialSaveAndReload: true, duplicateAndCloseGuard: true, revisionCheckedRetry: true, saveErrorsNeverReload: true, refreshFailureIsolated: true, editorIconsVisible: true, conflictDraftPreserved: true, hostSwitchIsolated: true, boundedGutter: true, memoryOnly: true, pageErrors }, null, 2))
+    await close().click()
+
+    const mobile = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true, locale: 'en-US', serviceWorkers: 'block' })
+    await mobile.route('**/*', route => {
+        const url = new URL(route.request().url())
+        return url.hostname === '127.0.0.1' && [String(port), String(secondPort)].includes(url.port) ? route.continue() : route.abort()
+    })
+    await mobile.addInitScript(({ port }) => {
+        localStorage.setItem('language', JSON.stringify('en_US'))
+        localStorage.setItem('externalControllers', JSON.stringify([{ hostname: '127.0.0.1', port, secret: '' }]))
+        localStorage.setItem('externalControllerIndex', '0')
+    }, { port })
+    const phone = await mobile.newPage()
+    phone.on('pageerror', error => pageErrors.push(String(error)))
+    await phone.goto('http://127.0.0.1:' + port + '/#/settings', { waitUntil: 'networkidle' })
+    const mobileSizes = [{ width: 320, height: 640 }, { width: 390, height: 844 }, { width: 844, height: 390 }]
+    for (const size of mobileSizes) {
+        await phone.setViewportSize(size)
+        await phone.getByRole('button', { name: 'Edit configuration file', exact: true }).click()
+        await phone.waitForFunction(() => {
+            const area = document.querySelector('.config-editor-text')
+            const rect = document.querySelector('.config-editor-modal')?.getBoundingClientRect()
+            return area && !area.disabled && area.selectionStart === 0 && area.scrollTop === 0 && rect && Math.abs(rect.top) < 1 && Math.abs(rect.left) < 1 && Math.abs(rect.width - innerWidth) < 1 && Math.abs(rect.height - innerHeight) < 1
+        })
+        const bounds = await phone.locator('.config-editor-modal').evaluate(element => ({ radius: getComputedStyle(element).borderTopLeftRadius, overflow: element.scrollWidth - element.clientWidth }))
+        assert.equal(bounds.radius, '0px', 'the mobile editor fills the viewport without sheet corners')
+        assert.ok(bounds.overflow < 2, 'the mobile editor has no horizontal overflow')
+        const phoneClose = phone.locator('.config-editor-content').getByRole('button', { name: 'Close', exact: true })
+        await phoneClose.scrollIntoViewIfNeeded()
+        const closeBounds = await phoneClose.boundingBox()
+        assert.ok(closeBounds.y >= 0 && closeBounds.y + closeBounds.height <= size.height + 1, 'footer actions remain reachable, including in landscape')
+        await phoneClose.click()
+        await phone.locator('.config-editor-content').waitFor({ state: 'detached' })
+    }
+    await mobile.close()
+    assert.deepEqual(pageErrors, [])
+    console.log(JSON.stringify({ passed: true, reads: reads.length, saves: saves.length, reloads: runtimeWrites.length, sequentialSaveAndReload: true, duplicateAndCloseGuard: true, revisionCheckedRetry: true, saveErrorsNeverReload: true, refreshFailureIsolated: true, editorIconsVisible: true, conflictDraftPreserved: true, hostSwitchIsolated: true, boundedGutter: true, readOnlyBeforeEditing: true, permissionLossPreservesDraft: true, initialFilePosition: true, savePreservesPosition: true, mobileFullscreen: mobileSizes, memoryOnly: true, pageErrors }, null, 2))
 }
 
 main().catch(error => { console.error(error.stack); process.exitCode = 1 }).finally(async () => {
