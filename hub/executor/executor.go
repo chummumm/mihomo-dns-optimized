@@ -439,8 +439,9 @@ func updateUpdater(cfg *config.Config) {
 	updater.SetGeoUpdateInterval(general.GeoUpdateInterval)
 
 	controller := cfg.Controller
-	updater.DefaultUiUpdater = updater.NewUiUpdater(controller.ExternalUI, controller.ExternalUIURL, controller.ExternalUIName)
-	updater.DefaultUiUpdater.AutoDownloadUI()
+	uiUpdater := updater.NewUiUpdater(controller.ExternalUI, controller.ExternalUIURL, controller.ExternalUIName)
+	updater.SetUIUpdater(uiUpdater)
+	uiUpdater.AutoDownloadUI()
 }
 
 //go:linkname temporaryUpdateGeneral github.com/metacubex/mihomo/config.temporaryUpdateGeneral

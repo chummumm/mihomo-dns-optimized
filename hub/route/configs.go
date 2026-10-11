@@ -26,6 +26,8 @@ func configRouter() http.Handler {
 	r := chi.NewRouter()
 	r.Get("/", getConfigs)
 	if !embedMode { // disallow update/patch configs in embed mode
+		r.Get("/file", getConfigFile)
+		r.Put("/file", putConfigFile)
 		r.Put("/", updateConfigs)
 		r.Post("/geo", updateGeoDatabases)
 		r.Patch("/", patchConfigs)

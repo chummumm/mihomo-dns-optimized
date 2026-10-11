@@ -1,381 +1,639 @@
 package updater
 
 import (
-	"archive/tar"
-	"archive/zip"
-	"bytes"
-	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
+	"sync/atomic"
+	"time"
 
+	mihomoHttp "github.com/metacubex/mihomo/component/http"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
+
+	"github.com/metacubex/http"
 )
+
+const (
+	uiCheckTTL    = 5 * time.Minute
+	uiCheckLimit  = 45 * time.Second
+	uiUpdateLimit = 90 * time.Second
+	maxUIMetadata = 64 * 1024
+	maxUIArchive  = 64 * 1024 * 1024
+)
+
+var (
+	ErrUIUpdateBusy           = errors.New("a UI check or update is already running")
+	ErrUIConfigurationChanged = errors.New("dashboard update configuration changed")
+)
+
+type UIUpdateStatus struct {
+	Supported       bool   `json:"supported"`
+	Reason          string `json:"reason,omitempty"`
+	CurrentVersion  string `json:"current_version"`
+	CurrentCommit   string `json:"current_commit"`
+	CurrentDigest   string `json:"current_digest,omitempty"`
+	LatestVersion   string `json:"latest_version,omitempty"`
+	LatestCommit    string `json:"latest_commit,omitempty"`
+	LatestDigest    string `json:"latest_digest,omitempty"`
+	UpdateAvailable bool   `json:"update_available"`
+	Updating        bool   `json:"updating"`
+	CheckError      string `json:"check_error,omitempty"`
+}
+
+type uiBuildInfo struct {
+	Name         string `json:"name"`
+	Version      string `json:"version"`
+	SourceCommit string `json:"source_commit"`
+}
+
+type uiSnapshot struct {
+	key, work, root, target string
+	digest                  string
+	currentDigest           string
+	info                    uiBuildInfo
+	files                   map[string]uiFile
+	etag, modified          string
+}
+
+// A reload replaces UIUpdater instances. The lock, one-entry check cache, and
+// bounded staging lifetime belong to the process rather than to one instance.
+type uiUpdateCoordinator struct {
+	operation   sync.Mutex
+	updating    atomic.Bool
+	mu          sync.Mutex
+	checked     time.Time
+	key         string
+	latest      uiSnapshot
+	err         error
+	checking    chan struct{}
+	checkingKey string
+	expiry      *time.Timer
+}
+
+var uiUpdates uiUpdateCoordinator
+var currentUIUpdater atomic.Pointer[UIUpdater]
+var uiActivation sync.Mutex
+var emptyUIUpdater = &UIUpdater{}
+
+// CurrentUIUpdater returns an immutable configuration snapshot. Reloads publish
+// the replacement atomically; an update cannot commit after its source changed.
+func CurrentUIUpdater() *UIUpdater {
+	if u := currentUIUpdater.Load(); u != nil {
+		return u
+	}
+	return emptyUIUpdater
+}
+
+func SetUIUpdater(u *UIUpdater) {
+	uiActivation.Lock()
+	defer uiActivation.Unlock()
+	previous := currentUIUpdater.Load()
+	if previous != nil && previous.key() == u.key() {
+		u.activeCtx, u.activeCancel = previous.activeCtx, previous.activeCancel
+	} else {
+		if previous != nil && previous.activeCancel != nil {
+			previous.activeCancel()
+		}
+		u.activeCtx, u.activeCancel = context.WithCancel(context.Background())
+	}
+	currentUIUpdater.Store(u)
+}
 
 type UIUpdater struct {
 	externalUIURL  string
 	externalUIPath string
 	autoDownloadUI bool
+	activeCtx      context.Context
+	activeCancel   context.CancelFunc
 
-	mutex sync.Mutex
+	// Test-only injection; neither requests nor filesystem functions are API or
+	// YAML options. Production always uses the configured external-ui-url.
+	coordinator  *uiUpdateCoordinator
+	request      func(context.Context, string, map[string][]string) (*http.Response, error)
+	rename       func(string, string) error
+	removeAll    func(string) error
+	beforeCommit func()
 }
-
-type compressionType int
-
-const (
-	typeUnknown compressionType = iota
-	typeZip
-	typeTarGzip
-)
-
-func (t compressionType) String() string {
-	switch t {
-	case typeZip:
-		return "zip"
-	case typeTarGzip:
-		return "tar.gz"
-	default:
-		return "unknown"
-	}
-}
-
-var DefaultUiUpdater = &UIUpdater{}
 
 func NewUiUpdater(externalUI, externalUIURL, externalUIName string) *UIUpdater {
-	updater := &UIUpdater{}
-	// checkout externalUI exist
+	u := &UIUpdater{externalUIURL: externalUIURL}
 	if externalUI != "" {
-		updater.autoDownloadUI = true
-		updater.externalUIPath = C.Path.Resolve(externalUI)
+		u.autoDownloadUI = true
+		u.externalUIPath = C.Path.Resolve(externalUI)
 	} else {
-		// default externalUI path
-		updater.externalUIPath = path.Join(C.Path.HomeDir(), "ui")
+		u.externalUIPath = filepath.Join(C.Path.HomeDir(), "ui")
 	}
-
-	// checkout UIpath/name exist
 	if externalUIName != "" {
-		updater.autoDownloadUI = true
-		updater.externalUIPath = path.Join(updater.externalUIPath, externalUIName)
+		u.autoDownloadUI = true
+		u.externalUIPath = filepath.Join(u.externalUIPath, externalUIName)
 	}
-
-	if externalUIURL != "" {
-		updater.externalUIURL = externalUIURL
-	}
-	return updater
+	return u
 }
 
-func (u *UIUpdater) AutoDownloadUI() {
-	u.mutex.Lock()
-	defer u.mutex.Unlock()
-	if u.autoDownloadUI {
-		dirEntries, _ := os.ReadDir(u.externalUIPath)
-		if len(dirEntries) > 0 {
-			log.Infoln("UI already exists, skip downloading")
-		} else {
-			log.Infoln("External UI downloading ...")
-			err := u.downloadUI()
-			if err != nil {
-				log.Errorln("Error downloading UI: %s", err)
+func (u *UIUpdater) state() *uiUpdateCoordinator {
+	if u.coordinator != nil {
+		return u.coordinator
+	}
+	return &uiUpdates
+}
+
+func (u *UIUpdater) key() string {
+	key := sha256.Sum256([]byte(filepath.Clean(u.externalUIPath) + "\x00" + u.externalUIURL))
+	return hex.EncodeToString(key[:])
+}
+
+func (u *UIUpdater) sourceValid() bool {
+	parsed, err := url.Parse(u.externalUIURL)
+	return err == nil && parsed.Host != "" && (parsed.Scheme == "https" || parsed.Scheme == "http")
+}
+
+func (u *UIUpdater) active() bool {
+	return u.activeCtx == nil || u.activeCtx.Err() == nil
+}
+
+func (u *UIUpdater) operationContext(parent context.Context, limit time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(parent, limit)
+	if u.activeCtx != nil {
+		go func() {
+			select {
+			case <-u.activeCtx.Done():
+				cancel()
+			case <-ctx.Done():
 			}
-		}
+		}()
 	}
+	return ctx, cancel
 }
 
-func (u *UIUpdater) DownloadUI() error {
-	u.mutex.Lock()
-	defer u.mutex.Unlock()
-	return u.downloadUI()
+func (u *UIUpdater) Status(ctx context.Context, check bool) UIUpdateStatus {
+	state := u.state()
+	s := UIUpdateStatus{Updating: state.updating.Load()}
+	if u.externalUIPath == "" {
+		s.Reason = "ui-not-configured"
+		return s
+	}
+	current := readUIBuildInfo(u.externalUIPath)
+	s.CurrentVersion, s.CurrentCommit = current.Version, current.SourceCommit
+	if !u.sourceValid() {
+		s.Reason = "invalid-source"
+		return s
+	}
+	s.Supported = true
+	var latest uiSnapshot
+	var err error
+	if check && !s.Updating {
+		latest, err = u.check(ctx)
+	} else {
+		state.mu.Lock()
+		if state.key == u.key() {
+			latest, err = state.latest, state.err
+		}
+		state.mu.Unlock()
+	}
+	if err != nil {
+		s.CheckError = err.Error()
+	}
+	if latest.digest != "" {
+		s.CurrentDigest, s.LatestDigest = latest.currentDigest, latest.digest
+		s.LatestVersion, s.LatestCommit = latest.info.Version, latest.info.SourceCommit
+		s.UpdateAvailable = err == nil && latest.currentDigest != latest.digest
+	}
+	s.Updating = state.updating.Load()
+	return s
 }
 
-func detectFileType(data []byte) compressionType {
-	if len(data) < 4 {
-		return typeUnknown
-	}
-
-	// Zip: 0x50 0x4B 0x03 0x04
-	if data[0] == 0x50 && data[1] == 0x4B && data[2] == 0x03 && data[3] == 0x04 {
-		return typeZip
-	}
-
-	// GZip: 0x1F 0x8B
-	if data[0] == 0x1F && data[1] == 0x8B {
-		return typeTarGzip
-	}
-
-	return typeUnknown
-}
-
-func (u *UIUpdater) downloadUI() error {
-	data, err := downloadForBytes(u.externalUIURL)
-	if err != nil {
-		return fmt.Errorf("can't download file: %w", err)
-	}
-
-	tmpDir := C.Path.Resolve("downloadUI.tmp")
-	defer os.RemoveAll(tmpDir)
-
-	os.RemoveAll(tmpDir) // cleanup tmp dir before extract
-	log.Debugln("extractedFolder: %s", tmpDir)
-	err = extract(data, tmpDir)
-	if err != nil {
-		return fmt.Errorf("can't extract compressed file: %w", err)
-	}
-
-	log.Debugln("cleanupFolder: %s", u.externalUIPath)
-	err = cleanup(u.externalUIPath) // cleanup files in dir don't remove dir itself
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("cleanup exist file error: %w", err)
-		}
-	}
-
-	err = u.prepareUIPath()
-	if err != nil {
-		return fmt.Errorf("prepare UI path failed: %w", err)
-	}
-
-	log.Debugln("moveFolder from %s to %s", tmpDir, u.externalUIPath)
-	err = moveDir(tmpDir, u.externalUIPath) // move files from tmp to target
-	if err != nil {
-		return fmt.Errorf("move UI folder failed: %w", err)
-	}
-	return nil
-}
-
-func (u *UIUpdater) prepareUIPath() error {
-	if _, err := os.Stat(u.externalUIPath); os.IsNotExist(err) {
-		log.Infoln("dir %s does not exist, creating", u.externalUIPath)
-		if err := os.MkdirAll(u.externalUIPath, os.ModePerm); err != nil {
-			log.Warnln("create dir %s error: %s", u.externalUIPath, err)
-		}
-	}
-	return nil
-}
-
-func unzip(data []byte, dest string) error {
-	r, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		return err
-	}
-
-	// check whether or not only exists singleRoot dir
-
-	for _, f := range r.File {
-		fpath := filepath.Join(dest, f.Name)
-
-		if !inDest(fpath, dest) {
-			return fmt.Errorf("invalid file path: %s", fpath)
-		}
-		info := f.FileInfo()
-		if info.IsDir() {
-			os.MkdirAll(fpath, os.ModePerm)
-			continue
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			continue // disallow symlink
-		}
-		if err = os.MkdirAll(filepath.Dir(fpath), os.ModePerm); err != nil {
-			return err
-		}
-		outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode().Perm())
-		if err != nil {
-			return err
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
-		_, err = io.Copy(outFile, rc)
-		outFile.Close()
-		rc.Close()
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func untgz(data []byte, dest string) error {
-	gzr, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	defer gzr.Close()
-
-	tr := tar.NewReader(gzr)
-
+func (u *UIUpdater) check(ctx context.Context) (uiSnapshot, error) {
+	state, key := u.state(), u.key()
 	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			break
+		if !u.active() {
+			return uiSnapshot{}, ErrUIConfigurationChanged
 		}
-		if err != nil {
-			return err
+		state.mu.Lock()
+		if state.key == key && !state.checked.IsZero() && time.Since(state.checked) < uiCheckTTL {
+			latest, err := state.latest, state.err
+			state.mu.Unlock()
+			return latest, err
 		}
-
-		fpath := filepath.Join(dest, header.Name)
-
-		if !inDest(fpath, dest) {
-			return fmt.Errorf("invalid file path: %s", fpath)
+		done := state.checking
+		if done != nil && state.checkingKey != key {
+			state.mu.Unlock()
+			return uiSnapshot{}, ErrUIUpdateBusy
 		}
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err = os.MkdirAll(fpath, os.FileMode(header.Mode)); err != nil {
-				return err
+		if done == nil {
+			// Checks may join an existing check, but never queue behind a POST.
+			if !state.operation.TryLock() {
+				state.mu.Unlock()
+				return uiSnapshot{}, ErrUIUpdateBusy
 			}
-		case tar.TypeReg:
-			if err = os.MkdirAll(filepath.Dir(fpath), os.ModePerm); err != nil {
-				return err
-			}
-			outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(header.Mode).Perm())
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(outFile, tr); err != nil {
-				outFile.Close()
-				return err
-			}
-			outFile.Close()
+			done = make(chan struct{})
+			state.checking, state.checkingKey = done, key
+			// A single bounded check survives a tab disconnect. Other callers
+			// join it; each still respects its own request cancellation.
+			go func() {
+				state.mu.Lock()
+				previous := state.latest
+				state.mu.Unlock()
+				conditional := previous
+				if previous.key != key {
+					conditional = uiSnapshot{}
+				}
+				checkCtx, cancel := u.operationContext(context.Background(), uiCheckLimit)
+				latest, err := u.prepareSnapshot(checkCtx, conditional)
+				cancel()
+				if !u.active() {
+					if latest.work != "" && latest.work != conditional.work {
+						_ = os.RemoveAll(latest.work)
+					}
+					conditional, err = uiSnapshot{}, ErrUIConfigurationChanged
+				}
+				if err != nil {
+					latest = conditional
+				}
+				if err == nil && latest.currentDigest == latest.digest && latest.work != "" {
+					_ = os.RemoveAll(latest.work)
+					latest.work, latest.root, latest.files = "", "", nil
+				}
+				if previous.work != "" && previous.work != latest.work {
+					_ = os.RemoveAll(previous.work)
+				}
+				state.mu.Lock()
+				state.latest, state.err, state.key, state.checked = latest, err, key, time.Now()
+				state.checking = nil
+				state.expireLocked()
+				state.operation.Unlock()
+				close(done)
+				state.mu.Unlock()
+			}()
+		}
+		state.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return uiSnapshot{}, ctx.Err()
+		case <-done:
+			// A check for another configured source can have been in progress.
+			// Loop to return only a snapshot for this URL and target directory.
 		}
 	}
-	return nil
 }
 
-func extract(data []byte, dest string) error {
-	fileType := detectFileType(data)
-	log.Debugln("compression Type: %s", fileType)
-	switch fileType {
-	case typeZip:
-		return unzip(data, dest)
-	case typeTarGzip:
-		return untgz(data, dest)
-	default:
-		return fmt.Errorf("unknown or unsupported file type")
+// Called with mu held. Files expire even when the user closes the dashboard;
+// only small HTTP validators and digests remain in memory until the next check.
+func (s *uiUpdateCoordinator) expireLocked() {
+	if s.expiry != nil {
+		s.expiry.Stop()
 	}
-}
-
-func cleanTarPath(path string) string {
-	// remove prefix ./ or ../
-	path = strings.TrimPrefix(path, "./")
-	path = strings.TrimPrefix(path, "../")
-
-	// normalize path
-	path = filepath.Clean(path)
-
-	// transfer delimiters to system std
-	path = filepath.FromSlash(path)
-
-	// remove prefix path delimiters
-	path = strings.TrimPrefix(path, string(os.PathSeparator))
-
-	return path
-}
-
-func cleanup(root string) error {
-	dirEntryList, err := os.ReadDir(root)
-	if err != nil {
-		return err
+	if s.latest.work == "" {
+		return
 	}
-
-	for _, dirEntry := range dirEntryList {
-		err = os.RemoveAll(filepath.Join(root, dirEntry.Name()))
-		if err != nil {
-			return err
+	work := s.latest.work
+	s.expiry = time.AfterFunc(uiCheckTTL, func() {
+		s.operation.Lock()
+		defer s.operation.Unlock()
+		s.mu.Lock()
+		remove := false
+		if s.latest.work == work {
+			s.latest.work, s.latest.root = "", ""
+			s.latest.files = nil
+			remove = true
 		}
-	}
-	return nil
-}
-
-func moveDir(src string, dst string) error {
-	dirEntryList, err := os.ReadDir(src)
-	if err != nil {
-		return err
-	}
-
-	if len(dirEntryList) == 1 && dirEntryList[0].IsDir() {
-		src = filepath.Join(src, dirEntryList[0].Name())
-		log.Debugln("match the singleRoot: %s", src)
-		dirEntryList, err = os.ReadDir(src)
-		if err != nil {
-			return err
-		}
-	}
-
-	for _, dirEntry := range dirEntryList {
-		srcPath := filepath.Join(src, dirEntry.Name())
-		dstPath := filepath.Join(dst, dirEntry.Name())
-		err = os.Rename(srcPath, dstPath)
-		if err != nil {
-			// Fallback for invalid cross-device link (errno:18).
-			if errors.Is(err, syscall.Errno(18)) {
-				err = copyAll(srcPath, dstPath)
-				_ = os.RemoveAll(srcPath)
-			}
-		}
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// copyAll copy the src path and any children it contains to dst
-// modify from [os.CopyFS]
-func copyAll(src, dst string) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		fpath, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		newPath := filepath.Join(dst, fpath)
-
-		switch info.Mode().Type() {
-		case os.ModeDir:
-			return os.MkdirAll(newPath, info.Mode().Perm())
-		case os.ModeSymlink:
-			target, err := os.Readlink(path)
-			if err != nil {
-				return err
-			}
-			return os.Symlink(target, newPath)
-		case 0:
-			r, err := os.Open(path)
-			if err != nil {
-				return err
-			}
-			defer r.Close()
-			w, err := os.OpenFile(newPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode().Perm())
-			if err != nil {
-				return err
-			}
-
-			if _, err := io.Copy(w, r); err != nil {
-				w.Close()
-				return &os.PathError{Op: "Copy", Path: newPath, Err: err}
-			}
-			return w.Close()
-		default:
-			return &os.PathError{Op: "CopyFS", Path: path, Err: os.ErrInvalid}
+		s.mu.Unlock()
+		if remove {
+			_ = os.RemoveAll(work)
 		}
 	})
 }
 
-func inDest(fpath, dest string) bool {
-	if rel, err := filepath.Rel(dest, fpath); err == nil {
-		if filepath.IsLocal(rel) {
-			return true
+func (u *UIUpdater) get(ctx context.Context, headers map[string][]string) (*http.Response, error) {
+	if u.request != nil {
+		return u.request(ctx, u.externalUIURL, headers)
+	}
+	return mihomoHttp.HttpRequest(ctx, u.externalUIURL, http.MethodGet, headers, nil)
+}
+
+func uiDownloadError(err error) error {
+	// net/url errors can contain credentials or signed query parameters. Never
+	// surface them through the public status endpoint or the core log.
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errors.New("dashboard download timed out")
+	}
+	if errors.Is(err, context.Canceled) {
+		return errors.New("dashboard download canceled")
+	}
+	return errors.New("unable to download the configured dashboard")
+}
+
+func (u *UIUpdater) target() (string, error) {
+	if u.externalUIPath == "" {
+		return "", errors.New("external UI directory is not configured")
+	}
+	target, err := canonicalUIPath(u.externalUIPath)
+	if err != nil {
+		return "", err
+	}
+	if filepath.Dir(target) == target {
+		return "", errors.New("refusing to replace the core configuration directory with a UI")
+	}
+	for _, protected := range []string{C.Path.HomeDir(), C.Path.Config()} {
+		resolved, resolveErr := canonicalUIPath(protected)
+		if resolveErr != nil {
+			return "", resolveErr
+		}
+		if relative, relErr := filepath.Rel(target, resolved); relErr == nil && filepath.IsLocal(relative) {
+			return "", errors.New("refusing to replace a directory containing core configuration with a UI")
 		}
 	}
-	return false
+	entries, err := os.ReadDir(target)
+	if err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	if len(entries) > 0 {
+		if err = uiRegularFile(filepath.Join(target, "index.html")); err != nil {
+			return "", errors.New("existing UI directory does not contain a valid index.html")
+		}
+	}
+	return target, nil
+}
+
+// EvalSymlinks requires an existing path. Resolve the existing ancestor too,
+// so a not-yet-created UI beneath a symlink gets the same protection.
+func canonicalUIPath(name string) (string, error) {
+	name, err := filepath.Abs(name)
+	if err != nil {
+		return "", err
+	}
+	var suffix []string
+	for {
+		resolved, resolveErr := filepath.EvalSymlinks(name)
+		if resolveErr == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return resolved, nil
+		}
+		if !os.IsNotExist(resolveErr) || filepath.Dir(name) == name {
+			return "", resolveErr
+		}
+		suffix = append(suffix, filepath.Base(name))
+		name = filepath.Dir(name)
+	}
+}
+
+func (u *UIUpdater) prepareSnapshot(ctx context.Context, previous uiSnapshot) (snapshot uiSnapshot, err error) {
+	if !u.sourceValid() {
+		return snapshot, errors.New("external-ui-url must be a valid HTTP or HTTPS URL")
+	}
+	target, err := u.target()
+	if err != nil {
+		return snapshot, err
+	}
+	headers := map[string][]string{}
+	if previous.digest != "" {
+		if previous.etag != "" {
+			headers["If-None-Match"] = []string{previous.etag}
+		}
+		if previous.modified != "" {
+			headers["If-Modified-Since"] = []string{previous.modified}
+		}
+	}
+	response, err := u.get(ctx, headers)
+	if err != nil {
+		return snapshot, uiDownloadError(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotModified && previous.digest != "" {
+		snapshot = previous
+		if snapshot.target != target {
+			return uiSnapshot{}, ErrUIConfigurationChanged
+		}
+		snapshot.currentDigest, _, err = scanUITree(ctx, target, true)
+		if os.IsNotExist(err) {
+			err = nil
+		}
+		return snapshot, err
+	}
+	if response.StatusCode != http.StatusOK {
+		return snapshot, fmt.Errorf("dashboard source returned HTTP %d", response.StatusCode)
+	}
+	if response.ContentLength > maxUIArchive {
+		return snapshot, errors.New("UI archive is too large")
+	}
+	if err = os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return snapshot, err
+	}
+	work, err := os.MkdirTemp(filepath.Dir(target), ".mihomo-ui-stage-")
+	if err != nil {
+		return snapshot, err
+	}
+	defer func() {
+		if err != nil {
+			_ = os.RemoveAll(work)
+		}
+	}()
+	archivePath := filepath.Join(work, "archive")
+	file, err := os.OpenFile(archivePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return snapshot, err
+	}
+	n, copyErr := io.Copy(file, io.LimitReader(uiContextReader{ctx, response.Body}, maxUIArchive+1))
+	closeErr := file.Close()
+	if copyErr != nil {
+		return snapshot, uiDownloadError(copyErr)
+	}
+	if n > maxUIArchive {
+		return snapshot, errors.New("UI archive is too large")
+	}
+	if closeErr != nil {
+		return snapshot, closeErr
+	}
+	root, err := extractUIArchive(ctx, archivePath, filepath.Join(work, "content"))
+	if err != nil {
+		return snapshot, fmt.Errorf("invalid dashboard archive: %w", err)
+	}
+	_ = os.Remove(archivePath)
+	snapshot = uiSnapshot{key: u.key(), work: work, root: root, target: target, info: readUIBuildInfo(root)}
+	snapshot.digest, snapshot.files, err = scanUITree(ctx, root, false)
+	if err != nil {
+		return snapshot, err
+	}
+	snapshot.currentDigest, _, err = scanUITree(ctx, target, true)
+	if os.IsNotExist(err) {
+		err = nil
+	}
+	if etag := response.Header.Get("ETag"); len(etag) <= 8192 {
+		snapshot.etag = etag
+	}
+	if modified := response.Header.Get("Last-Modified"); len(modified) <= 256 {
+		snapshot.modified = modified
+	}
+	return snapshot, err
+}
+
+func readUIFile(name string, limit int64) ([]byte, error) {
+	info, err := os.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > limit {
+		return nil, errors.New("invalid or oversized UI metadata file")
+	}
+	file, err := os.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err == nil && int64(len(data)) > limit {
+		err = errors.New("UI metadata is too large")
+	}
+	return data, err
+}
+
+func readUIBuildInfo(root string) uiBuildInfo {
+	data, err := readUIFile(filepath.Join(root, "build-info.json"), maxUIMetadata)
+	var info uiBuildInfo
+	if err != nil || json.Unmarshal(data, &info) != nil {
+		return uiBuildInfo{}
+	}
+	// Metadata is optional display information; updates compare file digests.
+	if len(info.Version) > 64 || strings.ContainsAny(info.Version, "\r\n") {
+		info.Version = ""
+	}
+	if len(info.SourceCommit) != 40 {
+		info.SourceCommit = ""
+	} else if _, err = hex.DecodeString(info.SourceCommit); err != nil {
+		info.SourceCommit = ""
+	}
+	return info
+}
+
+func (u *UIUpdater) AutoDownloadUI() {
+	if !u.autoDownloadUI {
+		return
+	}
+	entries, err := os.ReadDir(u.externalUIPath)
+	if err != nil && !os.IsNotExist(err) {
+		log.Errorln("Cannot inspect external UI directory")
+		return
+	}
+	if len(entries) > 0 {
+		return
+	}
+	if err = u.DownloadUI(); err != nil && !errors.Is(err, ErrUIUpdateBusy) {
+		log.Errorln("Error downloading UI: %s", err)
+	}
+}
+
+func (u *UIUpdater) DownloadUI() error { return u.DownloadUIContext(context.Background()) }
+
+func (u *UIUpdater) DownloadUIContext(ctx context.Context) (err error) {
+	state, key := u.state(), u.key()
+	if !state.operation.TryLock() {
+		return ErrUIUpdateBusy
+	}
+	defer state.operation.Unlock()
+	state.updating.Store(true)
+	defer state.updating.Store(false)
+	if !u.active() {
+		return ErrUIConfigurationChanged
+	}
+	ctx, cancel := u.operationContext(ctx, uiUpdateLimit)
+	defer cancel()
+	target, err := u.target()
+	if err != nil {
+		return err
+	}
+	state.mu.Lock()
+	previous := state.latest
+	snapshot := previous
+	usable := state.key == key && state.err == nil && !state.checked.IsZero() && time.Since(state.checked) < uiCheckTTL && snapshot.root != ""
+	state.mu.Unlock()
+	if !usable {
+		// A cached 304 may have no staged bytes after expiry. Fetch a complete
+		// archive and validate that snapshot before installing it.
+		snapshot, err = u.prepareSnapshot(ctx, uiSnapshot{})
+		if err != nil {
+			return err
+		}
+	}
+	defer func() {
+		if snapshot.work != "" {
+			_ = os.RemoveAll(snapshot.work)
+		}
+		if previous.work != "" && previous.work != snapshot.work {
+			_ = os.RemoveAll(previous.work)
+		}
+		state.mu.Lock()
+		if state.expiry != nil {
+			state.expiry.Stop()
+		}
+		if err == nil {
+			snapshot.work, snapshot.root = "", ""
+			snapshot.files = nil
+			snapshot.currentDigest = snapshot.digest
+			state.latest, state.err, state.key, state.checked = snapshot, nil, key, time.Now()
+		} else {
+			state.latest, state.checked = uiSnapshot{}, time.Time{}
+		}
+		state.mu.Unlock()
+	}()
+	if snapshot.target != target {
+		return ErrUIConfigurationChanged
+	}
+	currentDigest, currentFiles, err := scanUITree(ctx, target, true)
+	if os.IsNotExist(err) {
+		err = nil
+	}
+	if err != nil {
+		return err
+	}
+	if currentDigest == snapshot.digest {
+		return nil
+	}
+	if err = retainUIAssets(ctx, target, snapshot.root, currentFiles, snapshot.files); err != nil {
+		return fmt.Errorf("retain open dashboard assets: %w", err)
+	}
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	rename := u.rename
+	if rename == nil {
+		rename = os.Rename
+	}
+	removeAll := u.removeAll
+	if removeAll == nil {
+		removeAll = os.RemoveAll
+	}
+	// The brief filesystem commit and configuration activation are ordered;
+	// a reload never waits for the network download or archive extraction.
+	if u.beforeCommit != nil {
+		u.beforeCommit()
+	}
+	uiActivation.Lock()
+	if !u.active() {
+		err = ErrUIConfigurationChanged
+	} else {
+		var currentTarget string
+		currentTarget, err = u.target()
+		if err == nil && currentTarget != target {
+			err = ErrUIConfigurationChanged
+		}
+		if err == nil {
+			err = ctx.Err()
+		}
+		if err == nil {
+			err = installUIDirectory(snapshot.root, target, rename, removeAll)
+		}
+	}
+	uiActivation.Unlock()
+	return err
 }

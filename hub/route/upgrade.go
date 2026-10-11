@@ -1,6 +1,7 @@
 package route
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -14,6 +15,7 @@ import (
 
 func upgradeRouter() http.Handler {
 	r := chi.NewRouter()
+	r.Get("/ui", getUIUpdateStatus)
 	r.Post("/ui", updateUI)
 	if !embedMode { // disallow upgrade core/geo in embed mode
 		r.Post("/", upgradeCore)
@@ -52,11 +54,21 @@ func upgradeCore(w http.ResponseWriter, r *http.Request) {
 	go restartExecutable(execPath)
 }
 
+func getUIUpdateStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	render.JSON(w, r, updater.CurrentUIUpdater().Status(r.Context(), r.URL.Query().Get("check") == "true"))
+}
+
 func updateUI(w http.ResponseWriter, r *http.Request) {
-	err := updater.DefaultUiUpdater.DownloadUI()
+	w.Header().Set("Cache-Control", "no-store")
+	err := updater.CurrentUIUpdater().DownloadUIContext(r.Context())
 	if err != nil {
 		log.Warnln("%s", err)
-		render.Status(r, http.StatusInternalServerError)
+		status := http.StatusInternalServerError
+		if errors.Is(err, updater.ErrUIUpdateBusy) {
+			status = http.StatusConflict
+		}
+		render.Status(r, status)
 		render.JSON(w, r, newError(fmt.Sprintf("%s", err)))
 		return
 	}

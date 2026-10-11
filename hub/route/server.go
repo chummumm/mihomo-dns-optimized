@@ -104,6 +104,7 @@ func SetUIPath(path string) {
 
 func router(isDebug bool, secret string, dohServer string, cors Cors) *chi.Mux {
 	r := chi.NewRouter()
+	r.Use(configFileNoStore)
 	cors.Apply(r)
 	if isDebug {
 		r.Mount("/debug", func() http.Handler {
@@ -145,7 +146,7 @@ func router(isDebug bool, secret string, dohServer string, cors Cors) *chi.Mux {
 
 	if uiPath != "" {
 		r.Group(func(r chi.Router) {
-			fs := http.StripPrefix("/ui", http.FileServer(http.Dir(uiPath)))
+			fs := http.StripPrefix("/ui", http.FileServer(uiFileSystem{root: uiPath}))
 			r.Get("/ui", http.RedirectHandler("/ui/", http.StatusTemporaryRedirect).ServeHTTP)
 			r.Get("/ui/*", func(w http.ResponseWriter, r *http.Request) {
 				fs.ServeHTTP(w, r)
