@@ -3,7 +3,7 @@ import classnames from 'classnames'
 import { Fragment, useMemo, useLayoutEffect, useRef, useState, useEffect } from 'react'
 import AutoSizer from 'react-virtualized-auto-sizer'
 
-import { Header, Checkbox, Modal, Icon, Drawer, Card, Button, LineBullet, RollingBytes, useLineColor } from '@components'
+import { Header, Checkbox, Modal, Icon, Drawer, Card, Button, LineBullet, StaticBytes, useLineColor } from '@components'
 import { formatDateTime, fromNow } from '@lib/date'
 import { basePath, formatTraffic } from '@lib/helper'
 import { useObject, useVisible } from '@lib/hook'
@@ -338,11 +338,11 @@ export default function Connections () {
                     <div className="connections-rate-row">
                         <div className="connections-rate is-down">
                             <span className="connections-rate-label">↓ {t('rates.download')}</span>
-                            <RollingBytes className="connections-rate-value" value={rate.down} rate />
+                            <StaticBytes className="connections-rate-value" value={rate.down} rate />
                         </div>
                         <div className="connections-rate is-up">
                             <span className="connections-rate-label">↑ {t('rates.upload')}</span>
-                            <RollingBytes className="connections-rate-value" value={rate.up} rate />
+                            <StaticBytes className="connections-rate-value" value={rate.up} rate />
                         </div>
                         {totals}
                     </div>

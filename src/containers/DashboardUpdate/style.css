@@ -1,0 +1,96 @@
+.dashboard-update-description {
+    padding: 0 var(--sp-5) var(--sp-4);
+    border-top: 1px solid var(--hair);
+}
+.dashboard-update-description .settings-hint {
+    margin-top: 10px;
+}
+.dashboard-update-status {
+    margin: 14px 0 0;
+    color: var(--text-2);
+    font-size: var(--t-sm);
+    line-height: 1.7;
+    overflow-wrap: anywhere;
+}
+.dashboard-update-settings .settings-row-action {
+    flex-wrap: wrap;
+}
+.dashboard-update-open {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    color: var(--accent);
+    font-size: var(--t-xs);
+}
+.dashboard-update-open:focus-visible,
+.dashboard-update-dismiss:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+}
+.dashboard-update-notice {
+    position: fixed;
+    z-index: var(--z-popover);
+    right: 24px;
+    bottom: 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: min(660px, calc(100vw - 32px));
+    padding: 15px 16px;
+    border: 1px solid var(--hair-2);
+    border-radius: 14px;
+    background: var(--panel-solid);
+    box-shadow: 0 12px 46px #0002;
+    color: var(--accent);
+}
+.dashboard-update-notice-copy {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+}
+.dashboard-update-notice-copy strong {
+    color: var(--text);
+    font-size: var(--t-sm);
+    font-weight: 600;
+}
+.dashboard-update-notice-copy span {
+    color: var(--muted);
+    font-size: var(--t-xs);
+    line-height: 1.6;
+}
+.dashboard-update-dismiss {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border: 0;
+    border-radius: 7px;
+    color: var(--muted);
+    background: transparent;
+    cursor: pointer;
+}
+.dashboard-update-dismiss:hover {
+    color: var(--text);
+    background: var(--hover);
+}
+@media (max-width: 720px) {
+    .dashboard-update-notice {
+        right: 12px;
+        bottom: calc(86px + env(safe-area-inset-bottom));
+        left: 12px;
+        flex-wrap: wrap;
+        max-width: none;
+        padding: 13px;
+    }
+    .dashboard-update-notice-copy {
+        flex: 1;
+    }
+    .dashboard-update-notice .button,
+    .dashboard-update-notice .dashboard-update-open {
+        margin-left: 31px;
+    }
+    .dashboard-update-notice .dashboard-update-dismiss {
+        margin-left: auto;
+    }
+}

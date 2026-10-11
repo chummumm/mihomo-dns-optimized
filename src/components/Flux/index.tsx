@@ -85,6 +85,18 @@ interface RollingBytesProps extends BaseComponentProps {
     duration?: number
 }
 
+// Live throughput is a sampled reading: render the current value immediately.
+// The shared rolling presentation remains available for other dashboard values.
+export function StaticBytes ({ value, rate = false, className, style }: RollingBytesProps) {
+    const [number, unit] = byteParts(value)
+    return (
+        <span className={classnames('rolling-bytes', className)} style={style}>
+            <span className="rolling-bytes-number">{number}</span>
+            <small className="rolling-bytes-unit">{rate ? `${unit}/s` : unit}</small>
+        </span>
+    )
+}
+
 // A byte count or rate that rolls to its new value, number and unit in separate spans.
 export function RollingBytes ({ value, rate = false, duration = 800, className, style }: RollingBytesProps) {
     const number = useRef<HTMLSpanElement>(null)

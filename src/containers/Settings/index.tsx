@@ -5,11 +5,14 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 
 import { Header, Card, Switch, Button, ButtonSelect, type ButtonSelectOptions, Input, Select, success, error } from '@components'
+import { DashboardUpdateSettings, useDashboardUpdates } from '@containers/DashboardUpdate'
 import { type Lang } from '@i18n'
 import { useObject } from '@lib/hook'
 import { jsBridge } from '@lib/jsBridge'
 import { DEFAULT_PROBE_URL, normalizeProbeURL } from '@lib/probe'
 import { useI18n, useClashXData, useGeneral, useVersion, useClient, useConfig, identityAtom, hostSelectIdxStorageAtom, hostsStorageAtom, useAPIInfo } from '@stores'
+
+import { ConfigEditor } from './ConfigEditor'
 import './style.css'
 
 const languageOptions: ButtonSelectOptions[] = [{ label: '中文', value: 'zh_CN' }, { label: 'English', value: 'en_US' }]
@@ -34,6 +37,8 @@ export default function Settings () {
     const savedProbeURL = normalizeProbeURL(settings.probeURL) ?? DEFAULT_PROBE_URL
     const [probeURL, setProbeURL] = useState(savedProbeURL)
     const [reloading, setReloading] = useState(false)
+    const [editorOpen, setEditorOpen] = useState(false)
+    const { setEditorOpen: setUpdateEditorOpen } = useDashboardUpdates()
     const reloadRequest = useRef<AbortController | null>(null)
     const [info, set] = useObject({
         socks5ProxyPort: 7891,
@@ -48,6 +53,13 @@ export default function Settings () {
     }, [general, set])
 
     useEffect(() => { setProbeURL(savedProbeURL) }, [savedProbeURL])
+
+    useEffect(() => {
+        setUpdateEditorOpen(editorOpen)
+        return () => setUpdateEditorOpen(false)
+    }, [editorOpen, setUpdateEditorOpen])
+
+    useEffect(() => { setEditorOpen(false) }, [client])
 
     useEffect(() => {
         setReloading(false)
@@ -264,6 +276,7 @@ export default function Settings () {
                         </div>
                     </div>
                     <div className="settings-row settings-row-action">
+                        <Button icon="edit" disabled={isClashX || reloading} onClick={() => setEditorOpen(true)}>{t('labels.editConfig')}</Button>
                         <Button icon="update" loading={reloading} disabled={reloading} onClick={handleReloadConfig}>{t(reloading ? 'labels.reloading' : 'labels.reloadConfig')}</Button>
                     </div>
                 </Card>
@@ -297,6 +310,8 @@ export default function Settings () {
                 </Card>
             </section>
 
+            <DashboardUpdateSettings />
+
             <section className="settings-section">
                 <h2 className="settings-section-title">{t('sections.system')}</h2>
                 <Card className="settings-card">
@@ -319,6 +334,7 @@ export default function Settings () {
                     </div>
                 </Card>
             </section>
+            <ConfigEditor show={editorOpen} onClose={() => setEditorOpen(false)} />
         </div>
     )
 }

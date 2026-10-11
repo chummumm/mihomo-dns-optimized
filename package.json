@@ -1,6 +1,6 @@
 {
     "name": "clash-dashboard",
-    "version": "0.3.5",
+    "version": "0.3.6",
     "packageManager": "pnpm@8.15.9",
     "description": "Web port of clash.",
     "keywords": [
@@ -21,8 +21,8 @@
         "start": "vite",
         "build": "vite build",
         "typecheck": "tsc --noEmit",
-        "test:unit": "node --test src/containers/Connections/connections.test.cjs src/lib/probe.test.cjs src/containers/Proxies/resolve.test.cjs scripts/test-topology-renderer.cjs",
-        "test:browser": "node scripts/test-connections.cjs && node scripts/test-dns.cjs && node scripts/test-dashboard-features.cjs && node scripts/test-logs.cjs",
+        "test:unit": "node --test src/containers/Connections/connections.test.cjs src/lib/probe.test.cjs src/containers/Proxies/resolve.test.cjs scripts/test-topology-renderer.cjs src/containers/Settings/config-editor-model.test.cjs src/containers/DashboardUpdate/model.test.cjs",
+        "test:browser": "node scripts/test-connections.cjs && node scripts/test-dns.cjs && node scripts/test-dashboard-features.cjs && node scripts/test-logs.cjs && node scripts/test-config-editor.cjs && node scripts/test-dashboard-update.cjs",
         "lint": "pnpm lint:ts",
         "lint:ts": "eslint --ext=jsx,ts,tsx --fix src",
         "contributors:add": "all-contributors add",

@@ -14,6 +14,27 @@ export interface Config {
     'log-level': string
 }
 
+export interface ConfigFile {
+    path: string
+    content: string
+    revision: string
+    max_size: number
+}
+
+export interface DashboardUpdateStatus {
+    supported: boolean
+    reason?: string
+    current_version: string
+    current_commit: string
+    current_digest?: string
+    latest_version?: string
+    latest_commit?: string
+    latest_digest?: string
+    update_available: boolean
+    updating: boolean
+    check_error?: string
+}
+
 export interface Rules {
     rules: Rule[]
 }
@@ -124,6 +145,22 @@ export class Client {
 
     async reloadConfig (signal?: AbortSignal) {
         return await this.axiosClient.put<void>('configs', {}, { signal })
+    }
+
+    async getConfigFile (signal?: AbortSignal) {
+        return await this.axiosClient.get<ConfigFile>('configs/file', { signal, timeout: 15000 })
+    }
+
+    async saveConfigFile (content: string, revision: string, signal?: AbortSignal) {
+        return await this.axiosClient.put<ConfigFile>('configs/file', { content, revision }, { signal, timeout: 30000 })
+    }
+
+    async getDashboardUpdate (check = false, signal?: AbortSignal) {
+        return await this.axiosClient.get<DashboardUpdateStatus>('upgrade/ui', { signal, timeout: 60000, params: check ? { check: true } : undefined })
+    }
+
+    async updateDashboard (signal?: AbortSignal) {
+        return await this.axiosClient.post<{ status: string }>('upgrade/ui', {}, { signal, timeout: 180000 })
     }
 
     async getRules () {

@@ -1,0 +1,264 @@
+/* Configuration editor: the uploaded console surface, isolated from existing settings. */
+/* On larger screens the editor takes most of the window. */
+.modal.config-editor-modal {
+    width: min(1360px, calc(100vw - 64px));
+    max-height: calc(100dvh - 32px);
+}
+
+.config-editor-body {
+    height: min(800px, calc(100dvh - 140px));
+    margin-bottom: 0;
+    overflow: auto;
+    padding: 4px;
+    margin-inline: -4px;
+}
+
+.config-editor-content {
+    display: grid;
+    grid-template-rows: auto auto minmax(120px, 1fr) auto auto;
+    gap: 10px;
+    height: 100%;
+    min-height: 300px;
+}
+
+.config-editor-notice {
+    padding: 7px 10px;
+    border: 1px solid var(--hair);
+    border-radius: 8px;
+    color: var(--text-3);
+    background: var(--sunken);
+    font-size: var(--t-xs);
+    line-height: 1.5;
+}
+
+.config-editor-notice.is-error {
+    border-color: color-mix(in srgb, var(--warn) 32%, transparent);
+    color: var(--warn);
+}
+
+.config-editor-notice.is-saved {
+    color: var(--good);
+}
+
+.config-editor-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px 12px;
+    min-width: 0;
+}
+
+.config-editor-file {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    height: 28px;
+    padding: 0 10px;
+    border: 1px solid var(--hair);
+    border-radius: var(--r-chip);
+    color: var(--text-2);
+    font-family: var(--font-mono);
+    font-size: var(--t-2xs);
+    font-stretch: var(--mono-dense);
+}
+
+.config-editor-file > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.config-editor-file .icon {
+    color: var(--accent);
+}
+
+.config-editor-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--warn);
+    font-size: var(--t-xs);
+    font-weight: 600;
+}
+
+.config-editor-state i {
+    width: 7px;
+    height: 7px;
+    border-radius: 2px;
+    background: currentColor;
+    box-shadow: 0 0 8px currentColor;
+}
+
+.config-editor-state.is-connected {
+    color: var(--good);
+}
+
+.config-editor-frame {
+    position: relative;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    min-height: 0;
+    overflow: hidden;
+    border: 1px solid var(--hair-2);
+    border-radius: 12px;
+    background: var(--sunken);
+    transition: border-color var(--dur-2) var(--ease-out), box-shadow var(--dur-3) var(--ease-out);
+}
+
+.config-editor-frame:focus-within {
+    border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent), 0 0 30px -12px var(--glow);
+}
+
+.config-editor-gutter,
+.config-editor-text,
+.config-editor-line-measure {
+    padding: 12px 0;
+    font-family: var(--font-mono);
+    font-size: var(--t-xs);
+    font-stretch: var(--mono-dense);
+    line-height: 1.7;
+    tab-size: 2;
+}
+
+.config-editor-line-measure {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: auto;
+    height: auto;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    visibility: hidden;
+    pointer-events: none;
+    white-space: pre;
+}
+
+.config-editor-gutter {
+    height: 100%;
+    min-width: 46px;
+    padding-top: 0;
+    padding-bottom: 0;
+    padding-right: 10px;
+    padding-left: 12px;
+    overflow: hidden;
+    border-right: 1px solid var(--hair);
+    color: var(--faint);
+    text-align: right;
+    user-select: none;
+}
+
+.config-editor-gutter pre {
+    margin: 0;
+    font: inherit;
+    line-height: inherit;
+    white-space: pre;
+}
+
+.config-editor-text {
+    min-height: 0;
+    width: 100%;
+    height: 100%;
+    padding-right: 14px;
+    padding-left: 14px;
+    overflow: auto;
+    border: 0;
+    outline: none;
+    background: transparent;
+    color: var(--text);
+    caret-color: var(--accent);
+    resize: none;
+    white-space: pre;
+}
+
+.config-editor-text:focus-visible {
+    outline: none;
+}
+
+.config-editor-empty {
+    position: absolute;
+    inset: 0 0 0 46px;
+    display: grid;
+    place-content: center;
+    justify-items: center;
+    gap: 8px;
+    padding: var(--sp-6);
+    color: var(--text-3);
+    font-size: var(--t-xs);
+    text-align: center;
+    pointer-events: none;
+}
+
+.config-editor-empty .icon {
+    color: var(--accent);
+    filter: drop-shadow(0 0 10px var(--glow));
+}
+
+.config-editor-empty b {
+    color: var(--text-2);
+    font-size: var(--t-sm);
+    font-weight: 600;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .config-editor-empty {
+        animation: panel-in 420ms var(--ease-out) 80ms backwards;
+    }
+}
+
+.config-editor-status {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 16px;
+    color: var(--faint);
+    font-size: var(--t-2xs);
+}
+
+.config-editor-note {
+    margin-right: auto;
+    max-width: 65ch;
+}
+
+.config-editor-footer {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: var(--sp-2);
+    padding-top: 6px;
+}
+
+.config-editor-footer-spacer {
+    flex: 1;
+}
+
+.config-editor-confirm {
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+    border-radius: 10px;
+    color: var(--warn);
+    background: var(--sunken);
+    font-size: var(--t-xs);
+}
+
+@media (max-width: 768px) {
+    .modal.config-editor-modal {
+        width: 100%;
+        max-height: 90dvh;
+    }
+
+    .config-editor-body {
+        height: min(72dvh, 760px);
+    }
+
+    .config-editor-empty {
+        inset-inline-start: 40px;
+    }
+
+    .config-editor-gutter {
+        min-width: 40px;
+    }
+}

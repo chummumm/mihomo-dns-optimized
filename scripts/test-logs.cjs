@@ -32,6 +32,7 @@ const server = http.createServer((req, res) => {
     if (req.method !== 'GET') return json(res, 405, { message: 'read-only fixture' })
     const api = {
         '/version': { version: 'isolated-log-ui', premium: false },
+        '/upgrade/ui': { supported: false, reason: 'ui-not-configured', current_version: '', current_commit: '', update_available: false, updating: false },
         '/configs': config,
         '/connections': { connections: [], uploadTotal: 0, downloadTotal: 0 },
         '/rules': { rules: [] },
