@@ -33,6 +33,9 @@ export interface DashboardUpdateStatus {
     update_available: boolean
     updating: boolean
     check_error?: string
+    auto_update?: boolean
+    update_interval?: number
+    next_check?: string
 }
 
 export interface Rules {

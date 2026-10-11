@@ -94,7 +94,6 @@ export const configAtom = atomWithStorage('profile', {
     breakConnections: false,
     logLevel: '',
     probeURL: DEFAULT_PROBE_URL,
-    autoUpdateDashboard: false,
 })
 
 export function useConfig () {

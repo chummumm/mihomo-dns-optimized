@@ -70,8 +70,9 @@ async function serviceWorkerMigration() {
     }
 }
 
-async function updaterControls() {
-    const firstStatus = { supported: true, update_available: true, updating: false, current_version: '', current_commit: '', current_digest: 'a'.repeat(64), latest_digest: 'b'.repeat(64) }
+async function updaterControls(versionOnly = false) {
+    const firstStatus = { supported: true, update_available: false, updating: false, reason: 'version-unavailable', current_version: '', current_commit: '', current_digest: 'a'.repeat(64), latest_digest: 'b'.repeat(64), auto_update: false, update_interval: 24 }
+    if (versionOnly) Object.assign(firstStatus, { current_version: '0.3.7', latest_version: '0.3.7', reason: undefined })
     const secondStatus = { supported: true, update_available: false, updating: false, current_version: '', current_commit: '', current_digest: 'd'.repeat(64), latest_digest: 'd'.repeat(64) }
     const configFile = { path: '/fixture/config.yaml', content: 'mode: rule\n# editor-privacy-fixture\n', revision: 'a'.repeat(64), max_size: 4 * 1024 * 1024 }
     const statusRequests = []
@@ -151,7 +152,8 @@ async function updaterControls() {
             localStorage.setItem('language', JSON.stringify('en_US'))
             localStorage.setItem('externalControllers', JSON.stringify([{ hostname: '127.0.0.1', port: firstPort, secret: '' }]))
             localStorage.setItem('externalControllerIndex', '0')
-            if (!localStorage.getItem('profile')) localStorage.setItem('profile', JSON.stringify({ autoUpdateDashboard: false }))
+            // A saved 0.3.6 preference must never schedule checks or installs.
+            if (!localStorage.getItem('profile')) localStorage.setItem('profile', JSON.stringify({ autoUpdateDashboard: true }))
             const realNow = Date.now
             window.__updateClockOffset = 0
             Date.now = () => realNow() + window.__updateClockOffset
@@ -163,7 +165,7 @@ async function updaterControls() {
         await page.goto('http://127.0.0.1:' + firstPort + '/ui/#/settings', { waitUntil: 'networkidle' })
         const settings = page.locator('.dashboard-update-settings')
         const checkButton = () => settings.getByRole('button', { name: 'Check for updates', exact: true })
-        const automatic = () => settings.getByRole('switch', { name: 'Download updates automatically', exact: true })
+        const automatic = () => settings.locator('.settings-row').filter({ hasText: 'Core automatic updates' })
         const editor = page.locator('.config-editor-content')
         const text = editor.locator('textarea')
         const openEditor = async () => {
@@ -178,8 +180,55 @@ async function updaterControls() {
         }
         await checkButton().waitFor()
         await received(() => statusRequests.length > 0)
-        assert.equal(statusRequests[0].check, false, 'automatic updates are opt-in; opening only reads local status')
+        assert.equal(statusRequests[0].check, false, 'opening only reads local status, even with the obsolete browser preference enabled')
+        assert.equal(statusRequests.some(request => request.check), false)
         assert.equal(installations.length, 0)
+        assert.equal(await settings.getByRole('switch').count(), 0, 'the dashboard exposes no automatic-update setting')
+        assert.match(await automatic().textContent(), /Disabled/, 'automatic-update status comes from core YAML, not the saved browser preference')
+        assert.equal(await settings.getByText('24 hours', { exact: true }).count(), 1)
+        const openingRequests = statusRequests.length
+        await page.evaluate(() => { window.__updateClockOffset += 48 * 60 * 60 * 1000; document.dispatchEvent(new Event('visibilitychange')); window.dispatchEvent(new Event('online')) })
+        await page.waitForTimeout(40)
+        assert.equal(statusRequests.length, openingRequests, 'visibility and network events never schedule dashboard update requests')
+        assert.deepEqual(installations, [])
+
+        if (versionOnly) {
+            const updateButton = () => settings.getByRole('button', { name: 'Update now', exact: true })
+            const manualButton = () => settings.getByRole('button', { name: 'Install manually', exact: true })
+            const checkStatus = async () => {
+                await checkButton().click()
+                await page.waitForFunction(() => !document.querySelector('.dashboard-update-settings .button-loading'))
+            }
+            assert.equal(await updateButton().count(), 0, 'equal versions with different digests do not offer an update')
+            assert.equal(await manualButton().count(), 0, 'equal versions do not offer a manual downgrade or reinstall')
+            firstStatus.latest_version = '0.3.6'
+            await checkStatus()
+            assert.equal(await updateButton().count(), 0, 'a lower source version does not offer an update')
+            assert.equal(await manualButton().count(), 0)
+            firstStatus.latest_version = '0.3.8'
+            firstStatus.update_available = true
+            await checkStatus()
+            assert.equal(await updateButton().count(), 1, 'a newer source version offers the regular update action')
+            assert.deepEqual(installations, [], 'checking newer versions never installs from the browser')
+            firstStatus.latest_version = ''
+            firstStatus.reason = 'version-unavailable'
+            firstStatus.update_available = false
+            await checkStatus()
+            assert.equal(await updateButton().count(), 0)
+            assert.equal(await manualButton().count(), 1)
+            assert.match(await settings.locator('.dashboard-update-status').textContent(), /versions cannot be compared/)
+            assert.deepEqual(installations, [], 'missing version information never triggers a browser installation')
+            const beforeInstallNavigation = navigations
+            holdInstall = false
+            await manualButton().click()
+            await received(() => installations.length === 1)
+            await page.waitForFunction(() => !document.querySelector('.dashboard-update-settings .button-loading'))
+            assert.equal(firstStatus.current_digest, firstStatus.latest_digest, 'an explicit manual install succeeds for an unversioned archive')
+            assert.equal(navigations, beforeInstallNavigation)
+            assert.deepEqual(runtimeWrites, [])
+            assert.deepEqual(pageErrors, [])
+            return { sameVersionIgnored: true, lowerVersionIgnored: true, newerVersionAvailable: true, unversionedExplained: true, unversionedManualInstallWorks: true, automaticInstallations: 0, runtimeWrites: 0 }
+        }
 
         mode = 'hold-check'
         await checkButton().click()
@@ -191,14 +240,22 @@ async function updaterControls() {
         json(heldCheck, 200, { ...firstStatus, latest_version: 'stale-first-controller' }); heldCheck = null
         await page.waitForFunction(() => document.querySelector('.dashboard-update-settings .button-loading') === null)
         assert.equal(await page.getByText('stale-first-controller', { exact: true }).count(), 0, 'late status from the first controller is discarded')
+        assert.equal(await automatic().count(), 0, 'cores without scheduler metadata retain manual update support')
         assert.deepEqual(installations, [])
 
         mode = 'normal'
+        firstStatus.auto_update = true
+        firstStatus.update_interval = 8
+        firstStatus.next_check = '2026-10-12T16:00:00Z'
         await page.evaluate(() => { location.hash = '/settings' })
         await received(() => statusRequests.at(-1).port === firstPort)
-        await automatic().click()
+        await settings.getByText('8 hours', { exact: true }).waitFor()
+        assert.match(await automatic().textContent(), /Enabled/)
+        assert.equal(await settings.locator('time').getAttribute('datetime'), firstStatus.next_check)
+        assert.deepEqual(installations, [], 'core automatic-update status never triggers a browser installation')
+        await settings.getByRole('button', { name: 'Install manually', exact: true }).click()
         await received(() => heldInstall)
-        assert.equal(installations.length, 1, 'an unversioned generic source with a changed digest is installed automatically')
+        assert.equal(installations.length, 1, 'an unversioned generic source can be installed explicitly despite update_available=false')
         const beforeInstallNavigation = navigations
         await openEditor()
         const draft = '# private-edit-must-survive-update\nmode: global\n'
@@ -214,21 +271,20 @@ async function updaterControls() {
         const checksBeforeVisible = statusRequests.filter(request => request.check).length
         await page.evaluate(() => { document.dispatchEvent(new Event('visibilitychange')); window.dispatchEvent(new Event('online')) })
         await page.waitForTimeout(40)
-        assert.equal(statusRequests.filter(request => request.check).length, checksBeforeVisible, 'visibility events do not bypass the six-hour interval')
+        assert.equal(statusRequests.filter(request => request.check).length, checksBeforeVisible, 'browser events do not trigger checks even when core automatic updates are enabled')
         await closeEditor()
 
         mode = 'hold-check'
         firstStatus.latest_digest = 'c'.repeat(64)
-        firstStatus.update_available = true
-        await page.evaluate(() => { window.__updateClockOffset += 6 * 60 * 60 * 1000 + 1; document.dispatchEvent(new Event('visibilitychange')) })
+        firstStatus.update_available = false
+        await checkButton().click()
         await received(() => heldCheck)
-        await automatic().click()
         mode = 'normal'
         json(heldCheck, 200, firstStatus); heldCheck = null
         await page.waitForFunction(() => document.querySelector('.dashboard-update-settings .button-loading') === null)
-        assert.equal(installations.length, 1, 'turning automatic updates off while a check waits prevents its later install')
+        assert.equal(installations.length, 1, 'a manual check never installs, even when automatic updates are enabled in core YAML')
         holdInstall = false
-        await settings.getByRole('button', { name: 'Update now', exact: true }).click()
+        await settings.getByRole('button', { name: 'Install manually', exact: true }).click()
         await received(() => installations.length === 2)
         await page.waitForFunction(() => document.querySelector('.dashboard-update-settings .button-loading') === null)
 
@@ -255,7 +311,7 @@ async function updaterControls() {
         await settings.waitFor()
         assert.deepEqual(runtimeWrites, [])
         assert.deepEqual(pageErrors, [])
-        return { genericDigestInstalled: true, staleControllerCanceled: true, sixHourCadence: true, disablingAutoPreventsInstall: true, editorSurvivesBackgroundInstall: true, editorOpenedDuringRefreshBlocksNavigation: true, explicitRefreshWorks: true, runtimeWrites: 0 }
+        return { genericSourceManuallyInstalled: true, staleControllerCanceled: true, legacyPreferenceIgnored: true, coreScheduleReadOnly: true, noBrowserScheduledRequests: true, manualCheckNeverInstalls: true, editorSurvivesInstallation: true, editorOpenedDuringRefreshBlocksNavigation: true, explicitRefreshWorks: true, runtimeWrites: 0 }
     } finally {
         await context.close()
         heldCheck?.destroy()
@@ -271,8 +327,9 @@ async function main() {
         executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined,
         args: process.env.PLAYWRIGHT_CHROMIUM_ARGS ? JSON.parse(process.env.PLAYWRIGHT_CHROMIUM_ARGS) : [],
     })
-    const migration = await serviceWorkerMigration()
-    const controls = process.argv.includes('--service-worker-only') ? undefined : await updaterControls()
+    const versionOnly = process.argv.includes('--version-only')
+    const migration = versionOnly ? undefined : await serviceWorkerMigration()
+    const controls = process.argv.includes('--service-worker-only') ? undefined : await updaterControls(versionOnly)
     console.log(JSON.stringify({ passed: true, browser: browser.version(), migration, controls }, null, 2))
 }
 
