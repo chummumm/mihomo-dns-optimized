@@ -18,8 +18,6 @@
     border-right: 1px solid var(--rail-edge);
     background: var(--rail);
     color: var(--rail-text);
-    -webkit-backdrop-filter: blur(16px) saturate(140%);
-    backdrop-filter: blur(16px) saturate(140%);
     user-select: none;
 }
 
@@ -360,7 +358,7 @@
     font-weight: 600;
 }
 
-/* Phones: a frosted bar of tiles along the bottom edge */
+/* Phones: a navigation bar of tiles along the bottom edge */
 @media (max-width: 768px) {
     .sidebar {
         top: auto;

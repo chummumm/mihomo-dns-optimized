@@ -31,8 +31,6 @@
     border-radius: var(--r-panel);
     background: var(--panel);
     box-shadow: var(--shadow-card);
-    -webkit-backdrop-filter: blur(16px);
-    backdrop-filter: blur(16px);
     transition: border-color var(--dur-3) var(--ease-out);
 }
 
@@ -439,7 +437,7 @@
     --row-tint: var(--row-selected);
 }
 
-/* Rows that just arrived come in out of a soft blur, a few at a time. */
+/* Rows that just arrived fade in, a few at a time. */
 @media (prefers-reduced-motion: no-preference) {
     .connections-row.is-fresh {
         animation: row-in 560ms var(--ease-out) backwards;
@@ -450,7 +448,6 @@
 @keyframes row-in {
     from {
         opacity: 0;
-        filter: blur(6px);
     }
 }
 

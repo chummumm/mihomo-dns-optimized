@@ -23,8 +23,6 @@
     line-height: 1;
     white-space: nowrap;
     user-select: none;
-    -webkit-backdrop-filter: blur(12px);
-    backdrop-filter: blur(12px);
     transition:
         background-color var(--dur-2) var(--ease-out),
         border-color var(--dur-2) var(--ease-out),

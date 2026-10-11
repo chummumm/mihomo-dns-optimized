@@ -220,17 +220,15 @@ samp {
     }
 }
 
-/* Panels arrive out of a short blur, the console's page change. */
+/* Panels fade and rise into place when the console changes page. */
 @keyframes panel-in {
     from {
         opacity: 0;
-        filter: blur(6px);
         transform: translateY(10px) scale(0.995);
     }
 
     to {
         opacity: 1;
-        filter: none;
         transform: none;
     }
 }

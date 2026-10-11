@@ -1,6 +1,6 @@
 {
     "name": "mihomo-optimized",
-    "version": "0.4.0",
+    "version": "0.4.1",
     "packageManager": "pnpm@8.15.9",
     "description": "mihomo-optimized network dashboard with in-memory DNS insights.",
     "keywords": [
