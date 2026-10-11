@@ -45,6 +45,10 @@ import (
 
 var mux sync.Mutex
 
+// Serialized by mux. A later configuration's activation must also wait for
+// earlier resets, since they can still touch the shared system resolver.
+var updaterResetDone <-chan struct{}
+
 // Keep ownership of every resolver constructed by updateDNS, even when the
 // local DNS service is disabled and only its proxy/bootstrap handle is exposed.
 // ApplyConfig serializes replacement with mux.
@@ -91,6 +95,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	mux.Lock()
 	defer mux.Unlock()
 	log.SetLevel(cfg.General.LogLevel)
+	finishUpdates := updateUpdater(cfg)
 
 	tunnel.OnSuspend()
 	// Cancel old DNS background work before replacing rules, nodes or pools.
@@ -133,9 +138,9 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	loadProvider(cfg.RuleProviders)
 	runtime.GC()
 	tunnel.OnRunning()
-	updateUpdater(cfg)
-
-	resolver.ResetConnection()
+	updater.SetGeoAutoUpdate(cfg.General.GeoAutoUpdate)
+	updater.SetGeoUpdateInterval(cfg.General.GeoUpdateInterval)
+	finishUpdates()
 }
 
 func initInnerTcp() {
@@ -439,17 +444,47 @@ func updateTunnels(tunnels []LC.Tunnel) {
 	listener.PatchTunnel(tunnels, tunnel.Tunnel)
 }
 
-func updateUpdater(cfg *config.Config) {
+func updateUpdater(cfg *config.Config) func() {
+	// Publish cancellation and the new policy at the beginning of ApplyConfig.
+	// No new activation/bootstrap can use networking before its reset completes.
+	ready := make(chan struct{})
 	general := cfg.General
-	updater.SetGeoAutoUpdate(general.GeoAutoUpdate)
-	updater.SetGeoUpdateInterval(general.GeoUpdateInterval)
 
 	uiUpdater := updater.NewFixedUIUpdater(general.ExternalUIAutoUpdate, general.ExternalUIUpdateInterval)
-	updater.SetUIUpdater(uiUpdater)
-	updater.DefaultCoreUpdater.ConfigureAutoUpdate(general.CoreAutoUpdate, general.CoreUpdateInterval)
+	updater.SetUIUpdaterWhenReady(uiUpdater, ready)
+	updater.DefaultCoreUpdater.ConfigureAutoUpdateWhenReady(general.CoreAutoUpdate, general.CoreUpdateInterval, ready)
 	// Bootstrap an empty managed directory without holding the reload mutex
 	// during a network download. The updater gate rechecks emptiness itself.
 	uiUpdater.StartAutoDownloadUI()
+
+	// Called once at the end of the same ApplyConfig transaction. Capture the
+	// new resolver instances; never read mutable globals in the goroutines or
+	// apply a stale configuration after waiting for their network locks.
+	var finish sync.Once
+	return func() {
+		finish.Do(func() {
+			main, system := resolver.DefaultResolver, resolver.SystemResolver
+			previous := updaterResetDone
+			updaterResetDone = ready
+			mainDone := make(chan struct{})
+			go func() {
+				if main != nil {
+					main.ResetConnection()
+				}
+				close(mainDone)
+			}()
+			go func() {
+				if system != nil {
+					system.ResetConnection()
+				}
+				<-mainDone
+				if previous != nil {
+					<-previous
+				}
+				close(ready)
+			}()
+		})
+	}
 }
 
 //go:linkname temporaryUpdateGeneral github.com/metacubex/mihomo/config.temporaryUpdateGeneral

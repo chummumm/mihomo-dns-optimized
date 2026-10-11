@@ -80,6 +80,7 @@ func uiTestActivateUpdater(t *testing.T, u *UIUpdater) {
 	t.Helper()
 	previous := currentUIUpdater.Load()
 	t.Cleanup(func() {
+		var bootstrap *uiInitialDownload
 		uiActivation.Lock()
 		current := currentUIUpdater.Load()
 		if current != nil {
@@ -89,11 +90,17 @@ func uiTestActivateUpdater(t *testing.T, u *UIUpdater) {
 			if current.activeCancel != nil {
 				current.activeCancel()
 			}
+			current.state().mu.Lock()
+			bootstrap = current.state().bootstrap
+			current.state().mu.Unlock()
 		}
 		currentUIUpdater.Store(previous)
 		uiActivation.Unlock()
 		if current != nil && current.automatic != nil {
 			uiTestAutomaticDone(t, current.automatic.done)
+		}
+		if bootstrap != nil {
+			uiTestAutomaticDone(t, bootstrap.done)
 		}
 	})
 	SetUIUpdater(u)
@@ -135,7 +142,7 @@ func TestUIUpdaterAutomaticDefaultsAndBootstrap(t *testing.T) {
 			t.Fatalf("default policy started automatic work: %+v, requests=%d", status, requests.Load())
 		}
 	})
-	t.Run("bootstrap precedes the first scheduled check", func(t *testing.T) {
+	t.Run("activation bootstraps once without a clock tick", func(t *testing.T) {
 		u := uiTestUpdater(t, nil)
 		u.autoUpdateUI, u.updateInterval = true, 6
 		clock := &uiTestAutomaticClock{}
@@ -143,6 +150,9 @@ func TestUIUpdaterAutomaticDefaultsAndBootstrap(t *testing.T) {
 		archive := uiTestZIP(t, uiTestAutomaticFiles("0.3.7", "bootstrap"))
 		var requests atomic.Int32
 		u.request = func(_ context.Context, _ string, headers map[string][]string) (*http.Response, error) {
+			if CurrentUIUpdater() != u {
+				t.Error("activation started before publishing its configuration")
+			}
 			if requests.Add(1) == 1 {
 				response := uiTestResponse(archive)
 				response.Header.Set("ETag", `"bootstrap"`)
@@ -159,10 +169,15 @@ func TestUIUpdaterAutomaticDefaultsAndBootstrap(t *testing.T) {
 		ticker := clock.ticker(t, 0)
 		status := u.Status(context.Background(), false)
 		next, err := time.Parse(time.RFC3339, status.NextCheck)
-		if err != nil || time.Until(next) < 6*time.Hour-time.Minute || ticker.interval != 6*time.Hour || requests.Load() != 0 {
-			t.Fatalf("first check did not wait its configured interval: %+v, %v", status, err)
+		if err != nil || time.Until(next) < 6*time.Hour-time.Minute || ticker.interval != 6*time.Hour {
+			t.Fatalf("activation did not create the periodic schedule: %+v, %v", status, err)
 		}
-		u.AutoDownloadUI()
+		u.StartAutoDownloadUI()
+		u.StartAutoDownloadUI()
+		uiTestAutomaticWait(t, func() bool {
+			data, _ := os.ReadFile(filepath.Join(u.externalUIPath, "index.html"))
+			return requests.Load() == 1 && string(data) == "bootstrap" && uiTestAutomaticSettled(u)
+		})
 		if requests.Load() != 1 || uiTestIndex(t, u) != "bootstrap" {
 			t.Fatal("empty-directory bootstrap did not install exactly once")
 		}
@@ -180,7 +195,14 @@ func TestUIUpdaterAutomaticReloadPreservesSchedule(t *testing.T) {
 	u.autoUpdateUI, u.updateInterval = true, 12
 	clock := &uiTestAutomaticClock{}
 	u.newTicker = clock.newTicker
+	archive := uiTestZIP(t, uiTestAutomaticFiles("0.3.6", "existing"))
+	var requests atomic.Int32
+	u.request = func(context.Context, string, map[string][]string) (*http.Response, error) {
+		requests.Add(1)
+		return uiTestResponse(archive), nil
+	}
 	uiTestActivateUpdater(t, u)
+	uiTestAutomaticWait(t, func() bool { return requests.Load() == 1 && uiTestAutomaticSettled(u) })
 	first := u.automatic
 	firstNext := *first.next.Load()
 	stopReaders := make(chan struct{})
@@ -221,6 +243,9 @@ func TestUIUpdaterAutomaticReloadPreservesSchedule(t *testing.T) {
 		t.Fatalf("disabled policy retained a schedule: %+v", status)
 	}
 	clock.ticker(t, 1)
+	if requests.Load() != 1 {
+		t.Fatal("a reload repeated the activation check")
+	}
 }
 
 func TestUIUpdaterAutomaticVersionGateAndConditionalChecks(t *testing.T) {
@@ -254,7 +279,6 @@ func TestUIUpdaterAutomaticVersionGateAndConditionalChecks(t *testing.T) {
 			}
 			uiTestActivateUpdater(t, u)
 			ticker := clock.ticker(t, 0)
-			ticker.fire(t, *u.automatic.next.Load())
 			uiTestAutomaticWait(t, func() bool {
 				data, _ := os.ReadFile(filepath.Join(u.externalUIPath, "index.html"))
 				return requests.Load() == 1 && string(data) == test.want && uiTestAutomaticSettled(u)
@@ -284,7 +308,6 @@ func TestUIUpdaterAutomaticPolicyCancellationInterruptsChecks(t *testing.T) {
 				return nil, ctx.Err()
 			}
 			uiTestActivateUpdater(t, u)
-			clock.ticker(t, 0).fire(t, *u.automatic.next.Load())
 			uiTestAutomaticDone(t, started)
 			if err := u.DownloadUI(); !errors.Is(err, ErrUIUpdateBusy) {
 				t.Fatalf("manual installation overlapped automatic checking: %v", err)
@@ -296,8 +319,12 @@ func TestUIUpdaterAutomaticPolicyCancellationInterruptsChecks(t *testing.T) {
 			case "interval":
 				v.updateInterval = 2
 			case "source":
+				// Isolate stale-source invalidation from a new source's own
+				// activation check; these sources are private test fixtures.
+				v.autoUpdateUI = false
 				v.externalUIURL = "https://new.example.test/ui.zip"
 			case "directory":
+				v.autoUpdateUI = false
 				v.externalUIPath = filepath.Join(t.TempDir(), "different-ui")
 				uiTestWrite(t, v.externalUIPath, uiTestAutomaticFiles("0.3.6", "other existing UI"))
 			}
@@ -311,6 +338,9 @@ func TestUIUpdaterAutomaticPolicyCancellationInterruptsChecks(t *testing.T) {
 			uiTestAutomaticDone(t, canceled)
 			uiTestAutomaticDone(t, u.automatic.done)
 			uiTestAutomaticWait(t, func() bool { return uiTestAutomaticSettled(u) })
+			if (change == "source" || change == "directory") && u.active() {
+				t.Fatal("the previous source remained active after replacement")
+			}
 			if uiTestIndex(t, u) != "existing" {
 				t.Fatal("canceled automatic check changed installed files")
 			}
@@ -337,7 +367,6 @@ func TestUIUpdaterAutomaticCancellationPreventsLateCommit(t *testing.T) {
 	ready, release := make(chan struct{}), make(chan struct{})
 	u.beforeCommit = func() { close(ready); <-release }
 	uiTestActivateUpdater(t, u)
-	clock.ticker(t, 0).fire(t, *u.automatic.next.Load())
 	uiTestAutomaticDone(t, ready)
 	v := uiTestAutomaticClone(u, false, 1)
 	SetUIUpdater(v)
@@ -355,10 +384,13 @@ func TestUIUpdaterAutomaticBusyTickPreservesManualInstallation(t *testing.T) {
 	clock := &uiTestAutomaticClock{}
 	u.newTicker = clock.newTicker
 	archive := uiTestZIP(t, uiTestAutomaticFiles("0.3.7", "manual update"))
+	currentArchive := uiTestZIP(t, uiTestAutomaticFiles("0.3.6", "existing"))
 	started, release := make(chan struct{}), make(chan struct{})
 	var requests atomic.Int32
 	u.request = func(ctx context.Context, _ string, _ map[string][]string) (*http.Response, error) {
-		requests.Add(1)
+		if requests.Add(1) == 1 {
+			return uiTestResponse(currentArchive), nil
+		}
 		close(started)
 		select {
 		case <-release:
@@ -368,6 +400,7 @@ func TestUIUpdaterAutomaticBusyTickPreservesManualInstallation(t *testing.T) {
 		}
 	}
 	uiTestActivateUpdater(t, u)
+	uiTestAutomaticWait(t, func() bool { return requests.Load() == 1 && uiTestAutomaticSettled(u) })
 	finished := make(chan error, 1)
 	go func() { finished <- u.DownloadUI() }()
 	uiTestAutomaticDone(t, started)
@@ -385,7 +418,7 @@ func TestUIUpdaterAutomaticBusyTickPreservesManualInstallation(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("manual update did not complete")
 	}
-	if requests.Load() != 1 || uiTestIndex(t, u) != "manual update" {
+	if requests.Load() != 2 || uiTestIndex(t, u) != "manual update" {
 		t.Fatal("scheduled checking overlapped the manual installation")
 	}
 }
@@ -405,7 +438,6 @@ func TestUIUpdaterAutomaticRetriesOnNextCycle(t *testing.T) {
 	}
 	uiTestActivateUpdater(t, u)
 	ticker := clock.ticker(t, 0)
-	ticker.fire(t, *u.automatic.next.Load())
 	uiTestAutomaticWait(t, func() bool {
 		return requests.Load() == 1 && u.Status(context.Background(), false).CheckError != "" && uiTestAutomaticSettled(u)
 	})

@@ -38,11 +38,12 @@ const (
 // CoreUpdater installs a checksummed release from this fork. It never falls
 // back to the official core. The empty value uses the production release URL.
 type CoreUpdater struct {
-	mu               sync.Mutex
+	mu               updateOperationGate
 	policyMu         sync.Mutex
 	autoUpdate       bool
 	updateInterval   int
 	automatic        *coreAutomaticUpdate
+	readiness        updateReadiness
 	restartHandler   CoreAutomaticRestartHandler
 	installedVersion string
 	pendingRestart   bool

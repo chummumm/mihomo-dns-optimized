@@ -66,18 +66,30 @@ func (u *CoreUpdater) NextCheck() string {
 // policy retains its original timer; disabling it or changing the interval
 // cancels the old request and prevents it from committing later.
 func (u *CoreUpdater) ConfigureAutoUpdate(enabled bool, intervalHours int) {
+	u.ConfigureAutoUpdateWhenReady(enabled, intervalHours, nil)
+}
+
+// ConfigureAutoUpdateWhenReady publishes the policy immediately, while network
+// work waits for this configuration's resolver reset. Same-policy jobs follow
+// the newest readiness barrier without restarting their timer or first check.
+func (u *CoreUpdater) ConfigureAutoUpdateWhenReady(enabled bool, intervalHours int, ready <-chan struct{}) {
 	if intervalHours <= 0 || intervalHours > int((1<<63-1)/time.Hour) {
 		intervalHours = defaultCoreUpdateInterval
 	}
 	u.policyMu.Lock()
 	defer u.policyMu.Unlock()
+	u.readiness.set(ready)
 	if u.autoUpdate == enabled && u.updateIntervalLocked() == intervalHours &&
 		(!enabled || (u.automatic != nil && u.automatic.ctx.Err() == nil)) {
 		return
 	}
+	// The first enabled policy in a process, and an explicit off -> on
+	// transition, check immediately. Merely changing its interval reschedules
+	// the next check without starting a second activation check.
+	immediate := enabled && (!u.autoUpdate || u.automatic == nil)
 	u.stopAutomaticUpdatesLocked()
 	u.autoUpdate, u.updateInterval = enabled, intervalHours
-	u.startAutomaticUpdatesLocked()
+	u.startAutomaticUpdatesLocked(immediate)
 }
 
 // SetAutomaticRestartHandler is registered during process initialization, not
@@ -86,12 +98,13 @@ func (u *CoreUpdater) ConfigureAutoUpdate(enabled bool, intervalHours int) {
 func (u *CoreUpdater) SetAutomaticRestartHandler(handler CoreAutomaticRestartHandler) {
 	u.policyMu.Lock()
 	defer u.policyMu.Unlock()
+	immediate := u.automatic == nil
 	u.stopAutomaticUpdatesLocked()
 	u.restartHandler = handler
-	u.startAutomaticUpdatesLocked()
+	u.startAutomaticUpdatesLocked(immediate)
 }
 
-func (u *CoreUpdater) startAutomaticUpdatesLocked() {
+func (u *CoreUpdater) startAutomaticUpdatesLocked(immediate bool) {
 	if !u.autoUpdate || u.restartHandler == nil {
 		return
 	}
@@ -112,7 +125,7 @@ func (u *CoreUpdater) startAutomaticUpdatesLocked() {
 		ticker := time.NewTicker(interval)
 		ticks, stop = ticker.C, ticker.Stop
 	}
-	go u.runAutomaticUpdates(job, ticks, stop)
+	go u.runAutomaticUpdates(job, ticks, stop, immediate)
 }
 
 func (u *CoreUpdater) stopAutomaticUpdatesLocked() {
@@ -128,11 +141,12 @@ func (u *CoreUpdater) stopAutomaticUpdates() {
 	u.stopAutomaticUpdatesLocked()
 }
 
-func (u *CoreUpdater) runAutomaticUpdates(job *coreAutomaticUpdate, ticks <-chan time.Time, stop func()) {
+func (u *CoreUpdater) runAutomaticUpdates(job *coreAutomaticUpdate, ticks <-chan time.Time, stop func(), immediate bool) {
 	defer close(job.done)
 	defer stop()
-	// Startup/reload never downloads the core. The first check is one complete
-	// configured interval later, and every check works without an open browser.
+	if immediate {
+		u.automaticUpdate(job, true)
+	}
 	for {
 		select {
 		case <-job.ctx.Done():
@@ -143,18 +157,39 @@ func (u *CoreUpdater) runAutomaticUpdates(job *coreAutomaticUpdate, ticks <-chan
 			}
 			next := tick.Add(job.interval)
 			job.next.Store(&next)
-			executable := os.Executable
-			if u.executable != nil {
-				executable = u.executable
-			}
-			path, err := executable()
-			if err == nil {
-				err = u.updateContext(job.ctx, path, ReleaseChannel, false, job)
-			}
-			if err != nil && job.ctx.Err() == nil && !errors.Is(err, ErrCoreUpdateBusy) {
-				log.Warnln("Automatic core update failed: %s", err)
-			}
+			u.automaticUpdate(job, false)
 		}
+	}
+}
+
+func (u *CoreUpdater) automaticUpdate(job *coreAutomaticUpdate, waitForOperation bool) {
+	if job.ctx.Err() != nil {
+		return
+	}
+	executable := os.Executable
+	if u.executable != nil {
+		executable = u.executable
+	}
+	action := func() error {
+		if err := u.readiness.wait(job.ctx); err != nil {
+			return err
+		}
+		path, err := executable()
+		if err != nil {
+			return err
+		}
+		return u.updateContext(job.ctx, path, ReleaseChannel, false, job)
+	}
+	var err error
+	if waitForOperation {
+		// A recently canceled job or a manual installer may still be unwinding.
+		// Wait for its gate notification without blocking configuration reload.
+		err = u.mu.runWhenAvailable(job.ctx, ErrCoreUpdateBusy, action)
+	} else {
+		err = action()
+	}
+	if err != nil && job.ctx.Err() == nil && !errors.Is(err, ErrCoreUpdateBusy) {
+		log.Warnln("Automatic core update failed: %s", err)
 	}
 }
 

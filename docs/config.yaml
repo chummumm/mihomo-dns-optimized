@@ -91,13 +91,19 @@ external-controller-routing-mark: 0
 
 # 面板固定下载到配置主目录（-d）下的 ui，使用 http://{{external-controller}}/ui/ 访问
 # 固定来源：https://github.com/chummumm/mihomo-optimized 的 clash-dashboard-dist 分支
-# 空目录会在后台首次安装；下面两项控制已有面板的周期更新，远端版本更高时安装
+# external-ui、external-ui-url、external-ui-name 和命令行 -ext-ui 始终忽略
+# 目录缺失或为空时仍在后台首次安装，即使下面开关为 false；已有面板仅安装严格新版
+# 从内核 1.0.1 起，开启时每次进程启动/重启在网络就绪后立即异步检查，之后按间隔检查
 external-ui-auto-update: false
-external-ui-update-interval: 24 # 正整数小时，启用后首次检查等待一个完整周期
+external-ui-update-interval: 24 # 整数小时，1..2562047；不能写 24h、"24"、小数或 0
 
 # 内核从固定仓库 Releases 检查严格新版；校验 SHA256 后安装并重启内核
+# 默认关闭；1.0.1 起，开启后的进程启动/重启也立即异步检查，无需打开面板
 core-auto-update: false
-core-update-interval: 24 # 正整数小时，与面板分别计时，无需打开浏览器
+core-update-interval: 24 # 整数小时，1..2562047；与面板分别计时
+# 修改以上策略后需完整重载：关闭→开启立即检查；同策略重载不重复检查也不重置计时
+# 保持开启而只改间隔，从该次重载按新间隔计时；关闭会取消旧自动任务
+# mihomo -t 仅校验配置，不启动自动检查或初始面板下载
 
 # 在RESTful API端口上开启DOH服务器
 # ！！！该URL不会验证secret， 如果开启请自行保证安全问题 ！！！

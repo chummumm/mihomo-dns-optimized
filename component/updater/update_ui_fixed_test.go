@@ -44,10 +44,7 @@ func TestUIUpdaterAutomaticRetriesFailedInitialInstall(t *testing.T) {
 		return uiTestResponse(archive), nil
 	}
 	uiTestActivateUpdater(t, u)
-	u.AutoDownloadUI()
-	if requests.Load() != 1 {
-		t.Fatal("initial installation did not run")
-	}
+	uiTestAutomaticWait(t, func() bool { return requests.Load() == 1 && uiTestAutomaticSettled(u) })
 	clock.ticker(t, 0).fire(t, time.Now().Add(24*time.Hour))
 	uiTestAutomaticWait(t, func() bool { return requests.Load() == 2 && uiTestAutomaticSettled(u) })
 	if uiTestIndex(t, u) != "installed after recovery" {

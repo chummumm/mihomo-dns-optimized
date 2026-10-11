@@ -6,6 +6,8 @@
 
 [下载 Releases](https://github.com/chummumm/mihomo-optimized/releases) · [构建状态](https://github.com/chummumm/mihomo-optimized/actions/workflows/build.yml) · [完整配置说明](docs/dns-proxy.md) · [验证记录](docs/dns-rule-routing-validation.md)
 
+**配置入口：** [完整配置示例](#完整配置示例) · [面板与内核自动更新](#面板与内核自动更新) · [DNS 可选字段](#可选-dns-设置) · [共享连接例外](#共享-dns-连接与单个上游例外) · [旧配置迁移](#旧配置迁移与停用范围)
+
 ## 解决什么问题
 
 原生 DNS 收到查询后，用 Question 中的域名（QNAME）匹配已有 `rules` / `rule-providers`，选出实际出站，再选择 DNS 上游：
@@ -37,7 +39,7 @@ UDP、TCP 和 DoT 上游在实际出口固定时共享连接，多个查询通�
 
 新增的 DNS 面板数据由本机控制器提供，查询记录、趋势和上游统计只保存在进程内存中，不写数据库或日志文件，也不发送遥测。无需维护第二份分流规则；观测不会改变 DNS 回答和出口选择。优化范围、缓存安全边界及测试方式见 [DNS 性能说明](docs/dns-performance.md)。
 
-正式版本采用 **`mihomo-optimized-vX.Y.Z`**，本次为 `mihomo-optimized-v1.0.0`。tag、发行标题、`version.txt` 和运行内核版本一致；`PROJECT_VERSION` 记录独立项目版本，上游 mihomo 的版本与提交另存于 `UPSTREAM_VERSION` / `UPSTREAM_COMMIT`。源码哈希保留在 BUILDINFO 中。**旧版 `v1.19.32-optimized-N` 及更早内核首次切换到新系列，需要手动安装一次**；新系列随后可通过 YAML 启用内核后台检查和更新，详见[更新说明](docs/releases.md#内核自动更新)。
+正式版本采用 **`mihomo-optimized-vX.Y.Z`**，当前为 `mihomo-optimized-v1.0.1`。tag、发行标题、`version.txt` 和运行内核版本一致；`PROJECT_VERSION` 记录独立项目版本，上游 mihomo 的版本与提交另存于 `UPSTREAM_VERSION` / `UPSTREAM_COMMIT`。源码哈希保留在 BUILDINFO 中。**旧版 `v1.19.32-optimized-N` 及更早内核首次切换到新系列，需要手动安装一次**；新系列随后可通过 YAML 启用内核后台检查和更新，详见[更新说明](docs/releases.md#内核自动更新)。
 
 ## DNS 状态与原版面板
 
@@ -49,9 +51,43 @@ DNS 观测默认随 `dns.enable` 开启，可用 `dns.observability: false` 关�
 
 查询次数、实际上游交换次数和连接数采用不同口径，不能直接相加；NXDOMAIN 是 DNS 回答，竞争中取消的上游交换单独统计。完整字段、内存边界、安装方式和验证方法见 [DNS 状态展示](docs/dns-observability.md)。
 
-面板 `0.4.0` 保留当前 YAML 文件编辑、保存冲突检测和未保存草稿保护，移除手动检查、安装、自动更新开关及状态区域。保存仅写当前文件，应用仍使用原有重载入口；草稿不写浏览器存储。
+自面板 `0.4.0` 起，保留当前 YAML 文件编辑、保存冲突检测和未保存草稿保护，移除手动检查、安装、自动更新开关及状态区域。编辑器沿用原有 `external-controller` / `secret` 鉴权，不需要新增配置开关。保存仅写当前文件，应用仍使用原有重载入口；草稿不写浏览器存储。日志过滤等级与手动节点测速 URL 是浏览器偏好，没有新增对应的 YAML 字段。
 
-面板来源固定为本仓库 `clash-dashboard-dist`，目录固定为内核工作目录下的 `./ui`（跟随 `-d`）。旧配置中的 `external-ui`、`external-ui-url`、`external-ui-name` 不再改变安装位置或来源。自动检查由 YAML 顶层 `external-ui-auto-update` / `external-ui-update-interval` 控制；内核自动升级由 `core-auto-update` / `core-update-interval` 控制，均默认关闭、默认每 24 小时检查。面板比较远端和本地 `build-info.json` 的版本号，内核比较当前实际版本与仓库 release 版本；仅严格更新的版本自动安装。面板更新不重启内核；内核更新成功后自动重启。完整行为与边界见[面板及内核维护说明](docs/dashboard-management.md)。
+面板来源固定为本仓库 `clash-dashboard-dist`，目录固定为内核工作目录下的 `./ui`（跟随 `-d`），可通过控制器地址的 `/ui/` 打开。路径、下载来源和旧配置的处理见[迁移表](#旧配置迁移与停用范围)。
+
+## 面板与内核自动更新
+
+这四项放在 YAML **顶层，与 `dns:` 同级**。示例显式开启两类自动更新；只需要其中一类时，将另一开关设为 `false`：
+
+```yaml
+external-ui-auto-update: true
+external-ui-update-interval: 24
+core-auto-update: true
+core-update-interval: 24
+```
+
+| 顶层字段 | 默认值 | 作用 |
+| --- | --- | --- |
+| `external-ui-auto-update` | `false` | 自动检查并安装版本更高的面板 |
+| `external-ui-update-interval` | `24` | 面板的检查间隔，单位为整数小时 |
+| `core-auto-update` | `false` | 自动检查并安装版本更高的内核，成功后自动重启 |
+| `core-update-interval` | `24` | 内核的检查间隔，单位为整数小时 |
+
+两个间隔都只接受 **`1`–`2562047` 的整数小时**。写 `24`，不要写 `24h`、`"24"`、小数或 `0`；关闭检查请使用对应布尔开关。修改后需完整重载，单纯保存文件不会改变运行中的策略。
+
+从内核 **`1.0.1`** 起，调度行为如下，面板与内核分别遵守自己的开关和间隔：
+
+| 发生的操作 | 已开启的自动更新如何执行 |
+| --- | --- |
+| 进程启动或重启 | 网络与配置应用完成后，立即异步检查一次，之后按间隔检查 |
+| 运行中从 `false` 改为 `true` 并完整重载 | 立即异步检查一次，之后按间隔检查 |
+| 使用相同开关、间隔完整重载 | 沿用原定时器，不重复立即检查，也不重置下次检查时间 |
+| 保持开启，仅修改间隔并完整重载 | 取消旧任务，从该次重载按新间隔计时，不追加一次立即检查 |
+| 改为 `false` 并完整重载 | 取消该类旧任务，停止后续自动检查和安装 |
+
+自动安装以**版本号严格变大**为条件，不以文件变化或摘要变化代替版本判断。面板比较远端与本地 `build-info.json` 中的版本；内核比较当前实际版本与本仓库正式 release 版本。版本相同、远端较旧或无法可靠比较时均跳过；下载校验值用于验证文件完整性。面板安装不重启内核，内核安装完成会自动重启。
+
+**首次面板安装单独处理：** 受管 `./ui` 目录不存在或为空时，内核会自动下载安装初始面板，即使 `external-ui-auto-update: false`；目录已有内容后，该开关才控制是否自动升级。启动检查、初始安装和后续检查由内核协调，不需要打开浏览器触发。配置检查命令 `mihomo -t` 只校验，不启动这些任务。完整行为、故障处理与版本边界见[面板及内核维护说明](docs/dashboard-management.md)。
 
 ## 快速开始
 
@@ -89,20 +125,37 @@ chmod +x ./mihomo-optimized
 ./mihomo-optimized -f config.yaml
 ```
 
-下面是可独立校验的配置，直连池使用普通 DNS，代理池使用 Cloudflare DoH；请按网络可达性调整。`代理出口` 暂只含 DIRECT 占位项，**加入自己的节点后才会真正走代理**；接入已有配置时直接使用原来的策略组即可。
+### 完整配置示例
+
+下面列全本项目新增或调整的主要可配置项，并包含运行所需的基础设置。此例显式开启自动更新、DIRECT 测速、双栈优选与预取；它们的默认值及关闭方式见后面的字段表。直连池使用普通 DNS，代理池使用 Cloudflare DoH，请按网络可达性调整。`代理出口` 暂只含 DIRECT 占位项，**加入自己的节点后才会真正走代理**；接入已有配置时保留原节点和策略组，将字段并入现有 YAML，不要重复新增第二个 `dns:` 块。
 
 ```yaml
 mode: rule
 mixed-port: 7890
 allow-lan: false
+ipv6: true  # 双栈优选同时需要此项与 dns.ipv6 为 true。
+external-controller: 127.0.0.1:9090
+secret: "replace-with-your-controller-secret"
 dns-rule-routing: true
+
+# YAML 顶层：此例显式开启；默认均为 false，间隔单位为整数小时。
+external-ui-auto-update: true
+external-ui-update-interval: 24
+core-auto-update: true
+core-update-interval: 24
 
 dns:
   enable: true
+  observability: true  # false 关闭并释放 DNS 观测数据。
   listen: 127.0.0.1:1053
   enhanced-mode: redir-host
   ipv6: true
   respect-rules: false
+
+  # 只排除真实 IP 到历史域名的反查映射，不屏蔽 DNS 回答或业务连接。
+  redir-host-filter:
+    - time.example.org
+    - +.example.net
 
   # 节点和解析器自身域名的独立基础解析，避免启动循环。
   default-nameserver: [223.5.5.5, 119.29.29.29]
@@ -120,10 +173,17 @@ dns:
   dualstack-ip-selection: true
   dualstack-ip-selection-threshold: 10
   dualstack-ip-allow-force-aaaa: false
+
+  # 缓存和预取；以下 TTL 均为秒。
   prefetch-domain: true
   serve-expired: true
   serve-expired-ttl: 604800
   serve-expired-reply-ttl: 1
+
+  # 可选回答调整；此处保留默认关闭。需要时可将 CNAME 项设为 true。
+  force-no-cname: false
+  rr-ttl-min: 0  # 0 不设下限，例如 60；零 TTL 和保护场景仍保留。
+  rr-ttl-max: 0  # 0 不设上限，例如 86400；非零时不得小于 rr-ttl-min。
 
 proxy-groups:
   - name: 代理出口
@@ -136,7 +196,7 @@ rules:
   - MATCH,DIRECT
 ```
 
-示例监听本机 `1053`，原 mixed 仍为 `7890`。需要标准 DNS 端口或其他设备接入时，调整监听与原有访问范围配置。另有[包含文档代理节点的完整示例](docs/dns-proxy.example.yaml)，其中保留地址须替换后才能实际联网。
+示例监听本机 DNS `1053`、mixed `7890` 和控制器 `9090`；替换 `secret` 为自己的控制器密钥后，可访问 `http://127.0.0.1:9090/ui/`。需要标准 DNS 端口或其他设备接入时，调整监听与原有访问范围配置。另有[包含文档代理节点的完整示例](docs/dns-proxy.example.yaml)，其中保留地址须替换后才能实际联网。
 
 `enhanced-mode: redir-host` 返回真实 IP，并保留 IP 到历史查询域名的映射，供只有 IP 的连接辅助匹配。若不需要这层反查，可改为 `enhanced-mode: normal`；正常 DNS 解析、正向回答缓存和本项目的原生优化仍保留。透明代理若拿不到域名，需要依赖嗅探或其他规则；模式区别与可选 TLS / HTTP 全端口嗅探示例见[使用说明](docs/dns-proxy.md#enhanced-mode-与域名嗅探)。
 
@@ -159,6 +219,11 @@ rules:
 
 以下字段均放在原 `dns:` 下；顶层 `dns-rule-routing` 的默认值是 `false`。
 
+| 观测与映射字段 | 默认值 | 生效条件与关闭方式 |
+| --- | --- | --- |
+| `observability` | `true` | 随 `dns.enable` 收集纯内存数据；设 `false` 并完整重载后停止收集并释放数据 |
+| `redir-host-filter` | `[]` | 仅在 `enhanced-mode: redir-host` 下排除反查映射；空列表不排除域名，完整重载生效 |
+
 `redir-host-filter: []` 可在 `enhanced-mode: redir-host` 下排除指定域名的真实 IP 反查映射，支持精确域名和 `+.example.com` 等域名通配符。正常 DNS 回答、入站明确携带的域名和嗅探域名不受影响。名单使用已有域名索引，完整重载后新名单约束也适用于旧映射；详见[映射黑名单](docs/dns-proxy.md#redir-host-映射黑名单)。
 
 | 测速字段 | 默认值 | 含义与单位 |
@@ -171,12 +236,16 @@ rules:
 | `dualstack-ip-selection-threshold` | 10 | 毫秒；0–1000，另一族至少快多少才过滤当前族 |
 | `dualstack-ip-allow-force-aaaa` | `false` | 是否允许反向过滤 A、只保留更快的 IPv6；默认保留 IPv4 |
 
+关闭测速可用 `speed-check-mode: [none]`；双栈优选还要求全局 `ipv6` 和 `dns.ipv6` 同时开启，任一 IPv6 开关关闭时不会进行双栈筛选。只想停止双栈优选可设 `dualstack-ip-selection: false`，保留原单族测速。
+
 | 缓存字段 | 默认值 | 含义与单位 |
 | --- | --- | --- |
 | `prefetch-domain` | `false` | 为近期活跃的真实 DNS 来源预取 |
 | `serve-expired` | `true` | 允许返回过期缓存并触发有界后台更新 |
 | `serve-expired-ttl` | 0 | 秒；0 不限过期年龄，保留上游缺省行为；604800 表示最多过期 7 天 |
 | `serve-expired-reply-ttl` | 1 | 秒；过期回答交给客户端的 TTL，允许 0，不延长原记录过期时间 |
+
+`prefetch-domain: false` 关闭主动预取，`serve-expired: false` 停止返回过期缓存；正常未过期缓存仍可使用。这两个开关互不替代。
 
 预取要求真实 DNS 入站具有有效来源，同一作用域 1 分钟至少 3 次前台请求、最近 1 分钟仍活跃，按剩余 TTL 约 80% 安排刷新。每个 resolver 最多 1024 个热点，全局最多 16 个后台任务。
 
@@ -192,18 +261,57 @@ rules:
 
 回答调整在写缓存前完成；过期回答仍使用 `serve-expired-reply-ttl`，不会被 TTL 下限延长。CNAME 类型查询、不完整 / 歧义链、DNSSEC 等保护场景保留原回答。节点和解析器 bootstrap 不继承这些业务回答调整。
 
+`rr-ttl-min` / `rr-ttl-max` 接受 `0`–`4294967295` 秒；非零上限不能小于下限。例如把完整示例中的两项改为 `60` 和 `86400`，将适用正常回答的 TTL 约束在一分钟至一天，原本不可缓存的零 TTL 答案仍不被延长。`force-no-cname: true` 单独启用 CNAME 压平；不需要时保持 `false`，TTL 约束仍可独立使用。
+
+### 共享 DNS 连接与单个上游例外
+
+满足安全复用条件的 UDP、TCP 和 DoT 上游**默认共享连接**，不需要新增全局开关。普通 UDP / TCP 53、自定义端口和基础解析路径都包含在支持范围内；实际出口、接口、mark 和配置代次仍隔离，不能可靠冻结的动态出口、TSIG 等非普通查询保留独占方式。UDP 使用共享 socket，TCP / DoT 使用持久连接并允许多个查询同时在途；单个请求取消不会关闭兄弟查询所用的连接。
+
+某个上游需要停止复用时，在**那个上游地址**后追加 `#disable-reuse=true`。下面分别展示 UDP、TCP 和 DoT 的写法，可独立校验；并入已有配置时只替换需要调整的对应上游，`default-nameserver`、`proxy-server-nameserver`、`direct-nameserver`、`nameserver` 和 `fallback` 的各个地址分别生效：
+
+```yaml
+dns:
+  enable: true
+  listen: 127.0.0.1:1053
+  enhanced-mode: normal
+  default-nameserver: [223.5.5.5]
+  nameserver:
+    - "udp://223.5.5.5:53#disable-reuse=true"
+    - "tcp://119.29.29.29:53#disable-reuse=true"
+    - "tls://dns.alidns.com:853#disable-reuse=true"
+```
+
+该参数只关闭被标注 UDP / TCP / DoT 上游的连接复用，不关闭 DNS 回答缓存、QNAME 分流、测速或观测，也不为上游指定固定出口。删除该参数即可恢复默认复用；DoH 的 HTTP/2 / HTTP/3 以及 DoQ 保留原有复用机制，不受这个参数控制。共享池的并发、等待、连接和空闲回收上限由内核固定管理，**没有新增池大小、每连接并发数或超时的 YAML 键**；资源边界与取消处理见 [DNS 性能说明](docs/dns-performance.md)。
+
+## 旧配置迁移与停用范围
+
+下面只列本项目功能对应的旧字段和行为。**永久忽略、条件停用和校验拒绝是不同处理**，不应把它们一并删除或当成全局失效：
+
+| 旧字段或设置 | 当前处理 | 迁移方式 / 恢复条件 |
+| --- | --- | --- |
+| 顶层 `external-ui`、`external-ui-url`、`external-ui-name` | 始终忽略；关闭自动更新也不会恢复旧目录或来源 | 面板固定使用工作目录的 `ui` 和本仓库 `clash-dashboard-dist`；工作目录由 `-d` 指定 |
+| 命令行 `-ext-ui`，含其旧环境变量 `CLASH_OVERRIDE_EXTERNAL_UI_DIR` | 接受旧入口但忽略路径值 | 改用 `-d` 选择内核工作目录，面板始终放在其中的 `ui` |
+| 旧浏览器保存的面板 / 内核自动更新偏好 | 自面板 `0.4.0` 起不再生效，更新控件与浏览器更新计时器已移除 | 将策略迁移为上面的四个 YAML 顶层字段；从 YAML 编辑器保存后完整重载 |
+| 顶层 `dns-proxy-port` | **非 `0` 会被校验拒绝**；`0` 仅兼容旧配置，不创建监听器 | 删除旧字段；使用 `dns.listen` 或显式 TUN `dns-hijack` 接入内置 DNS |
+| `dns.nameserver-policy` | 仅在 `dns-rule-routing: true` 时停用 | 改用原业务 `rules`；设 `dns-rule-routing: false` 并完整重载后，原 DNS 策略恢复 |
+| `dns.direct-nameserver-follow-policy` | 仅在 `dns-rule-routing: true` 时停用 | 同上；未开启本项目路由时保留原行为 |
+| `dns.fallback-filter.domain` / `dns.fallback-filter.geosite` | 仅在 `dns-rule-routing: true` 时停用对应域名筛选 | 同上；`fallback` 及仍适用的 IP 过滤保留 |
+| `dns.enhanced-mode: fake-ip` | 仅在 `dns.enable: true` 与 `dns-rule-routing: true` 同时开启时冲突并报错 | 自动 QNAME 分流使用 `normal` 或 `redir-host`；关闭 `dns-rule-routing` 后可按原行为使用 FakeIP |
+
+`default-nameserver`、`proxy-server-nameserver`、`proxy-server-nameserver-policy`、hosts、缓存以及可适用的 fallback IP 过滤没有被这张表中的域名策略停用一并移除。`respect-rules` 也没有永久失效：自动 QNAME 计划覆盖其范围内的按解析器地址二次选路，其他原有模式保持原行为。
+
 ## 生效条件与兼容边界
 
 自动 QNAME 选路只在 **开关开启、Rule 模式、入站没有固定 `proxy:`** 时接管；固定出站和 Global / Direct 保留原优先级。入站 `rule:` 仍作为子规则入口，已经选定业务叶子的内部解析继承该叶子，bootstrap 独立执行。
 
-- **使用真实 DNS 回答。** 内置 DNS 可使用 `normal` 或 `redir-host`；本功能与内置 FakeIP 同时启用会在校验时报错。不增加 listener 类型或专用 DNS 代理端口。
+- **使用真实 DNS 回答。** 内置 DNS 可使用 `normal` 或 `redir-host`；`dns.enable` 和 `dns-rule-routing` 同时开启时不能使用 `fake-ip`，否则校验报错。不增加 listener 类型或专用 DNS 代理端口。
 - **规则顺序不变。** IN / SRC / PROCESS、端口和网络属性仍可参与；QNAME 用于域名规则。网站目标 IP / GEOIP / ASN 尚未知，不拿解析器 IP 代替，也不为选路递归解析同一个名字。
 - **按 QNAME 分流的入口是内置 DNS。** 内置 DNS 已知 QNAME，配置的 UDP / TCP 任意端口及 DoH / DoT / DoQ / H3 均可自动选池和选出口。普通代理入站不自动接管明文 DNS，也不解密客户端 DoH；显式 TUN DNS 劫持仍可将请求送入内置 DNS。
 - **显式 DNS 传输仍是例外。** `#Group` / `#DIRECT` / `#interface` 等保留旧行为；先选池，再判断该池的例外。混有显式上游时，显式分支可独立回答；未选池不会削弱自动分支的拒绝动作。
 - **不另写 DNS 域名策略。** 开启时停用 `nameserver-policy`、`direct-nameserver-follow-policy`、`fallback-filter.domain/geosite`；`fallback` 的适用 IP 过滤、hosts、基础解析等保留。关闭开关并完整重载可恢复原策略。
 - **respect-rules 的旧模式行为保留。** 非 Rule 模式不建立新计划；在自动范围内，QNAME 计划代替按解析器地址二次选路。
 
-加密上游按冻结的出口身份复用连接，切换叶子后使用相应连接池；每个配置上游最多保留 64 个作用域，只淘汰空闲项，重载会取消并关闭旧池。QNAME 和来源端口不进入连接池键，保留 H2 / H3 / DoQ 的复用；它们仍进入更严格的回答缓存身份。
+可按路由作用域复用的原生上游使用冻结的出口身份，切换叶子后使用相应连接池；每个配置上游最多保留 64 个路由作用域客户端，只淘汰空闲项，重载会取消并关闭旧池。这里的 `64` 是作用域客户端数，**不是全局 socket 数量上限**。QNAME 和来源端口不进入连接池键；回答缓存和在途查询仍采用各自更严格的作用域，避免连接共享变成答案串用。
 
 面板按次展示 QNAME、来源、规则和策略链，底层长连接标记为 `DNS-TRANSPORT`、显示真实解析器，不沿用首个域名冒充后续请求。逻辑查询计数展示 DNS 负载，底层只统计一次真实线路流量；关闭一条逻辑查询不关闭共享连接上的其他查询。普通 SSH 的反向域名显示不由本功能改写。完整限制见[使用说明](docs/dns-proxy.md)。
 
