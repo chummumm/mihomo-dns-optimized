@@ -84,7 +84,7 @@ func TestConfigFileReadSaveAndRevision(t *testing.T) {
 	original := "# retain comments\nmode: rule\nsecret: private-value\n"
 	path := configFileFixture(t, original)
 	response, initial := requestConfigFile(t, http.MethodGet, nil)
-	if response.Code != http.StatusOK || initial.Content != original || initial.Path != path || initial.MaxSize != configFileMaxSize || len(initial.Revision) != 64 {
+	if response.Code != http.StatusOK || initial.Content != original || initial.Path != path || initial.MaxSize != configFileMaxSize || len(initial.Revision) != 64 || !initial.Writable {
 		t.Fatalf("unexpected initial document: status=%d", response.Code)
 	}
 	_, same := requestConfigFile(t, http.MethodGet, nil)
@@ -97,7 +97,7 @@ func TestConfigFileReadSaveAndRevision(t *testing.T) {
 	}
 	replacement := "# replacement preserves formatting\nmode: direct\nsecret: private-value\n"
 	response, saved := requestConfigFile(t, http.MethodPut, saveConfigRequest(replacement, initial.Revision))
-	if response.Code != http.StatusOK || saved.Content != replacement || saved.Revision == initial.Revision {
+	if response.Code != http.StatusOK || saved.Content != replacement || saved.Revision == initial.Revision || !saved.Writable {
 		t.Fatalf("save failed: status=%d body=%s", response.Code, response.Body.String())
 	}
 	assertConfigBytes(t, path, replacement)

@@ -39,7 +39,7 @@ UDP、TCP 和 DoT 上游在实际出口固定时共享连接，多个查询通�
 
 新增的 DNS 面板数据由本机控制器提供，查询记录、趋势和上游统计只保存在进程内存中，不写数据库或日志文件，也不发送遥测。无需维护第二份分流规则；观测不会改变 DNS 回答和出口选择。优化范围、缓存安全边界及测试方式见 [DNS 性能说明](docs/dns-performance.md)。
 
-正式版本采用 **`mihomo-optimized-vX.Y.Z`**，当前为 `mihomo-optimized-v1.0.1`。tag、发行标题、`version.txt` 和运行内核版本一致；`PROJECT_VERSION` 记录独立项目版本，上游 mihomo 的版本与提交另存于 `UPSTREAM_VERSION` / `UPSTREAM_COMMIT`。源码哈希保留在 BUILDINFO 中。**旧版 `v1.19.32-optimized-N` 及更早内核首次切换到新系列，需要手动安装一次**；新系列随后可通过 YAML 启用内核后台检查和更新，详见[更新说明](docs/releases.md#内核自动更新)。
+正式版本采用 **`mihomo-optimized-vX.Y.Z`**，当前为 `mihomo-optimized-v1.0.2`。tag、发行标题、`version.txt` 和运行内核版本一致；`PROJECT_VERSION` 记录独立项目版本，上游 mihomo 的版本与提交另存于 `UPSTREAM_VERSION` / `UPSTREAM_COMMIT`。源码哈希保留在 BUILDINFO 中。**旧版 `v1.19.32-optimized-N` 及更早内核首次切换到新系列，需要手动安装一次**；新系列随后可通过 YAML 启用内核后台检查和更新，详见[更新说明](docs/releases.md#内核自动更新)。
 
 ## DNS 状态与原版面板
 
@@ -54,6 +54,8 @@ DNS 观测默认随 `dns.enable` 开启，可用 `dns.observability: false` 关�
 自面板 `0.4.0` 起，保留当前 YAML 文件编辑、保存冲突检测和未保存草稿保护，移除手动检查、安装、自动更新开关及状态区域。编辑器沿用原有 `external-controller` / `secret` 鉴权，不需要新增配置开关；草稿不写浏览器存储。日志过滤等级与手动节点测速 URL 是浏览器偏好，没有新增对应的 YAML 字段。
 
 自面板 `0.4.2` 起，编辑器主按钮为**“保存并重新加载”**，Ctrl-S / Cmd-S 也执行同一操作：先保存当前文件，再完整校验并重载，使可热重载的配置生效。组合操作使用 `force=true`，包括更新 HTTP / SOCKS / mixed 端口、绑定地址及 `allow-lan`；控制器地址和 `secret` 等启动设置仍需重启内核。保存成功而重载失败时，会保留已保存内容和新修订标识，并明确提示重载未成功或结果无法确认，不自动回滚文件。详细行为见[配置编辑说明](docs/dashboard-management.md#编辑当前配置文件)。
+
+自内核 `mihomo-optimized-v1.0.2` 配合面板 `0.4.4` 起，读取配置时返回能否安全保存的 `writable` 状态。可读但不可保存的文件直接以只读方式展示，仍可选择和复制；保存期间权限变化会保留草稿并明确提示。检测使用内核运行进程的权限，不修改文件属主或权限。手机编辑器全屏显示，打开及重新读取文件从开头显示。
 
 面板来源固定为本仓库 `clash-dashboard-dist`，目录固定为内核工作目录下的 `./ui`（跟随 `-d`），可通过控制器地址的 `/ui/` 打开。路径、下载来源和旧配置的处理见[迁移表](#旧配置迁移与停用范围)。
 

@@ -97,7 +97,7 @@ sudo systemctl enable --now mihomo
 
 构建脚本检查每个 native 包的架构、版本、配置保护、文件清单/权限、无安装脚本，以及其二进制与对应归档完全一致。回归还在隔离 dpkg 根目录执行旧包到新包的真实迁移，验证本地修改的配置保留与文件归属。Linux amd64 产物实际执行 `-v`、`-t` 和本地模拟上游的 DNS 端到端回归；不会安装到测试宿主机或启动宿主服务。
 
-开发者可运行 `python3 scripts/release-build.py matrix` 查看 37 目标矩阵，或 `bash scripts/ci-check.sh build <target> <绝对输出目录> mihomo-optimized-v1.0.1 <ISO时间>` 构建单个目标；版本参数须与当前 `PROJECT_VERSION` 一致，`amd64` / `arm64` 是 Linux 别名。依赖 `dpkg-deb`、`rpm`/`rpmbuild`/`rpm2cpio`、`cpio`、`zstd`、`fakeroot`、Python 3.12 和 MetaCubeX Go；Android 还需矩阵指定的固定 NDK。
+开发者可运行 `python3 scripts/release-build.py matrix` 查看 37 目标矩阵，或 `bash scripts/ci-check.sh build <target> <绝对输出目录> mihomo-optimized-v1.0.2 <ISO时间>` 构建单个目标；版本参数须与当前 `PROJECT_VERSION` 一致，`amd64` / `arm64` 是 Linux 别名。依赖 `dpkg-deb`、`rpm`/`rpmbuild`/`rpm2cpio`、`cpio`、`zstd`、`fakeroot`、Python 3.12 和 MetaCubeX Go；Android 还需矩阵指定的固定 NDK。
 
 ## 内核自动更新
 

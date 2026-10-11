@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/metacubex/http"
+	"golang.org/x/sys/unix"
 )
 
 func TestConfigFilePreservesUnixOwnership(t *testing.T) {
@@ -46,9 +47,6 @@ func TestConfigFilePreservesUnixOwnership(t *testing.T) {
 }
 
 func TestConfigFileDirectoryPermissionFailurePreservesOriginal(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permission checks")
-	}
 	original := "mode: rule\n"
 	path := configFileFixture(t, original)
 	_, initial := requestConfigFile(t, http.MethodGet, nil)
@@ -57,9 +55,16 @@ func TestConfigFileDirectoryPermissionFailurePreservesOriginal(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(directory, 0700) })
+	if configFileEffectiveAccess(directory, unix.W_OK|unix.X_OK) == nil {
+		t.Skip("this process can override directory permission checks")
+	}
 	response, _ := requestConfigFile(t, http.MethodPut, saveConfigRequest("mode: direct\n", initial.Revision))
-	if response.Code != http.StatusInternalServerError {
+	if response.Code != http.StatusForbidden {
 		t.Fatalf("unwritable directory save was not rejected: %d", response.Code)
+	}
+	_, current := requestConfigFile(t, http.MethodGet, nil)
+	if current.Writable || current.Content != original {
+		t.Fatal("unwritable directory did not expose a readable, read-only document")
 	}
 	assertConfigBytes(t, path, original)
 }

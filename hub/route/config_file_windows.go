@@ -1,8 +1,12 @@
 package route
 
 import (
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"golang.org/x/sys/windows"
 )
@@ -12,7 +16,139 @@ type configFileMetadata struct {
 	security *windows.SECURITY_DESCRIPTOR
 }
 
-func openConfigFile(path string) (*os.File, error) { return os.Open(path) }
+// Directory access masks from WinNT.h; x/sys v0.30 does not export these names.
+const (
+	configFileWindowsAddFile     = 0x0002 // FILE_ADD_FILE (same bit as FILE_WRITE_DATA)
+	configFileWindowsDeleteChild = 0x0040 // FILE_DELETE_CHILD
+)
+
+func openConfigFile(path string) (*os.File, error) {
+	return openConfigFileWindows(path, windows.GENERIC_READ, false)
+}
+
+func openConfigFileWindows(path string, access uint32, directory bool) (*os.File, error) {
+	namePath := path
+	// Preserve os.Open's support for long absolute paths, including UNC paths,
+	// when the host has not enabled long-path-aware Win32 file operations.
+	if len(path) >= 248 && filepath.IsAbs(path) && !strings.HasPrefix(path, `\\?\`) && !strings.HasPrefix(path, `\??\`) && !strings.HasPrefix(path, `\\.\`) {
+		if strings.HasPrefix(path, `\\`) {
+			namePath = `\\?\UNC\` + path[2:]
+		} else {
+			namePath = `\\?\` + path
+		}
+	}
+	name, err := windows.UTF16PtrFromString(namePath)
+	if err != nil {
+		return nil, err
+	}
+	flags := uint32(windows.FILE_FLAG_OPEN_REPARSE_POINT)
+	if directory {
+		flags |= windows.FILE_FLAG_BACKUP_SEMANTICS
+	}
+	// Share deletion so the capability check does not conflict with our own
+	// reader. Snapshot identity/path checks still detect external replacement.
+	handle, err := windows.CreateFile(name, access,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, flags, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	return os.NewFile(uintptr(handle), path), nil
+}
+
+func configFileWindowsAccess(path string, info os.FileInfo, access uint32) bool {
+	file, err := openConfigFileWindows(path, access, info.IsDir())
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	current, err := file.Stat()
+	return err == nil && current.Mode()&os.ModeSymlink == 0 && os.SameFile(info, current)
+}
+
+func configFileWindowsPrivilegeEnabled(token windows.Token, name string) bool {
+	var privilege windows.LUID
+	if err := windows.LookupPrivilegeValue(nil, windows.StringToUTF16Ptr(name), &privilege); err != nil {
+		return false
+	}
+	var size uint32
+	if err := windows.GetTokenInformation(token, windows.TokenPrivileges, nil, 0, &size); err != windows.ERROR_INSUFFICIENT_BUFFER || size < 4 || size > 65536 {
+		return false
+	}
+	data := make([]byte, size)
+	if err := windows.GetTokenInformation(token, windows.TokenPrivileges, &data[0], uint32(len(data)), &size); err != nil || size < 4 || size > uint32(len(data)) {
+		return false
+	}
+	// TOKEN_PRIVILEGES contains a DWORD count followed by 12-byte
+	// LUID_AND_ATTRIBUTES records on both 32- and 64-bit Windows.
+	count := binary.LittleEndian.Uint32(data)
+	if count > (size-4)/12 {
+		return false
+	}
+	for i := uint32(0); i < count; i++ {
+		entry := data[4+i*12 : 4+(i+1)*12]
+		if binary.LittleEndian.Uint32(entry) == privilege.LowPart &&
+			int32(binary.LittleEndian.Uint32(entry[4:])) == privilege.HighPart &&
+			binary.LittleEndian.Uint32(entry[8:])&windows.SE_PRIVILEGE_ENABLED != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func configFileWindowsOwnerAssignable(owner *windows.SID) bool {
+	if owner == nil {
+		return false
+	}
+	token := windows.GetCurrentThreadEffectiveToken()
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return false
+	}
+	if owner.Equals(user.User.Sid) {
+		return true
+	}
+	groups, err := token.GetTokenGroups()
+	if err == nil {
+		for _, group := range groups.AllGroups() {
+			if group.Attributes&(windows.SE_GROUP_ENABLED|windows.SE_GROUP_OWNER) == windows.SE_GROUP_ENABLED|windows.SE_GROUP_OWNER &&
+				group.Attributes&windows.SE_GROUP_USE_FOR_DENY_ONLY == 0 && owner.Equals(group.Sid) {
+				return true
+			}
+		}
+	}
+	// Do not enable privileges to make an otherwise read-only file editable.
+	return configFileWindowsPrivilegeEnabled(token, "SeRestorePrivilege")
+}
+
+func configFileWritable(file *os.File, info os.FileInfo, metadata configFileMetadata) bool {
+	if info.Mode().Perm()&0200 == 0 || metadata.security == nil {
+		return false
+	}
+	var filesystemFlags uint32
+	if err := windows.GetVolumeInformationByHandle(windows.Handle(file.Fd()), nil, 0, nil, nil, &filesystemFlags, nil, 0); err == nil && filesystemFlags&windows.FILE_READ_ONLY_VOLUME != 0 {
+		return false
+	}
+	owner, _, err := metadata.security.Owner()
+	if err != nil || !configFileWindowsOwnerAssignable(owner) || !configFileWindowsAccess(file.Name(), info, windows.GENERIC_WRITE) {
+		return false
+	}
+	directory := filepath.Dir(file.Name())
+	parent, err := os.Lstat(directory)
+	if err != nil || !parent.IsDir() || !configFileWindowsAccess(directory, parent, configFileWindowsAddFile) {
+		return false
+	}
+	// Replacing an existing file requires DELETE on the file OR
+	// FILE_DELETE_CHILD on its parent, in addition to creating the temporary.
+	return configFileWindowsAccess(file.Name(), info, windows.DELETE) ||
+		configFileWindowsAccess(directory, parent, configFileWindowsDeleteChild)
+}
+
+func configFilePermissionError(err error) bool {
+	return errors.Is(err, os.ErrPermission) || errors.Is(err, windows.ERROR_WRITE_PROTECT) ||
+		errors.Is(err, windows.ERROR_PRIVILEGE_NOT_HELD) || errors.Is(err, windows.ERROR_INVALID_OWNER) ||
+		errors.Is(err, windows.ERROR_INVALID_PRIMARY_GROUP) || errors.Is(err, windows.ERROR_CLOUD_FILE_READ_ONLY_VOLUME)
+}
 
 func readConfigFileMetadata(file *os.File, _ os.FileInfo) (configFileMetadata, error) {
 	var identity windows.ByHandleFileInformation
