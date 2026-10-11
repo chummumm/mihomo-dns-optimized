@@ -198,8 +198,6 @@ const EN = {
             direct: 'Direct',
             script: 'Script',
         },
-        versionString: 'Current ClashX is the latest version：{{version}}',
-        checkUpdate: 'Check Update',
         sections: {
             system: 'System',
             proxy: 'Proxy',
@@ -208,7 +206,7 @@ const EN = {
         },
         externalControllerSetting: {
             title: 'External Controller',
-            note: 'Please note that modifying this configuration will only configure Dashboard. Will not modify your Clash configuration file. Please make sure that the external controller address matches the address in the Clash configuration file, otherwise, Dashboard will not be able to connect to Clash.',
+            note: 'This changes how the dashboard connects; it does not edit the core configuration file. Use the controller address configured in mihomo-optimized.',
             host: 'Host',
             port: 'Port',
             secret: 'Secret',

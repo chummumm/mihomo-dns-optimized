@@ -316,6 +316,11 @@
     min-height: 0;
 }
 
+.connections-table {
+    position: absolute;
+    inset: 0;
+}
+
 .connections-scroll {
     overflow-anchor: none;
 }

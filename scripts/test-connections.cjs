@@ -77,6 +77,29 @@ async function main() {
         localStorage.setItem('language', JSON.stringify('en_US'))
         localStorage.setItem('externalControllers', JSON.stringify([{ hostname: '127.0.0.1', port, secret: '' }]))
         localStorage.setItem('externalControllerIndex', '0')
+        // A control change must resize the table in its own React commit. A
+        // delayed ResizeObserver delivery used to leave the old, taller list
+        // clipped beneath the newly inserted history note on busy browsers.
+        const NativeResizeObserver = window.ResizeObserver
+        const pending = new Map()
+        let holdTableResize = false
+        window.ResizeObserver = class extends NativeResizeObserver {
+            constructor(callback) {
+                super((entries, observer) => {
+                    if (holdTableResize && entries.some(entry => entry.target.classList.contains('connections-viewport'))) {
+                        pending.set(observer, () => callback(entries, observer))
+                    } else callback(entries, observer)
+                })
+            }
+        }
+        window.holdConnectionResize = hold => {
+            holdTableResize = hold
+            if (!hold) {
+                const callbacks = [...pending.values()]
+                pending.clear()
+                callbacks.forEach(callback => callback())
+            }
+        }
     }, { port })
     const page = await context.newPage()
     page.setDefaultTimeout(10000)
@@ -138,8 +161,8 @@ async function main() {
     const waitTableSize = () => page.waitForFunction(() => {
         const viewport = document.querySelector('.connections-viewport')
         const scroll = document.querySelector('.connections-scroll')
-        // AutoSizer commits after the controls' layout changes. Wait for that
-        // commit, then independently assert the scrolling and visible rows.
+        // Viewport resize observations can commit after the browser's layout
+        // change. Then independently assert the scrolling and visible rows.
         return viewport && scroll && scroll.offsetHeight === viewport.clientHeight && scroll.offsetWidth === viewport.clientWidth
     })
     let expectedHorizontal = 0
@@ -241,8 +264,14 @@ async function main() {
     connections = Array.from({ length: 6100 }, (_, index) => connection(10000 + index))
     await page.reload({ waitUntil: 'networkidle' })
     await waitCount(6100); await waitRows(6100)
-    await page.getByText('Keep closed connections', { exact: true }).click()
-    await bottom('large_active_collection')
+    await waitTableSize()
+    await page.evaluate(() => window.holdConnectionResize(true))
+    try {
+        await page.getByText('Keep closed connections', { exact: true }).click()
+        await bottom('large_active_collection')
+    } finally {
+        await page.evaluate(() => window.holdConnectionResize(false))
+    }
     await send(null)
     await waitCount(5000); await waitRows(5000)
     await page.getByText(/Oldest records removed: 1100/).waitFor()

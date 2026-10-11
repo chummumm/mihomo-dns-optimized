@@ -6,7 +6,7 @@ import { NavLink, useLocation } from 'react-router-dom'
 import logo from '@assets/logo.png'
 import { Icon, springs } from '@components'
 import { type Lang, type Language } from '@i18n'
-import { identityAtom, useI18n, useVersion, useClashXData } from '@stores'
+import { identityAtom, useI18n, useVersion } from '@stores'
 import './style.css'
 
 // Matches --item-h and --item-gap in style.css: the marker travels one tile per item.
@@ -26,7 +26,6 @@ export default function Sidebar (props: SidebarProps) {
     const { translation } = useI18n()
     const { version, premium } = useVersion()
     const reachable = useAtomValue(identityAtom)
-    const { data } = useClashXData()
     const { t } = translation('SideBar')
     const location = useLocation()
     const isActive = (path: string) => location.pathname === path || location.pathname.startsWith(path + '/')
@@ -48,9 +47,9 @@ export default function Sidebar (props: SidebarProps) {
 
     return (
         <nav className="sidebar">
-            <div className="sidebar-brand">
+            <div className="sidebar-brand" title="mihomo-optimized">
                 <img src={logo} alt="" className="sidebar-logo" />
-                <span className="sidebar-name">Clash{ data?.isClashX && 'X' }</span>
+                <span className="sidebar-name">mihomo-optimized</span>
             </div>
             <div className="sidebar-route" style={{ '--count-m': mobileRoutes.length } as React.CSSProperties}>
                 {activeIndex !== -1 && <motion.span className="sidebar-marker" aria-hidden="true" initial={false} animate={{ y: activeIndex * ITEM_STEP }} transition={springs.glide} />}
@@ -59,12 +58,12 @@ export default function Sidebar (props: SidebarProps) {
                     { navlinks }
                 </ul>
             </div>
-            <div className={classnames('sidebar-version', { 'is-offline': !online })} title={version ? `Clash${data?.isClashX ? 'X' : ''} ${t('Version')} ${version}` : undefined}>
+            <div className={classnames('sidebar-version', { 'is-offline': !online })} title={version ? `mihomo-optimized ${t('Version')} ${version}` : undefined}>
                 <span className="sidebar-live">
                     <span className="sidebar-live-dot" aria-hidden="true" />
                     <span>{ online ? t('Online') : t('Offline') }</span>
                 </span>
-                <span className="sidebar-version-label sr-only">Clash{ data?.isClashX && 'X' } { t('Version') }</span>
+                <span className="sidebar-version-label sr-only">mihomo-optimized { t('Version') }</span>
                 <span className="sidebar-version-text">{ version || '—' }</span>
                 { premium && <span className="sidebar-version-premium">Premium</span> }
             </div>

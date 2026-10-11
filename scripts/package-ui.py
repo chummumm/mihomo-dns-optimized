@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package the built dashboard for Mihomo's external UI updater."""
+"""Package the built mihomo-optimized dashboard for the core's managed UI."""
 
 import argparse
 import hashlib
@@ -43,7 +43,7 @@ def main():
 
     artifacts = root / 'artifacts'
     artifacts.mkdir(exist_ok=True)
-    archive = artifacts / 'clash-dashboard-ui.zip'
+    archive = artifacts / 'mihomo-optimized-ui.zip'
     with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as output:
         for file in sorted(p for p in dist.rglob('*') if p.is_file()):
             output.write(file, file.relative_to(dist).as_posix())

@@ -1,7 +1,6 @@
 import { useReactTable, getSortedRowModel, getCoreRowModel, flexRender, createColumnHelper } from '@tanstack/react-table'
 import classnames from 'classnames'
-import { Fragment, useMemo, useLayoutEffect, useRef, useState, useEffect } from 'react'
-import AutoSizer from 'react-virtualized-auto-sizer'
+import { Fragment, useMemo, useLayoutEffect, useRef, useState, useEffect, useCallback } from 'react'
 
 import { Header, Checkbox, Modal, Icon, Drawer, Card, Button, LineBullet, StaticBytes, useLineColor } from '@components'
 import { formatDateTime, fromNow } from '@lib/date'
@@ -65,6 +64,31 @@ export default function Connections () {
     const client = useClient()
     const color = useLineColor()
     const cardRef = useRef<HTMLDivElement>(null)
+    const viewportRef = useRef<HTMLDivElement>(null)
+    const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 })
+    const measuredViewport = useRef(viewportSize)
+    const measureViewport = useCallback(() => {
+        const element = viewportRef.current
+        if (element === null) return
+        const width = element.clientWidth
+        const height = element.clientHeight
+        if (measuredViewport.current.width === width && measuredViewport.current.height === height) return
+        const size = { width, height }
+        measuredViewport.current = size
+        setViewportSize(size)
+    }, [])
+
+    useLayoutEffect(() => {
+        const element = viewportRef.current
+        if (element === null) return
+        const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measureViewport) : undefined
+        observer?.observe(element)
+        window.addEventListener('resize', measureViewport)
+        return () => {
+            observer?.disconnect()
+            window.removeEventListener('resize', measureViewport)
+        }
+    }, [measureViewport])
 
     // total
     const [traffic, setTraffic] = useObject({
@@ -80,6 +104,10 @@ export default function Connections () {
 
     // connections
     const { connections, connectionsBySource, devices, feed, save, toggleSave, clearHistory, getConnection, historyLimit, discarded } = useConnections(connStreamReader)
+    // Controls, translated text and source filters can change the space above
+    // the table during this commit. Measure before paint so the list and its
+    // scroll anchor use the new height even if ResizeObserver arrives later.
+    useLayoutEffect(measureViewport, [measureViewport, save, discarded, devices, lang])
     const [device, setDevice] = useState(ALL_CONNECTIONS)
     const selectedConnections = connectionsBySource.get(device) ?? EMPTY_CONNECTIONS
     const data = useMemo(() => selectedConnections.map(formatConnection), [selectedConnections])
@@ -362,19 +390,19 @@ export default function Connections () {
                 <Button type="ghost" size="sm" icon="trash" onClick={clearHistory}>{t('clearHistory')}</Button>
             </div>}
             <Card ref={cardRef} className="connections-card">
-                <div className="connections-viewport">
-                    <AutoSizer>
-                        {({ height, width }) => <VirtualConnectionTable
+                <div ref={viewportRef} className="connections-viewport">
+                    <div className="connections-table">
+                        {viewportSize.height > 0 && viewportSize.width > 0 && <VirtualConnectionTable
                             rows={rows}
                             headers={headers}
-                            width={width}
-                            height={height}
+                            width={viewportSize.width}
+                            height={viewportSize.height}
                             totalWidth={instance.getTotalSize()}
                             centeredColumns={shouldCenter}
                             selectedID={drawerState.visible ? drawerState.selectedID : ''}
                             freshIDs={freshIDs}
                             onSelect={id => setDrawerState({ visible: true, selectedID: id })} />}
-                    </AutoSizer>
+                    </div>
                     {data.length === 0 && <div className="connections-empty" role="status">
                         <Icon type="nav-connections" size={28} />
                         <span>{t('empty')}</span>
