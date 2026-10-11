@@ -6,7 +6,7 @@
 ## 下载编译结果
 
 向 `main` 推送代码、提交针对 `main` 的 Pull Request，或者在 Actions 中手动运行
-**Build DNS optimized**，都会测试并编译完整内核。
+**Build mihomo-optimized**，都会测试并编译完整内核。
 
 产物覆盖 Linux、Windows、macOS、FreeBSD、Android 共 **37 个平台 / CPU 目标**。
 其中 12 个 Linux 目标另提供 `.deb` / `.rpm`，5 个目标提供 `.pkg.tar.zst`；
@@ -26,16 +26,16 @@ Actions artifact 保留 30 天。归档解压后需按平台给二进制增加�
 推送 `main` 后，测试和完整 37 目标的编译全部成功，且 66 个必需归档 / 安装包的
 文件集合、版本和摘要校验均通过，才自动把构建结果发布到
 GitHub Releases，提供持久下载。Pull Request 只测试和上传 Actions artifact。
-手动运行 `Build DNS optimized` 并勾选 `publish_release`、推送形如
-`v1.19.32-optimized-8` 的版本标签，以及自动上游更新成功后，也会发布 release。
+手动运行 `Build mihomo-optimized` 并勾选 `publish_release`、推送形如
+`mihomo-optimized-v1.0.0` 的版本标签，以及自动上游更新成功后，也会发布 release。
 发布只在本仓库进行，已有同名 release 的附件不会被覆盖；重跑也必须核对既有
 Release 的完整附件集合及 GitHub 返回的 SHA-256 摘要。构建前和发布时都会确认
 同名标签仍指向本次源码提交，轻量标签和附注标签均会解引用后核对。
 
-内核版本使用 `UPSTREAM_VERSION` 与 `OPTIMIZED_REVISION`，不再从 Git 提交数量
-生成修订号。准备下一次代码发行时递增 `OPTIMIZED_REVISION`；仅修改文档不会
-触发构建或发版，也不会消耗修订号。旧版内核首次切换到新命名的安装要求见
-[内核一键更新](releases.md#内核一键更新)。
+内核版本使用 `PROJECT_VERSION` 的独立三段数字，正式 tag 为 `mihomo-optimized-vX.Y.Z`。
+`UPSTREAM_VERSION` 和 `UPSTREAM_COMMIT` 分别记录上游版本与提交。准备下一次代码发行时
+更新项目版本；纯文档变更不会触发构建或发版，也不会消耗版本号。旧版内核首次切换到新命名的安装要求见
+[内核自动更新](releases.md#内核自动更新)。
 
 发布任务按仓库串行执行。新 release 创建时先不标记 Latest，附件上传后重新读取
 当前 `main` 的提交；只有它仍等于这次的构建提交，才更新 Latest。较旧提交的构建
@@ -51,7 +51,7 @@ GitHub 的定时任务可能延迟；它查询 MetaCubeX/mihomo 的最新正式 
 
 1. 从当前 `main` 准备普通 Git merge，保留本分支修改和上游历史。
 2. 保留本分支的整个 `.github/workflows` 目录、同步 / 编译脚本、`packaging/` 和
-   `OPTIMIZED_REVISION`，移除新带入的上游工作流。随后将本分支修订号加一，
+   `PROJECT_VERSION`，移除新带入的上游工作流。随后将项目 patch 加一，
    与上游版本元数据一起加入待测试的合并，候选构建和提交后的正式构建读取同一版本。
 3. 运行测试和安装包检查，并完整编译 Linux amd64、arm64。测试、编译或代码冲突失败即停止。
 4. 检查远端 `main` 是否仍是开始测试时的提交；有并发修改则停止，稍后重试。

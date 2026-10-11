@@ -59,6 +59,25 @@ type Resolver struct {
 	defaultResolver       *Resolver
 	ruleRouting           bool
 	bootstrap             bool
+	clientOwner           *resolverClientOwner
+}
+
+// A resolver collection can share wrapped clients across default, policy,
+// proxy, direct and fallback lists. Own the constructed raw clients explicitly;
+// policy-only transports must not survive a configuration reload.
+type resolverClientOwner struct {
+	once    sync.Once
+	clients []dnsClient
+}
+
+func (o *resolverClientOwner) close() {
+	if o != nil {
+		o.once.Do(func() {
+			for _, client := range o.clients {
+				closeNativeClient(client)
+			}
+		})
+	}
 }
 
 func (r *Resolver) LookupIPPrimaryIPv4(ctx context.Context, host string) (ips []netip.Addr, err error) {
@@ -547,9 +566,13 @@ func (r *Resolver) Close() {
 		r.cacheControl.Close()
 	}
 	if r != nil {
+		if r.clientOwner != nil {
+			r.clientOwner.close()
+			return
+		}
 		for _, clients := range [][]dnsClient{r.main, r.direct, r.fallback} {
 			for _, client := range clients {
-				closeNativePool(client)
+				closeNativeClient(client)
 			}
 		}
 	}
@@ -557,6 +580,12 @@ func (r *Resolver) Close() {
 
 func (r *Resolver) ResetConnection() {
 	if r != nil {
+		if r.clientOwner != nil {
+			for _, client := range r.clientOwner.clients {
+				client.ResetConnection()
+			}
+			return
+		}
 		for _, c := range r.main {
 			c.ResetConnection()
 		}
@@ -679,6 +708,9 @@ func (rs Resolvers) ClearCache() {
 
 func (rs Resolvers) ResetConnection() {
 	rs.Resolver.ResetConnection()
+	if rs.Resolver != nil && rs.Resolver.clientOwner != nil {
+		return // the owner also contains proxy/direct/bootstrap/policy clients
+	}
 	rs.ProxyResolver.ResetConnection()
 	rs.DirectResolver.ResetConnection()
 }
@@ -697,6 +729,7 @@ func NewResolverFromClient(client dnsClient) *Resolver {
 		cache: Config{}.newCache(),
 	}
 	r.cacheControl = newCacheControl(r, nil)
+	r.clientOwner = &resolverClientOwner{clients: []dnsClient{client}}
 	return r
 }
 
@@ -713,6 +746,8 @@ func NewResolver(config Config) (rs Resolvers) {
 		cache:       config.newCache(),
 		ipv6Timeout: time.Duration(config.IPv6Timeout) * time.Millisecond,
 	}
+	owner := &resolverClientOwner{clients: append([]dnsClient(nil), defaultResolver.main...)}
+	defaultResolver.clientOwner = owner
 
 	var nameServerCache []struct {
 		NameServer
@@ -739,6 +774,7 @@ func NewResolver(config Config) (rs Resolvers) {
 					continue
 				}
 				dc = built[0]
+				owner.clients = append(owner.clients, dc)
 			}
 			nameServerCache = append(nameServerCache, struct {
 				NameServer
@@ -779,6 +815,7 @@ func NewResolver(config Config) (rs Resolvers) {
 	}
 
 	r := &Resolver{
+		clientOwner: owner,
 		ruleRouting: config.RuleRouting,
 		ipv6:        config.IPv6,
 		main:        cacheTransform(config.Main),
@@ -792,6 +829,7 @@ func NewResolver(config Config) (rs Resolvers) {
 
 	if len(config.ProxyServer) != 0 {
 		rs.ProxyResolver = &Resolver{
+			clientOwner: owner,
 			bootstrap:   true,
 			ipv6:        config.IPv6,
 			main:        cacheTransform(config.ProxyServer),
@@ -803,6 +841,7 @@ func NewResolver(config Config) (rs Resolvers) {
 
 	if len(config.DirectServer) != 0 {
 		rs.DirectResolver = &Resolver{
+			clientOwner: owner,
 			ruleRouting: config.RuleRouting,
 			ipv6:        config.IPv6,
 			main:        cacheTransform(config.DirectServer),

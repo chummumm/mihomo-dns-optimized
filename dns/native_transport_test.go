@@ -12,6 +12,7 @@ import (
 
 	"github.com/metacubex/mihomo/component/dnsstats"
 	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/tunnel"
 	"github.com/metacubex/mihomo/tunnel/statistic"
 	D "github.com/miekg/dns"
 )
@@ -179,10 +180,8 @@ func TestDNSRuleRoutingNativeDashboardCloseDoesNotRetry(t *testing.T) {
 			var tracker statistic.Tracker
 			statistic.DefaultManager.Range(func(item statistic.Tracker) bool {
 				info := item.Info()
-				matches := info.Metadata.Host == strings.TrimSuffix(query.Question[0].Name, ".")
-				if protocol == "udp53" {
-					matches = info.DNS && info.Metadata.AddrPort().String() == "192.0.2.53:53" && info.Chain.Last() == leaf.Name()
-				}
+				_, logical := item.(*tunnel.DNSNativeQueryTracker)
+				matches := logical && !info.DNS && info.Metadata.Host == strings.TrimSuffix(query.Question[0].Name, ".") && info.Chain.Last() == leaf.Name()
 				if matches {
 					tracker = item
 					return false

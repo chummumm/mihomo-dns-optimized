@@ -3,6 +3,7 @@
 import gzip
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -15,7 +16,7 @@ sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location('release_build', Path(__file__).with_name('release-build.py'))
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
-VERSION = 'v1.19.32-optimized-9'
+VERSION = 'mihomo-optimized-v1.0.0'
 LEGACY_VERSION = 'v1.19.32-dns-optimized-8'
 COMMIT = '123456789abcdef0123456789abcdef0123456789'
 TIME = '2026-10-09T02:00:00+00:00'
@@ -46,24 +47,25 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(any('abi1' in row['id'] or 'go120' in row['id'] for row in rows))
         for row in rows:
             for name in release.asset_names(row, VERSION):
-                self.assertTrue(name.startswith(f"mihomo-{row['id']}-{VERSION}."), name)
+                expected = f"{VERSION}-{row['id']}" if name.endswith(('.gz', '.zip')) else f"mihomo-optimized-{row['id']}"
+                self.assertTrue(name.startswith(expected + '.'), name)
                 self.assertFalse(name.startswith('mihomo-dns-'), name)
-        self.assertIn('mihomo-linux-arm64-v1.19.32-optimized-9.deb',
+        self.assertIn('mihomo-optimized-linux-arm64.deb',
                       release.asset_names(release.target('linux-arm64'), VERSION))
 
     def test_version_upgrade_order_and_timestamp_timezone(self):
-        versions = release.package_versions(TIME, COMMIT, 'v1.19.32', VERSION)
+        versions = release.package_versions(TIME, COMMIT, 'v1.19.32', 'v1.19.32-optimized-9')
         self.assertEqual(versions['deb'], '1.19.32+dns.20261009020000.9')
         later = release.package_versions('2026-10-09T02:01:00Z', '0' * 40, 'v1.19.32', 'v1.19.32-optimized-10')
         release.run('dpkg', '--compare-versions', later['deb'], 'gt', versions['deb'])
-        same_time = release.package_versions('2026-10-09T10:00:00+08:00', COMMIT, 'v1.19.32', VERSION)
+        same_time = release.package_versions('2026-10-09T10:00:00+08:00', COMMIT, 'v1.19.32', 'v1.19.32-optimized-9')
         self.assertEqual(versions, same_time)
         release.run('dpkg', '--compare-versions', later['deb'], 'gt', '1.19.32+dns.20261009020000.123456789abc')
         first_new = release.package_versions('2026-10-09T02:01:00Z', COMMIT, 'v1.19.32', 'v1.19.32-optimized-1')
         release.run('dpkg', '--compare-versions', first_new['deb'], 'gt', '1.19.32+dns.20261009020000.2')
 
     def test_renamed_tags_preserve_package_identity_and_upgrade_order(self):
-        self.assertEqual(release.PACKAGE, 'mihomo-dns-optimized')
+        self.assertEqual(release.PACKAGE, 'mihomo-optimized')
         for revision in [1, 7, 8, 9, 10, 1234]:
             with self.subTest(revision=revision):
                 canonical = release.package_versions(TIME, COMMIT, 'v1.19.32', f'v1.19.32-optimized-{revision}')
@@ -85,10 +87,70 @@ class ReleaseTests(unittest.TestCase):
         following = release.package_versions('2026-10-09T02:01:00Z', COMMIT, 'v1.19.32', VERSION)
         release.run('dpkg', '--compare-versions', following['deb'], 'gt', previous['deb'])
 
+    def test_project_versions_have_permanent_migration_epoch_and_stable_installers(self):
+        first = release.package_versions(TIME, COMMIT, 'v1.19.32', VERSION)
+        self.assertEqual(first, {'deb': '1:1.0.0', 'rpm_epoch': '1', 'rpm_version': '1.0.0',
+                                 'rpm_release': '1', 'archlinux': '1:1.0.0-1'})
+        # Package version comes from the release, independent of wall time,
+        # source hash and the separately recorded upstream base.
+        self.assertEqual(first, release.package_versions('2030-01-01T00:00:00Z', 'f' * 40, 'v2.0.0', VERSION))
+        for older, newer in [('1.0.0', '1.0.1'), ('1.0.2', '1.0.12'), ('1.9.99', '2.0.0')]:
+            old = release.package_versions(TIME, COMMIT, 'v1.19.32', 'mihomo-optimized-v' + older)
+            new = release.package_versions(TIME, COMMIT, 'v1.19.32', 'mihomo-optimized-v' + newer)
+            release.run('dpkg', '--compare-versions', new['deb'], 'gt', old['deb'])
+        for historical in ['1.19.32+dns.20261011000000.13', '9.99.99+dns.20300101000000.999']:
+            release.run('dpkg', '--compare-versions', first['deb'], 'gt', historical)
+        for row in release.targets():
+            old = release.asset_names(row, VERSION)
+            new = release.asset_names(row, 'mihomo-optimized-v1.0.1')
+            self.assertNotEqual(old[0], new[0])
+            self.assertEqual(old[1:], new[1:])
+
+    def test_debian_rename_preserves_locally_modified_configuration(self):
+        # Exercise a real dpkg upgrade in a disposable root. No service hooks,
+        # host package database, installed binary or host configuration is used.
+        stage = self.root / 'old-package'
+        (stage / 'DEBIAN').mkdir(parents=True)
+        (stage / 'usr/bin').mkdir(parents=True)
+        (stage / 'etc/mihomo').mkdir(parents=True)
+        (stage / 'usr/bin/mihomo').write_bytes(b'old installed binary')
+        (stage / 'etc/mihomo/config.yaml').write_text('mixed-port: 7890\n')
+        (stage / 'DEBIAN/control').write_text(
+            'Package: mihomo-dns-optimized\nVersion: 1.19.32+dns.20261011000000.13\n'
+            'Architecture: amd64\nMaintainer: Test <test@example.invalid>\nDescription: migration fixture\n')
+        (stage / 'DEBIAN/conffiles').write_text('/etc/mihomo/config.yaml\n')
+        old_package = self.root / 'previous.deb'
+        release.run('dpkg-deb', '--root-owner-group', '--build', str(stage), str(old_package))
+        root = self.root / 'installed-root'
+        (root / 'var/lib/dpkg').mkdir(parents=True)
+        (root / 'var/lib/dpkg/status').touch()
+        command = ['dpkg', '--root=' + str(root), '--force-not-root', '--force-bad-path', '--force-architecture', '--force-confold']
+        if os.geteuid() != 0:
+            self.assertIsNotNone(shutil.which('fakeroot'), 'Install fakeroot for the isolated dpkg migration test')
+            command.insert(0, 'fakeroot')
+        release.run(*command, '--install', str(old_package))
+        config = root / 'etc/mihomo/config.yaml'
+        local_config = 'mixed-port: 8990\ncore-auto-update: true\n'
+        config.write_text(local_config)
+        row = dict(release.target('linux-amd64'), packages={'deb': 'amd64'})
+        package, = release.package_binary(self.binary, row, VERSION, self.out, TIME, COMMIT, 'v1.19.32')
+        release.run(*command, '--install', str(package))
+        self.assertEqual(config.read_text(), local_config)
+        self.assertEqual((root / 'usr/bin/mihomo').read_bytes(), self.binary.read_bytes())
+        status = release.run('dpkg-query', '--admindir=' + str(root / 'var/lib/dpkg'), '-W',
+                             '-f=${Status} ${Version}', 'mihomo-optimized')
+        self.assertEqual(status.strip(), 'install ok installed 1:1.0.0')
+        owner = release.run('dpkg-query', '--admindir=' + str(root / 'var/lib/dpkg'), '-S', '/usr/bin/mihomo')
+        self.assertEqual(owner.strip(), 'mihomo-optimized: /usr/bin/mihomo')
+
     def test_release_versions_reject_malformed_or_mismatched_values(self):
         invalid_versions = ['v1.19.32-dns.8', 'v1.19.32-dns-deadbeef1234',
                             'v1.19.33-optimized-8', '1.19.32-optimized-8',
                             'v1.19.32-dns-dns-optimized-8', 'v1.19.32-optimized']
+        invalid_versions.extend('mihomo-optimized-v' + suffix for suffix in
+                                ['1.0', '01.0.0', '1.01.0', '1.0.01', '1.0.0-rc1', '1.0.0+build',
+                                 '1.0.0/../', '1.0.0\n', '1.0.0 ', '１.0.0',
+                                 '18446744073709551616.0.0', '1.18446744073709551616.0', '1.0.18446744073709551616'])
         for prefix in ['v1.19.32-optimized-', 'v1.19.32-dns-optimized-']:
             invalid_versions.extend(prefix + revision for revision in
                                     ['', '0', '00', '01', '-1', '+1', '8.1', '8-extra', '8/../', '8\n', '8 ', '８'])
@@ -105,10 +167,10 @@ class ReleaseTests(unittest.TestCase):
         for row in release.targets():
             name = row['id']
             path = release.write_archive(self.binary, row, VERSION, self.out, release.epoch(TIME))
-            self.assertEqual(path.name, f'mihomo-{name}-{VERSION}' + ('.zip' if row['goos'] == 'windows' else '.gz'))
+            self.assertEqual(path.name, f'{VERSION}-{name}' + ('.zip' if row['goos'] == 'windows' else '.gz'))
             if row['goos'] == 'windows':
                 with zipfile.ZipFile(path) as archive:
-                    self.assertEqual(archive.namelist(), [f'mihomo-{name}.exe'])
+                    self.assertEqual(archive.namelist(), [f'mihomo-optimized-{name}.exe'])
                     self.assertEqual(archive.read(archive.namelist()[0]), self.binary.read_bytes())
             else:
                 self.assertEqual(gzip.decompress(path.read_bytes()), self.binary.read_bytes())

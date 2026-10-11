@@ -18,9 +18,8 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
-# Release filenames can change without migrating the installed package or its
-# configuration ownership. Keep the existing Debian/RPM/Arch package identity.
-PACKAGE = "mihomo-dns-optimized"
+PACKAGE = "mihomo-optimized"
+LEGACY_PACKAGE = "mihomo-dns-optimized"
 NDK_VERSION = "29.0.14206865"
 GO_ENV = ("GOOS", "GOARCH", "GOAMD64", "GO386", "GOARM", "GOMIPS", "GOMIPS64", "CGO_ENABLED", "CC", "CXX")
 PAYLOAD = {
@@ -61,24 +60,44 @@ def epoch(build_time):
     return int(datetime.fromisoformat(build_time.replace("Z", "+00:00")).timestamp())
 
 
+def version_numbers(value, prefix):
+    match = re.fullmatch(re.escape(prefix) + r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", value)
+    if not match or any(int(part) >= 1 << 64 for part in match.groups()):
+        raise ValueError("invalid canonical version")
+    return tuple(int(part) for part in match.groups())
+
+
+def project_numbers(version):
+    return version_numbers(version, "mihomo-optimized-v")
+
+
+def legacy_version(version):
+    match = re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-(?:dns-)?optimized-([1-9][0-9]*)", version)
+    if not match or any(int(part) >= 1 << 64 for part in match.groups()):
+        raise ValueError("invalid historical release version")
+    return match.groups()
+
+
 def package_versions(build_time, commit, upstream, version=None):
-    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", upstream):
-        raise ValueError("invalid recorded upstream version")
+    version_numbers(upstream, "v")
+    if version is not None and version.startswith("mihomo-optimized-"):
+        base = ".".join(map(str, project_numbers(version)))
+        # A permanent package epoch makes the independent project version newer
+        # than the historical upstream-derived package numbering.
+        return {"deb": f"1:{base}", "rpm_epoch": "1", "rpm_version": base,
+                "rpm_release": "1", "archlinux": f"1:{base}-1"}
     stamp = datetime.fromtimestamp(epoch(build_time), timezone.utc).strftime("%Y%m%d%H%M%S")
-    # Keep the timestamp prefix for monotonic upgrades from existing packages,
-    # but use a numeric fork revision instead of a commit hash. Git SHA remains
-    # in BUILDINFO/manifests solely for source verification.
+    # Retain historical calculations for migration checks, not new releases.
     revision = "0"
     if version is not None:
         # Historical tags remain readable; the native package version below
         # keeps its existing prefix so renaming a release never resets upgrades.
-        match = re.fullmatch(re.escape(upstream) + r"-(?:dns-)?optimized-([1-9][0-9]*)", version)
-        if not match:
+        major, minor, patch, revision = legacy_version(version)
+        if upstream != f"v{major}.{minor}.{patch}":
             raise ValueError("release version must contain a numeric optimized revision")
-        revision = match.group(1)
     suffix = f"dns.{stamp}.{revision}"
     base = upstream[1:]
-    return {"deb": f"{base}+{suffix}", "rpm_version": base,
+    return {"deb": f"{base}+{suffix}", "rpm_epoch": "0", "rpm_version": base,
             "rpm_release": f"1.{suffix}", "archlinux": f"{base}.{suffix}-1"}
 
 
@@ -91,23 +110,36 @@ def digest(path):
 
 
 def basename(row, version):
-    if not re.fullmatch(r"[0-9A-Za-z._+-]+", version):
-        raise ValueError("unsafe version")
+    if version.startswith("mihomo-optimized-"):
+        project_numbers(version)
+        return f"{version}-{row['id']}"
+    legacy_version(version)
     return f"mihomo-{row['id']}-{version}"
+
+
+def package_basename(row, version):
+    # Native installers have stable download URLs. Their control metadata still
+    # records the version that was installed; core self-updates do not edit the
+    # system package manager's database.
+    if version.startswith("mihomo-optimized-v"):
+        project_numbers(version)
+        return f"mihomo-optimized-{row['id']}"
+    return basename(row, version)
 
 
 def asset_names(row, version):
     base = basename(row, version)
     names = [base + (".zip" if row["goos"] == "windows" else ".gz")]
     suffix = {"deb": ".deb", "rpm": ".rpm", "archlinux": ".pkg.tar.zst"}
-    return names + [base + suffix[kind] for kind in row["packages"]]
+    return names + [package_basename(row, version) + suffix[kind] for kind in row["packages"]]
 
 
 def write_archive(binary, row, version, output, timestamp):
     name = asset_names(row, version)[0]
     path = output / name
     if row["goos"] == "windows":
-        info = zipfile.ZipInfo(f"mihomo-{row['id']}.exe", datetime.fromtimestamp(timestamp, timezone.utc).timetuple()[:6])
+        prefix = "mihomo-optimized-" if version.startswith("mihomo-optimized-") else "mihomo-"
+        info = zipfile.ZipInfo(f"{prefix}{row['id']}.exe", datetime.fromtimestamp(timestamp, timezone.utc).timetuple()[:6])
         info.create_system = 3
         info.external_attr = (0o100755 << 16)
         info.compress_type = zipfile.ZIP_DEFLATED
@@ -140,7 +172,7 @@ def stage_payload(binary, directory, timestamp):
     readme = directory / f"usr/share/doc/{PACKAGE}/README"
     readme.parent.mkdir(parents=True, exist_ok=True)
     readme.write_text(
-        "Mihomo DNS optimized\n\n"
+        "mihomo-optimized\n\n"
         "Binary: /usr/bin/mihomo\nConfiguration: /etc/mihomo/config.yaml\n"
         "Service: mihomo.service\n\n"
         "This package does not start, enable or restart any service.\n"
@@ -151,7 +183,7 @@ def stage_payload(binary, directory, timestamp):
         "Configuration is preserved on upgrades. This package replaces the\n"
         "official mihomo package and owns the same binary/config/service paths.\n"
         "Back up an existing installation before deliberately switching packages.\n"
-        "https://github.com/chummumm/mihomo-dns-optimized/blob/main/docs/releases.md\n"
+        "https://github.com/chummumm/mihomo-optimized/blob/main/docs/releases.md\n"
     )
     for name, mode in PAYLOAD.items():
         os.chmod(directory / name, mode)
@@ -180,7 +212,8 @@ def inspect_package(path, kind, architecture, binary, versions):
         extracted = Path(temp)
         if kind == "deb":
             fields = run("dpkg-deb", "-f", str(path), "Package", "Architecture", "Version", "Provides", "Conflicts", "Replaces")
-            required = [f"Package: {PACKAGE}", f"Architecture: {architecture}", f"Version: {versions['deb']}", "Provides: mihomo", "Conflicts: mihomo", "Replaces: mihomo"]
+            required = [f"Package: {PACKAGE}", f"Architecture: {architecture}", f"Version: {versions['deb']}",
+                        f"Provides: mihomo, {LEGACY_PACKAGE}", f"Conflicts: mihomo, {LEGACY_PACKAGE}", f"Replaces: mihomo, {LEGACY_PACKAGE}"]
             if any(value not in fields for value in required):
                 raise ValueError(f"unexpected Debian metadata: {fields}")
             control = extracted / "control"
@@ -196,8 +229,8 @@ def inspect_package(path, kind, architecture, binary, versions):
                     raise ValueError("Debian package payload must be owned by root")
             run("dpkg-deb", "-x", str(path), str(extracted))
         elif kind == "rpm":
-            fields = run("rpm", "-qp", "--qf", "%{NAME}\n%{ARCH}\n%{VERSION}\n%{RELEASE}\n", str(path)).splitlines()
-            if fields != [PACKAGE, architecture, versions["rpm_version"], versions["rpm_release"]]:
+            fields = run("rpm", "-qp", "--qf", "%{NAME}\n%{ARCH}\n%{EPOCHNUM}\n%{VERSION}\n%{RELEASE}\n", str(path)).splitlines()
+            if fields != [PACKAGE, architecture, versions["rpm_epoch"], versions["rpm_version"], versions["rpm_release"]]:
                 raise ValueError(f"unexpected RPM metadata: {fields}")
             ownership = run("rpm", "-qp", "--qf", "[%{FILEUSERNAME}:%{FILEGROUPNAME}\n]", str(path)).splitlines()
             if any(owner != "root:root" for owner in ownership):
@@ -207,8 +240,9 @@ def inspect_package(path, kind, architecture, binary, versions):
                 raise ValueError("RPM package lost config(noreplace)")
             if run("rpm", "-qp", "--scripts", str(path)).strip():
                 raise ValueError("unexpected RPM lifecycle scripts")
-            if "mihomo" not in run("rpm", "-qp", "--conflicts", str(path)).splitlines():
-                raise ValueError("RPM package does not declare official package conflict")
+            for relation in ["--conflicts", "--obsoletes"]:
+                if not {"mihomo", LEGACY_PACKAGE}.issubset(set(run("rpm", "-qp", relation, str(path)).splitlines())):
+                    raise ValueError("RPM package lost official/legacy package replacement")
             payload = run("rpm2cpio", str(path), binary=True)
             subprocess.run(["cpio", "-id", "--quiet", "--no-absolute-filenames"], input=payload, cwd=extracted, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         elif kind == "archlinux":
@@ -221,7 +255,9 @@ def inspect_package(path, kind, architecture, binary, versions):
                         raise ValueError("unsafe package member")
                 archive.extractall(extracted, filter="data")
             info = (extracted / ".PKGINFO").read_text()
-            for field in [f"pkgname = {PACKAGE}", f"arch = {architecture}", f"pkgver = {versions['archlinux']}", "backup = etc/mihomo/config.yaml", "conflict = mihomo", "replaces = mihomo"]:
+            for field in [f"pkgname = {PACKAGE}", f"arch = {architecture}", f"pkgver = {versions['archlinux']}",
+                          "backup = etc/mihomo/config.yaml", "conflict = mihomo", "replaces = mihomo",
+                          f"conflict = {LEGACY_PACKAGE}", f"replaces = {LEGACY_PACKAGE}"]:
                 if field not in info.splitlines():
                     raise ValueError(f"Arch package missing metadata: {field}")
             (extracted / ".PKGINFO").unlink()
@@ -248,17 +284,17 @@ def package_binary(binary, row, version, output, build_time, commit, upstream):
         stage = work / "root"
         stage_payload(binary, stage, timestamp)
         for kind, architecture in row["packages"].items():
-            path = output / (basename(row, version) + {"deb": ".deb", "rpm": ".rpm", "archlinux": ".pkg.tar.zst"}[kind])
+            path = output / (package_basename(row, version) + {"deb": ".deb", "rpm": ".rpm", "archlinux": ".pkg.tar.zst"}[kind])
             if kind == "deb":
                 control = stage / "DEBIAN"
                 control.mkdir()
                 (control / "control").write_text(
                     f"Package: {PACKAGE}\nVersion: {versions['deb']}\nArchitecture: {architecture}\n"
                     "Maintainer: chummumm <chummumm@users.noreply.github.com>\n"
-                    "Section: net\nPriority: optional\nProvides: mihomo\nConflicts: mihomo\nReplaces: mihomo\n"
+                    f"Section: net\nPriority: optional\nProvides: mihomo, {LEGACY_PACKAGE}\nConflicts: mihomo, {LEGACY_PACKAGE}\nReplaces: mihomo, {LEGACY_PACKAGE}\n"
                     f"Installed-Size: {sum((stage / p).stat().st_size for p in PAYLOAD) // 1024 + 1}\n"
-                    "Homepage: https://github.com/chummumm/mihomo-dns-optimized\n"
-                    "Description: Mihomo core with DNS query routing and optional DIRECT optimization\n"
+                    "Homepage: https://github.com/chummumm/mihomo-optimized\n"
+                    "Description: mihomo-optimized core with shared DNS transports and managed updates\n"
                 )
                 (control / "conffiles").write_text("/etc/mihomo/config.yaml\n")
                 env = dict(os.environ, SOURCE_DATE_EPOCH=str(timestamp))
@@ -271,19 +307,21 @@ def package_binary(binary, row, version, output, build_time, commit, upstream):
                 spec = top / "SPECS/mihomo.spec"
                 files = "\n".join(("%config(noreplace) " if name.startswith("etc/") else "%license " if "/licenses/" in name else "") + "/" + name for name in PAYLOAD)
                 spec.write_text(f"""Name: {PACKAGE}
+Epoch: {versions['rpm_epoch']}
 Version: {versions['rpm_version']}
 Release: {versions['rpm_release']}
-Summary: Mihomo DNS optimized proxy core
+Summary: mihomo-optimized proxy core
 License: GPL-3.0-or-later
-URL: https://github.com/chummumm/mihomo-dns-optimized
+URL: https://github.com/chummumm/mihomo-optimized
 AutoReqProv: no
-Provides: mihomo = %{{version}}-%{{release}}
-Conflicts: mihomo
-Obsoletes: mihomo
+Provides: mihomo = %{{epoch}}:%{{version}}-%{{release}}
+Provides: {LEGACY_PACKAGE}
+Conflicts: mihomo, {LEGACY_PACKAGE}
+Obsoletes: mihomo, {LEGACY_PACKAGE}
 %global debug_package %{{nil}}
 %global __os_install_post %{{nil}}
 %description
-Mihomo with DNS query routing and optional DIRECT optimization.
+mihomo-optimized with shared DNS transports and managed updates.
 Configuration is preserved. Services are never started by the package.
 %install
 mkdir -p %{{buildroot}}
@@ -303,11 +341,11 @@ cp -a {shlex.quote(str(stage))}/. %{{buildroot}}/
                 info = stage / ".PKGINFO"
                 info.write_text(
                     f"pkgname = {PACKAGE}\npkgbase = {PACKAGE}\npkgver = {versions['archlinux']}\n"
-                    "pkgdesc = Mihomo DNS optimized proxy core\n"
-                    "url = https://github.com/chummumm/mihomo-dns-optimized\n"
+                    "pkgdesc = mihomo-optimized proxy core\n"
+                    "url = https://github.com/chummumm/mihomo-optimized\n"
                     f"builddate = {timestamp}\npackager = chummumm\nsize = {sum((stage / p).stat().st_size for p in PAYLOAD)}\n"
                     f"arch = {architecture}\nlicense = GPL-3.0-or-later\nprovides = mihomo\n"
-                    "conflict = mihomo\nreplaces = mihomo\nbackup = etc/mihomo/config.yaml\n"
+                    f"provides = {LEGACY_PACKAGE}\nconflict = mihomo\nreplaces = mihomo\nconflict = {LEGACY_PACKAGE}\nreplaces = {LEGACY_PACKAGE}\nbackup = etc/mihomo/config.yaml\n"
                 )
                 with path.open("wb") as destination:
                     subprocess.run(["zstd", "-q", "-T0", "-10", "-c"], input=pack_tar(stage, timestamp), stdout=destination, check=True)
@@ -318,6 +356,7 @@ cp -a {shlex.quote(str(stage))}/. %{{buildroot}}/
 
 
 def build(row, output, version, build_time):
+    project_numbers(version)
     output = Path(output)
     if not output.is_absolute():
         raise ValueError("output directory must be absolute")

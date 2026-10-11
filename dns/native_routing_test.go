@@ -186,8 +186,9 @@ func TestDNSRuleRoutingNativeDirectFailureDoesNotBorrowOtherPools(t *testing.T) 
 		t.Fatal("direct DNS failure was silently replaced by another pool")
 	}
 	nativeRoutingTestDestination(t, leaf.routingTestOutbound, "198.51.100.53")
-	if leaf.udp.Load() != 1 {
-		t.Fatal("direct failure queried main/fallback")
+	nativeRoutingTestDestination(t, leaf.routingTestOutbound, "198.51.100.53")
+	if leaf.udp.Load() != 2 {
+		t.Fatal("direct failure exceeded its one same-exit reconnect or queried main/fallback")
 	}
 }
 

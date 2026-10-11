@@ -89,7 +89,7 @@ func TestDNSDoTCancellationDoesNotWaitForTLSCloseNotify(t *testing.T) {
 			query := routingTestQuery("tls-abort.example", 77)
 			results := make(chan dnsCancelExchangeResult, 1)
 			go func() {
-				message, err := dc.ExchangeContext(ctx, query)
+				message, err := dc.exchangeDedicated(ctx, query)
 				results <- dnsCancelExchangeResult{message, err}
 			}()
 			waitDNSCancelSignal(t, ready, "TLS server did not receive the DNS query")

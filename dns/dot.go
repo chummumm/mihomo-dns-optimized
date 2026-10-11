@@ -2,6 +2,7 @@ package dns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"runtime"
@@ -21,6 +22,7 @@ const maxOldDotConns = 8
 
 type dnsOverTLS struct {
 	native         nativeClientState
+	shared         sharedDNSState
 	port           string
 	host           string
 	dialer         *dnsDialer
@@ -30,6 +32,7 @@ type dnsOverTLS struct {
 
 	access      sync.Mutex
 	connections deque.Deque[net.Conn] // LIFO
+	legacyKey   string
 }
 
 var _ dnsClient = (*dnsOverTLS)(nil)
@@ -40,11 +43,39 @@ func (t *dnsOverTLS) Address() string {
 }
 
 func (t *dnsOverTLS) ExchangeContext(ctx context.Context, m *D.Msg) (response *D.Msg, err error) {
+	ctx, cancel := context.WithTimeout(ctx, sharedDNSQueryTimeout)
+	defer cancel()
 	if answer, err, handled := exchangeNativeTransport(ctx, m, t); handled {
 		return answer, err
 	}
+	if !t.disableReuse && sharedDNSQuery(m) {
+		if snapshot, key, ok := t.dialer.SharedTransport(); ok {
+			attempt := observeDNSUpstream(ctx, t.Address(), t.dialer)
+			defer func() { finishDNSUpstream(attempt, response, err) }()
+			return t.shared.exchange(ctx, m, key, false, func(ctx context.Context) (net.Conn, error) {
+				conn, err := t.dialWith(ctx, snapshot)
+				if err == nil {
+					_, current, ok := t.dialer.SharedTransport()
+					if !ok || current != key {
+						abortDNSConn(conn)
+						return nil, errors.New("DNS transport route changed during TLS connection creation")
+					}
+				}
+				return conn, err
+			})
+		}
+	}
+	return t.exchangeDedicated(ctx, m)
+}
+
+// Authenticated/non-ordinary messages retain their original wire ID and own
+// one connection during I/O. Sequential reuse also requires a known immutable
+// exit; unresolved groups and opaque chains always dial an exclusive socket.
+func (t *dnsOverTLS) exchangeDedicated(ctx context.Context, m *D.Msg) (response *D.Msg, err error) {
 	attempt := observeDNSUpstream(ctx, t.Address(), t.dialer)
 	defer func() { finishDNSUpstream(attempt, response, err) }()
+	_, key, reuse := t.dialer.SharedTransport()
+	reuse = reuse && !t.disableReuse
 	for { // retry loop; only retry when reusing old conn
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			// A reused socket may already have failed before cancellation.
@@ -57,8 +88,15 @@ func (t *dnsOverTLS) ExchangeContext(ctx context.Context, m *D.Msg) (response *D
 
 		var conn net.Conn
 		isOldConn := true
-		if !t.disableReuse {
+		if reuse {
 			t.access.Lock()
+			if t.legacyKey != "" && t.legacyKey != key {
+				for t.connections.Len() > 0 {
+					old := t.connections.PopFront()
+					go abortDNSConn(old)
+				}
+			}
+			t.legacyKey = key
 			if t.connections.Len() > 0 {
 				conn = t.connections.PopBack()
 			}
@@ -83,9 +121,10 @@ func (t *dnsOverTLS) ExchangeContext(ctx context.Context, m *D.Msg) (response *D
 		// Complete before cleanup or pool-lock contention. A late cancellation
 		// can retire the socket but cannot replace this completed DNS response.
 		finishDNSUpstream(attempt, response, nil)
-		if !t.disableReuse {
+		if reuse {
 			t.access.Lock()
-			if t.native.isClosed() || ctx.Err() != nil {
+			_, current, usable := t.dialer.SharedTransport()
+			if t.native.isClosed() || ctx.Err() != nil || t.legacyKey != key || !usable || current != key {
 				t.access.Unlock()
 				abortDNSConn(conn)
 				return response, nil
@@ -113,7 +152,11 @@ func (t *dnsOverTLS) ExchangeContext(ctx context.Context, m *D.Msg) (response *D
 }
 
 func (t *dnsOverTLS) dialContext(ctx context.Context) (net.Conn, error) {
-	conn, err := t.dialer.DialContext(ctx, "tcp", net.JoinHostPort(t.host, t.port))
+	return t.dialWith(ctx, t.dialer)
+}
+
+func (t *dnsOverTLS) dialWith(ctx context.Context, dialer *dnsDialer) (net.Conn, error) {
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(t.host, t.port))
 	if err != nil {
 		return nil, err
 	}
@@ -145,6 +188,7 @@ func (t *dnsOverTLS) dialContext(ctx context.Context) (net.Conn, error) {
 
 func (t *dnsOverTLS) ResetConnection() {
 	t.native.reset(false)
+	t.shared.reset(false)
 	if !t.disableReuse {
 		t.access.Lock()
 		for t.connections.Len() > 0 {
@@ -157,6 +201,7 @@ func (t *dnsOverTLS) ResetConnection() {
 
 func (t *dnsOverTLS) Close() error {
 	t.native.reset(true)
+	t.shared.reset(true)
 	runtime.SetFinalizer(t, nil)
 	t.ResetConnection()
 	return nil

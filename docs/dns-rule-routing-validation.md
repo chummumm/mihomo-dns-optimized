@@ -75,4 +75,4 @@ Global / Direct、入站固定出口、子规则入口和 bootstrap 保持原优
 - 传递 DNSSEC 数据不等于校验 DNSSEC 签名；速度反映探测时的握手或 ICMP 耗时，不保证下载吞吐或全部 SmartDNS 行为等价。
 - 普通 SSH 的反向 IP→域名显示仍可能受原映射影响；用户配置可用窄 IP＋TCP＋22 规则确定实际出口，不能用面板显示名证明 SSH 请求了该域名。
 
-构建记录见 [Actions](https://github.com/chummumm/mihomo-dns-optimized/actions/workflows/build.yml)，下载见 [Releases](https://github.com/chummumm/mihomo-dns-optimized/releases)；完整安装包说明见[发行文档](releases.md)。
+构建记录见 [Actions](https://github.com/chummumm/mihomo-optimized/actions/workflows/build.yml)，下载见 [Releases](https://github.com/chummumm/mihomo-optimized/releases)；完整安装包说明见[发行文档](releases.md)。

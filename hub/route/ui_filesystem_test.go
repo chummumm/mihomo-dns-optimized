@@ -8,15 +8,20 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/metacubex/mihomo/component/updater"
+	C "github.com/metacubex/mihomo/constant"
+
 	"github.com/metacubex/http"
 	"github.com/metacubex/http/httptest"
 )
 
 func TestUIUpdaterPrivatePathsAreNotServedOrListed(t *testing.T) {
-	directory := t.TempDir()
-	oldUI := uiPath
-	uiPath = directory
-	t.Cleanup(func() { uiPath = oldUI })
+	oldHome := C.Path.HomeDir()
+	C.SetHomeDir(t.TempDir())
+	directory := updater.UIPath()
+	t.Cleanup(func() { C.SetHomeDir(oldHome) })
+	// Old integrations cannot retarget static serving away from HomeDir/ui.
+	SetUIPath(t.TempDir())
 	for _, name := range []string{
 		".mihomo-ui-stage-one/archive",
 		".mihomo-ui-previous-two/index.html",

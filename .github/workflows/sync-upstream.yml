@@ -29,7 +29,7 @@ env:
 
 jobs:
   sync:
-    if: github.repository == 'chummumm/mihomo-dns-optimized' && github.ref == 'refs/heads/main'
+    if: github.repository == 'chummumm/mihomo-optimized' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -75,7 +75,7 @@ jobs:
           cache: true
       - name: Install package inspection tools
         if: steps.merge.outputs.changed == 'true'
-        run: sudo apt-get update && sudo apt-get install -y rpm cpio zstd
+        run: sudo apt-get update && sudo apt-get install -y rpm cpio zstd fakeroot
       - name: Test the merged candidate before pushing
         if: steps.merge.outputs.changed == 'true'
         env:
@@ -92,9 +92,12 @@ jobs:
           for component in "${BASH_REMATCH[@]:1}"; do
             is_uint64 "$component" || { echo 'UPSTREAM_VERSION components must be canonical uint64 values' >&2; exit 1; }
           done
-          revision=$(cat OPTIMIZED_REVISION)
-          is_uint64 "$revision" && [[ "$revision" != 0 ]] || { echo 'OPTIMIZED_REVISION must be a positive uint64 without leading zeros' >&2; exit 1; }
-          candidate_version="${upstream}-optimized-${revision}"
+          project=$(cat PROJECT_VERSION)
+          [[ "$project" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || { echo 'Invalid PROJECT_VERSION' >&2; exit 1; }
+          for component in "${BASH_REMATCH[@]:1}"; do
+            is_uint64 "$component" || { echo 'PROJECT_VERSION components must be canonical uint64 values' >&2; exit 1; }
+          done
+          candidate_version="mihomo-optimized-v${project}"
           bash scripts/ci-check.sh test
           bash scripts/ci-check.sh build amd64 "$RUNNER_TEMP/sync-amd64" "$candidate_version" "$(date -u +%FT%TZ)"
           bash scripts/ci-check.sh build arm64 "$RUNNER_TEMP/sync-arm64" "$candidate_version" "$(date -u +%FT%TZ)"
@@ -113,7 +116,7 @@ jobs:
             exit 1
           fi
           git diff --exit-code
-          git commit -m "Merge upstream ${UPSTREAM_TAG} into DNS optimized fork"
+          git commit -m "Merge upstream ${UPSTREAM_TAG} into mihomo-optimized"
           auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
           git -c "http.https://github.com/.extraheader=$auth_header" push origin HEAD:refs/heads/main
           {

@@ -2,7 +2,9 @@ package dns
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -27,11 +29,12 @@ type systemClient struct {
 	dnsClients map[string]*systemDnsClient
 	lastFlush  time.Time
 	defaultNS  []dnsClient
+	closed     bool
 }
 
 func (c *systemClient) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, err error) {
 	dnsClients, err := c.getDnsClients()
-	if len(dnsClients) == 0 && len(c.defaultNS) > 0 {
+	if len(dnsClients) == 0 && len(c.defaultNS) > 0 && !errors.Is(err, net.ErrClosed) {
 		dnsClients = c.defaultNS
 		err = nil
 	}
@@ -59,6 +62,37 @@ func (c *systemClient) Address() string {
 
 var _ dnsClient = (*systemClient)(nil)
 
+func (c *systemClient) Close() error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	c.closed = true
+	clients := append([]dnsClient(nil), c.defaultNS...)
+	for _, dc := range c.dnsClients {
+		clients = append(clients, dc.dnsClient)
+	}
+	c.dnsClients = nil
+	c.mu.Unlock()
+	for _, dc := range clients {
+		closeNativeClient(dc)
+	}
+	return nil
+}
+
+func (c *systemClient) resetClients() {
+	c.mu.Lock()
+	clients := append([]dnsClient(nil), c.defaultNS...)
+	for _, dc := range c.dnsClients {
+		clients = append(clients, dc.dnsClient)
+	}
+	c.mu.Unlock()
+	for _, dc := range clients {
+		dc.ResetConnection()
+	}
+}
+
 func newSystemClient() *systemClient {
 	return &systemClient{
 		dnsClients: map[string]*systemDnsClient{},
@@ -70,5 +104,6 @@ func init() {
 	c := newSystemClient()
 	c.defaultNS = transform([]NameServer{{Addr: "114.114.114.114:53"}, {Addr: "8.8.8.8:53"}}, nil)
 	r.main = []dnsClient{c}
+	r.clientOwner.clients = append(r.clientOwner.clients, c)
 	resolver.SystemResolver = r
 }

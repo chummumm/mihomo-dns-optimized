@@ -3,6 +3,7 @@ package updater
 import (
 	"context"
 	"errors"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -94,6 +95,12 @@ func (u *UIUpdater) runAutomaticUpdates(job *uiAutomaticUpdate, ticks <-chan tim
 }
 
 func (u *UIUpdater) automaticUpdate(ctx context.Context) error {
+	// Retry initial installation after an earlier bootstrap network failure.
+	// Existing files still require a strictly newer, recognizable version.
+	entries, readErr := os.ReadDir(u.externalUIPath)
+	if os.IsNotExist(readErr) || (readErr == nil && len(entries) == 0) {
+		return u.installUIContext(ctx, false, true)
+	}
 	latest, err := u.checkWithLifetime(ctx, ctx)
 	if err != nil {
 		return err

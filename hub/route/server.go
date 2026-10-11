@@ -17,6 +17,7 @@ import (
 	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/component/ca"
 	"github.com/metacubex/mihomo/component/ech"
+	"github.com/metacubex/mihomo/component/updater"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
 	"github.com/metacubex/mihomo/ntp"
@@ -31,8 +32,6 @@ import (
 )
 
 var (
-	uiPath = ""
-
 	httpServer *http.Server
 	tlsServer  *http.Server
 	unixServer *http.Server
@@ -43,6 +42,11 @@ var (
 
 func SetEmbedMode(embed bool) {
 	embedMode = embed
+	if embed {
+		updater.DefaultCoreUpdater.SetAutomaticRestartHandler(nil)
+	} else {
+		updater.DefaultCoreUpdater.SetAutomaticRestartHandler(automaticCoreRestart)
+	}
 }
 
 type Traffic struct {
@@ -98,9 +102,9 @@ func ReCreateServer(cfg *Config) {
 	}
 }
 
-func SetUIPath(path string) {
-	uiPath = C.Path.Resolve(path)
-}
+// Retained for old integrations; the managed dashboard always lives in ui
+// beneath the configured HomeDir, shared with the updater's fixed target.
+func SetUIPath(_ string) {}
 
 func router(isDebug bool, secret string, dohServer string, cors Cors) *chi.Mux {
 	r := chi.NewRouter()
@@ -144,15 +148,13 @@ func router(isDebug bool, secret string, dohServer string, cors Cors) *chi.Mux {
 
 	})
 
-	if uiPath != "" {
-		r.Group(func(r chi.Router) {
-			fs := http.StripPrefix("/ui", http.FileServer(uiFileSystem{root: uiPath}))
-			r.Get("/ui", http.RedirectHandler("/ui/", http.StatusTemporaryRedirect).ServeHTTP)
-			r.Get("/ui/*", func(w http.ResponseWriter, r *http.Request) {
-				fs.ServeHTTP(w, r)
-			})
+	r.Group(func(r chi.Router) {
+		fs := http.StripPrefix("/ui", http.FileServer(uiFileSystem{root: updater.UIPath()}))
+		r.Get("/ui", http.RedirectHandler("/ui/", http.StatusTemporaryRedirect).ServeHTTP)
+		r.Get("/ui/*", func(w http.ResponseWriter, r *http.Request) {
+			fs.ServeHTTP(w, r)
 		})
-	}
+	})
 	if len(dohServer) > 0 && dohServer[0] == '/' {
 		r.Mount(dohServer, dohRouter())
 	}

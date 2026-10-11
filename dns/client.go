@@ -2,6 +2,7 @@ package dns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -18,6 +19,9 @@ import (
 
 type client struct {
 	native       nativeClientState
+	shared       sharedDNSState
+	tcpFallback  sharedDNSState
+	disableReuse bool
 	port         string
 	host         string
 	dialer       *dnsDialer
@@ -35,12 +39,48 @@ func (c *client) Address() string {
 }
 
 func (c *client) ExchangeContext(ctx context.Context, m *D.Msg) (response *D.Msg, err error) {
+	ctx, cancel := context.WithTimeout(ctx, sharedDNSQueryTimeout)
+	defer cancel()
 	if answer, err, handled := exchangeNativeTransport(ctx, m, c); handled {
 		return answer, err
 	}
 	if route := queryRoute(ctx); route != nil && !c.native.bound && !icontext.DNSBootstrap(ctx) && c.canRouteDNS() {
 		return c.exchangeRouted(ctx, m, route)
 	}
+	if !c.disableReuse && sharedDNSQuery(m) {
+		if snapshot, key, ok := c.dialer.SharedTransport(); ok {
+			attempt := observeDNSUpstream(ctx, c.Address(), c.dialer)
+			defer func() { finishDNSUpstream(attempt, response, err) }()
+			udp := c.schema == "udp"
+			response, err = c.shared.exchange(ctx, m, key, udp, c.sharedDial(snapshot, key, c.schema))
+			if err == nil && response != nil && response.Truncated && udp {
+				// Both protocols use the same exit snapshot, including a group's
+				// UDP permission. A TC reply never triggers a new rule selection.
+				response, err = c.tcpFallback.exchange(ctx, m, key, false, c.sharedDial(snapshot, key, "tcp"))
+			}
+			return response, err
+		}
+	}
+	return c.exchangeDedicated(ctx, m)
+}
+
+func (c *client) sharedDial(snapshot *dnsDialer, key, network string) sharedDNSDial {
+	return func(ctx context.Context) (net.Conn, error) {
+		conn, err := snapshot.DialContext(ctx, network, net.JoinHostPort(c.host, c.port))
+		if err == nil {
+			_, current, ok := c.dialer.SharedTransport()
+			if !ok || current != key {
+				abortDNSConn(conn)
+				return nil, errors.New("DNS transport route changed during connection creation")
+			}
+		}
+		return conn, err
+	}
+}
+
+// Authenticated/non-ordinary messages and explicit disable-reuse keep one
+// exchange's synchronous I/O and cancellation ownership of the entire socket.
+func (c *client) exchangeDedicated(ctx context.Context, m *D.Msg) (response *D.Msg, err error) {
 	attempt := observeDNSUpstream(ctx, c.Address(), c.dialer)
 	defer func() { finishDNSUpstream(attempt, response, err) }()
 	network := "udp"
@@ -96,8 +136,17 @@ func abortDNSConn(conn net.Conn) {
 	_ = conn.Close()
 }
 
-func (c *client) ResetConnection() { c.native.reset(false) }
-func (c *client) Close() error     { c.native.reset(true); return nil }
+func (c *client) ResetConnection() {
+	c.native.reset(false)
+	c.shared.reset(false)
+	c.tcpFallback.reset(false)
+}
+func (c *client) Close() error {
+	c.native.reset(true)
+	c.shared.reset(true)
+	c.tcpFallback.reset(true)
+	return nil
+}
 
 func newClient(addr string, resolver resolver.Resolver, netType string, params map[string]string, proxyAdapter C.ProxyAdapter, proxyName string) *client {
 	host, port, _ := net.SplitHostPort(addr)
@@ -109,6 +158,7 @@ func newClient(addr string, resolver resolver.Resolver, netType string, params m
 		resolver:     resolver,
 		proxyAdapter: proxyAdapter,
 		proxyName:    proxyName,
+		disableReuse: params["disable-reuse"] == "true",
 	}
 	if strings.HasPrefix(netType, "tcp") {
 		c.schema = "tcp"

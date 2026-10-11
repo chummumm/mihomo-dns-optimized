@@ -122,7 +122,7 @@ API 的 `accounted_bytes` 是记录、索引和固定结构的保守记账，`me
 
 ## 更新和验证
 
-内核使用本仓库的正式 Releases；面板使用 `clash-dashboard-dist` 分支。两者需要分别更新，更新内核不会自动替换一个已经存在的面板目录。面板安装、来源校验和 `POST /upgrade/ui` 方式见 [面板 README](https://github.com/chummumm/mihomo-dns-optimized/blob/clash-dashboard/README.md)。
+内核使用本仓库正式 Releases，面板来源固定为 `clash-dashboard-dist`，目录固定为 HomeDir 下的 `ui`。两者分别由 YAML 顶层的 `core-auto-update` / `core-update-interval` 和 `external-ui-auto-update` / `external-ui-update-interval` 控制。面板没有手动检查、安装或自动更新控件；后台面板更新不清空 DNS 数据，内核升级成功后自动重启并重建内存状态。完整说明见[面板及内核维护说明](dashboard-management.md)。
 
 ```bash
 bash scripts/ci-check.sh test

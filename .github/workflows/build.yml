@@ -1,9 +1,9 @@
-name: Build DNS optimized
+name: Build mihomo-optimized
 
 on:
   push:
     branches: [main]
-    tags: ["v[0-9]+.[0-9]+.[0-9]+-optimized-[0-9]+"]
+    tags: ["mihomo-optimized-v[0-9]+.[0-9]+.[0-9]+"]
     paths-ignore:
       - "**/*.md"
       - "**/*.mdx"
@@ -46,7 +46,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: dns-build-${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  group: optimized-build-${{ github.workflow }}-${{ inputs.ref || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
@@ -61,7 +61,7 @@ env:
 
 jobs:
   check:
-    name: DNS routing tests
+    name: Core, DNS and release tests
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     outputs:
@@ -100,7 +100,7 @@ jobs:
                 esac
               done <<< "$refs"
               [[ -n "$object" && "${peeled:-$object}" == "$expected" ]] || {
-                printf 'Release tag %s is not build %s. Bump OPTIMIZED_REVISION for a new source commit.\n' "$tag" "$expected" >&2
+                printf 'Release tag %s is not build %s. Bump PROJECT_VERSION for a new source commit.\n' "$tag" "$expected" >&2
                 return 1
               }
             else
@@ -118,12 +118,15 @@ jobs:
           for component in "${BASH_REMATCH[@]:1}"; do
             is_uint64 "$component" || { echo 'UPSTREAM_VERSION components must be canonical uint64 values' >&2; exit 1; }
           done
-          revision=$(cat OPTIMIZED_REVISION)
-          is_uint64 "$revision" && [[ "$revision" != 0 ]] || { echo 'OPTIMIZED_REVISION must be a positive uint64 without leading zeros' >&2; exit 1; }
-          version="${upstream}-optimized-${revision}"
+          project=$(cat PROJECT_VERSION)
+          [[ "$project" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || { echo 'Invalid PROJECT_VERSION' >&2; exit 1; }
+          for component in "${BASH_REMATCH[@]:1}"; do
+            is_uint64 "$component" || { echo 'PROJECT_VERSION components must be canonical uint64 values' >&2; exit 1; }
+          done
+          version="mihomo-optimized-v${project}"
           release_tag="$version"
           if [[ "$EVENT_REF" == refs/tags/* ]]; then
-            [[ "$EVENT_REF_NAME" == "$release_tag" ]] || { echo 'Tag does not match this numeric revision' >&2; exit 1; }
+            [[ "$EVENT_REF_NAME" == "$release_tag" ]] || { echo 'Tag does not match PROJECT_VERSION' >&2; exit 1; }
           fi
           verify_release_tag "$release_tag" "$commit" true
           {
@@ -139,7 +142,7 @@ jobs:
           go-download-base-url: https://github.com/MetaCubeX/go/releases/download/build
           cache: true
       - name: Install package inspection tools
-        run: sudo apt-get update && sudo apt-get install -y rpm cpio zstd
+        run: sudo apt-get update && sudo apt-get install -y rpm cpio zstd fakeroot
       - name: Read the checked release matrix
         id: matrix
         run: printf 'matrix=%s\n' "$(python3 scripts/release-build.py matrix)" >> "$GITHUB_OUTPUT"
@@ -168,7 +171,7 @@ jobs:
           cache: true
       - name: Install package inspection tools
         if: matrix.packages
-        run: sudo apt-get update && sudo apt-get install -y rpm cpio zstd
+        run: sudo apt-get update && sudo apt-get install -y rpm cpio zstd fakeroot
       - name: Install pinned Android NDK
         if: matrix.android
         run: |
@@ -221,7 +224,7 @@ jobs:
     name: Publish GitHub release
     needs: [check, build, updater-platforms]
     if: >-
-      github.repository == 'chummumm/mihomo-dns-optimized' &&
+      github.repository == 'chummumm/mihomo-optimized' &&
       github.event_name != 'pull_request' &&
       ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
        (startsWith(github.ref, 'refs/tags/') && github.ref_name == needs.check.outputs.release_tag) ||
@@ -264,7 +267,7 @@ jobs:
                 esac
               done <<< "$refs"
               [[ -n "$object" && "${peeled:-$object}" == "$expected" ]] || {
-                printf 'Release tag %s is not build %s. Bump OPTIMIZED_REVISION for a new source commit.\n' "$tag" "$expected" >&2
+                printf 'Release tag %s is not build %s. Bump PROJECT_VERSION for a new source commit.\n' "$tag" "$expected" >&2
                 return 1
               }
             else
@@ -287,30 +290,19 @@ jobs:
             printf 'Release %s already exists; checking its immutable assets.\n' "$RELEASE_TAG"
           else
             {
-              printf 'Mihomo DNS optimized `%s`\n\n' "$BUILD_VERSION"
-              printf 'Migration: starting with v1.19.32-optimized-9, all core archives and installation packages use mihomo-<target>-<version>; Windows ZIP members use mihomo-<target>.exe. Install v9 or newer manually once when coming from v1.19.32-optimized-8 or older: those compiled updaters require the former mihomo-dns- asset names, and older -dns-optimized-N kernels also cannot parse the renamed release version. New releases do not duplicate the old asset names, and published v8 assets remain unchanged.\n\n'
-              printf 'The new updater selects a verified archive from this fork at one fixed version, prefers the new name and can still read historical releases with only the old name. It never retries an old name after a new-name download or verification failure. Installed package identity, native package-version ordering, configuration and service paths remain unchanged.\n\n'
+              printf 'mihomo-optimized `%s`\n\n' "$BUILD_VERSION"
               printf 'Source commit: `%s`\n\n' "$BUILD_SHA"
-              printf '37 platform/CPU targets: Linux, Windows, macOS, FreeBSD and Android. Linux deb/rpm and selected Arch packages are included.\n\n'
-              printf 'Built with the upstream MetaCubeX Go 1.26 toolchain and with_gvisor; Android uses pinned NDK r29/API34 with CGO, other builds use CGO=0.\n\n'
-              printf 'Linux amd64 is GOAMD64=v1; v2/v3 are separate downloads. This release does not include old-Go or LoongArch ABI1 variants.\n\n'
-              printf 'Choose a matching target and verify SHA256SUMS. Installation packages preserve /etc/mihomo/config.yaml and never start or enable services automatically.\n\n'
-              printf 'Matrix, installation and compatibility: https://github.com/%s/blob/%s/docs/releases.md\n\n' "$GITHUB_REPOSITORY" "$BUILD_SHA"
-              printf 'Enable top-level `dns-rule-routing: true` for the built-in DNS service and explicit TUN DNS hijacking. Native DNS supports configured UDP/TCP upstream ports, DoT, DoH including HTTP/3, and DoQ; DIRECT uses `direct-nameserver`, proxy routes use `nameserver`, with the selected outbound retained.\n'
-              printf 'Persistent native DNS transports now share connections when different rules or groups select the same actual outbound adapter. Same-name replacements, UDP constraints, effective interface/mark and routing epochs remain isolated; dynamic dialer-proxy/opaque chains keep their previous conservative scope. Answer-cache and per-query cancellation scopes are unchanged.\n'
-              printf 'Ordinary mixed/SOCKS/HTTP and other proxy traffic is no longer automatically inspected or intercepted as DNS on destination port 53; it follows normal connection routing.\n'
-              printf 'Optional dns.redir-host-filter excludes domain patterns from real-IP DNS mapping. Existing DomainSet indexing covers normal answers and hosts aliases; full reload filters inherited mappings while preserving allowed entries and their expiration metadata. Explicit inbound and sniffed domains remain available.\n'
-              printf 'Optional DIRECT IP speed checks and dual-stack selection, bounded cache prefetch/stale answers, TTL bounds and safe CNAME flattening are configured under `dns:`. These optional optimizations default to off; see the migration, DNSSEC protection and scope notes.\n'
-              printf 'DNS correctness fixes preserve upstream/fallback identity, EDNS fields, elapsed TTL and address-family policy. Probe saturation skips measurement immediately; normal DNS requests keep their own deadline.\n'
-              printf 'Starting with v11, enabled DIRECT speed checks support dns.response-mode: first-ping (default), fastest-ip and fastest-response. Select fastest-ip to retain the previous full-budget comparison behavior. Early replies can continue the same bounded work to improve the cache, sharing the existing 16 background slots and original deadline; no extra query batch is started.\n'
-              printf 'Upstream statistics separate successful-response, error and canceled averages and aggregate by the confirmed actual outbound. Cancellation follows the actual I/O result, preserving completed answers and genuine errors; interrupted TCP fallback and DoT exchanges close promptly, including a stalled TLS close_notify peer.\n'
-              printf 'Linux process lookup keeps scanning when an unrelated process exits during /proc enumeration.\n'
-              printf 'The core updater uses this repository, pins the selected version and verifies SHA256SUMS before replacement. Use the release/auto channel; the official alpha channel is not used.\n'
-              printf 'The original Clash Dashboard fork adds DNS overview, bounded query history and upstream statistics. The authenticated /dns/observability API keeps all observations in memory, with no database, file logging or telemetry. Ordinary reload retains observations; disable or restart clears them. See docs/dns-observability.md.\n'
-              printf 'Only real upstream DNS transports opened by the local core resolver carry dns:true. Plain UDP/TCP port-53 upstream trackers now use independent DNS-TRANSPORT metadata with the actual resolver endpoint, without inheriting the client source, business QNAME, inbound/process identity or query rule. Routing, dialing, cache scopes and in-memory query observations retain their original identity; full proxy chains remain available. Synthetic records and client-query records are not marked DNS.\n'
-              printf 'Clash Dashboard 0.3.7 preserves the configuration editor, DNS views, mihomo filter, outlines and animations, and the two live throughput numbers change directly without rolling. The current YAML editor saves only the active file with revision conflict protection and never persists browser drafts. Apply saved changes through the existing reload action.\n'
-              printf 'Panel automatic updates now run in the core, controlled by external-ui-auto-update and external-ui-update-interval in YAML (disabled by default, interval 24 hours). They follow external-ui-url and install only a strictly newer SemVer from build-info.json; equal, older or unversioned archives are never installed automatically. Manual installation remains available for unversioned dashboards. Browser automation and its settings switch are removed. Checks continue with the page closed; reload updates the schedule and cancels obsolete jobs. Installation validates a bounded snapshot and preserves the old UI on failure. Updating panel files does not reload configuration, restart the core or clear DNS data. See docs/dashboard-management.md.\n'
-              printf 'Controlled DNS routing, load and memory-only observability regressions run against the Linux amd64 release binary in CI; see docs/dns-performance.md and docs/dns-observability.md.\n'
+              printf 'This is the first independent mihomo-optimized version series. Future tags, release titles, version.txt and the running core use mihomo-optimized-vX.Y.Z. UPSTREAM_VERSION and UPSTREAM_COMMIT separately record the MetaCubeX base. Existing v1.19.32-optimized-N and earlier binaries require one manual migration because their compiled updater cannot parse the new version format. Published historical releases remain unchanged.\n\n'
+              printf 'Core archives use <full-tag>-<target>.gz or .zip; Windows archive members use mihomo-optimized-<target>.exe. Native installers use fixed names mihomo-optimized-<target>.deb/.rpm/.pkg.tar.zst for stable Latest download links. Their package metadata retains the project version and permanent epoch 1. The new mihomo-optimized package replaces mihomo-dns-optimized and mihomo while preserving /usr/bin/mihomo, /etc/mihomo/config.yaml and mihomo.service.\n\n'
+              printf '37 platform/CPU targets and 66 binary archives/installers: Linux, Windows, macOS, FreeBSD and Android. Built with MetaCubeX Go 1.26 and with_gvisor. Android uses pinned NDK r29/API34 with CGO; other targets use CGO=0. Linux amd64 is GOAMD64=v1, with separate v2/v3 downloads. Old-Go and LoongArch ABI1 variants are not included. Verify SHA256SUMS before installation.\n\n'
+              printf 'Core background updates are controlled only in YAML: core-auto-update and core-update-interval (hours, default false/24). The updater compares the actual running project version, selects a strictly newer release from this repository, pins its exact tag and ABI, checks SHA256SUMS, stages safely and restarts through the existing process mechanism after replacement. Reload cancels obsolete policies; final commit rechecks policy, version and executable identity. Self-update does not edit the dpkg/rpm/pacman database; it continues to record the installer version.\n\n'
+              printf 'Panel files always come from this repository at clash-dashboard-dist and are installed to ui under the mihomo data directory (follows -d). Custom external-ui path/URL/name no longer change the source or destination. YAML external-ui-auto-update and external-ui-update-interval retain default false/24-hour behavior. Only a strictly newer build-info.json SemVer installs automatically. A panel update replaces static files without restarting the core or clearing DNS state.\n\n'
+              printf 'Panel 0.4.0 removes all manual check/install and automatic-update controls, providers and /upgrade requests. The current YAML editor, draft/discard/revision-conflict protection, DNS overview/history/statistics, connection counts/filter/virtualization, logs, outlines and animations remain. Throughput values update directly.\n\n'
+              printf 'UDP, TCP and DoT DNS now share reusable transports where the actual outbound is stable. Each connection has one reader, bounded independent pending queries and unpredictable internal DNS IDs never reused during its lifetime. Canceling a query does not close its siblings; late or duplicate replies cannot answer later queries. TCP/DoT serialize complete writes and dispatch out-of-order answers. UDP truncation keeps the same frozen route for TCP fallback. Dynamic or opaque routes retain conservative isolation. Resolver replacement and shutdown close owned transports. DoH/HTTP3/DoQ retain their existing multiplexing.\n\n'
+              printf 'Existing DNS rule routing, direct/proxy pool isolation, DIRECT-only speed checks and dual-stack selection, bounded cache prefetch/stale answers, TTL/CNAME protections, redir-host-filter and memory-only observability remain. Ordinary proxy port-53 traffic follows normal routing; only real local-resolver upstream transports are marked DNS-TRANSPORT.\n\n'
+              printf 'Required Go/race, release identity, isolated Debian migration, all native package payload/metadata checks and controlled Linux amd64 binary DNS regressions run in CI. Cross-compilation does not imply tests on every physical platform. Packages never start or enable services automatically.\n\n'
+              printf 'Installation and migration: https://github.com/%s/blob/%s/docs/releases.md\n' "$GITHUB_REPOSITORY" "$BUILD_SHA"
+              printf 'Core/panel configuration: https://github.com/%s/blob/%s/docs/dashboard-management.md\n' "$GITHUB_REPOSITORY" "$BUILD_SHA"
             } > "$RUNNER_TEMP/release-notes.txt"
             verify_release_tag "$RELEASE_TAG" "$BUILD_SHA" true
             gh release create "$RELEASE_TAG" \

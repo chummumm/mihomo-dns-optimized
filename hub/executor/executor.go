@@ -145,6 +145,7 @@ func initInnerTcp() {
 func GetGeneral() *config.General {
 	ports := listener.GetPorts()
 	uiUpdater := updater.CurrentUIUpdater()
+	coreAutoUpdate, coreUpdateInterval := updater.DefaultCoreUpdater.AutomaticPolicy()
 	var authenticator []string
 	if auth := authStore.Default.Authenticator(); auth != nil {
 		authenticator = auth.Users()
@@ -187,6 +188,8 @@ func GetGeneral() *config.General {
 		GeoUpdateInterval:        updater.GeoUpdateInterval(),
 		ExternalUIAutoUpdate:     uiUpdater.AutoUpdate(),
 		ExternalUIUpdateInterval: uiUpdater.UpdateInterval(),
+		CoreAutoUpdate:           coreAutoUpdate,
+		CoreUpdateInterval:       coreUpdateInterval,
 		GeodataMode:              geodata.GeodataMode(),
 		GeodataLoader:            geodata.LoaderName(),
 		GeositeMatcher:           geodata.SiteMatcherName(),
@@ -441,11 +444,12 @@ func updateUpdater(cfg *config.Config) {
 	updater.SetGeoAutoUpdate(general.GeoAutoUpdate)
 	updater.SetGeoUpdateInterval(general.GeoUpdateInterval)
 
-	controller := cfg.Controller
-	uiUpdater := updater.NewUiUpdaterWithAutoUpdate(controller.ExternalUI, controller.ExternalUIURL, controller.ExternalUIName,
-		general.ExternalUIAutoUpdate, general.ExternalUIUpdateInterval)
+	uiUpdater := updater.NewFixedUIUpdater(general.ExternalUIAutoUpdate, general.ExternalUIUpdateInterval)
 	updater.SetUIUpdater(uiUpdater)
-	uiUpdater.AutoDownloadUI()
+	updater.DefaultCoreUpdater.ConfigureAutoUpdate(general.CoreAutoUpdate, general.CoreUpdateInterval)
+	// Bootstrap an empty managed directory without holding the reload mutex
+	// during a network download. The updater gate rechecks emptiness itself.
+	uiUpdater.StartAutoDownloadUI()
 }
 
 //go:linkname temporaryUpdateGeneral github.com/metacubex/mihomo/config.temporaryUpdateGeneral
@@ -604,9 +608,17 @@ func updateIPTables(cfg *config.Config) {
 }
 
 func Shutdown() {
+	mux.Lock()
+	defer mux.Unlock()
+	shutdownLocked()
+}
+
+func shutdownLocked() {
+	updater.StopAutomaticUpdates()
 	listener.Cleanup()
 	tproxy.CleanupTProxyIPTables()
 	resolver.StoreFakePoolState()
+	closeDNSResolvers()
 
 	log.Warnln("Mihomo shutting down")
 }

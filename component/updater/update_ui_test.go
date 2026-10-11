@@ -68,9 +68,17 @@ func uiTestResponse(data []byte) *http.Response {
 	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), ContentLength: int64(len(data)), Body: io.NopCloser(bytes.NewReader(data))}
 }
 
+// Deliberately bypass the fixed production source for isolated archive and
+// filesystem safety fixtures. Public constructors are tested separately.
+func uiTestSource(path, url, _ string) *UIUpdater {
+	u := NewFixedUIUpdater(false, defaultUIUpdateInterval)
+	u.externalUIPath, u.externalUIURL = C.Path.Resolve(path), url
+	return u
+}
+
 func uiTestUpdater(t *testing.T, files map[string]string) *UIUpdater {
 	t.Helper()
-	u := NewUiUpdater(filepath.Join(t.TempDir(), "ui"), "https://panels.example.test/private/dashboard.zip?token=private", "")
+	u := uiTestSource(filepath.Join(t.TempDir(), "ui"), "https://panels.example.test/private/dashboard.zip?token=private", "")
 	u.coordinator = &uiUpdateCoordinator{}
 	uiTestWrite(t, u.externalUIPath, files)
 	t.Cleanup(func() {
@@ -454,18 +462,18 @@ func TestUIUpdaterProtectsCoreConfigurationPaths(t *testing.T) {
 	C.SetHomeDir(filepath.Join(root, "home"))
 	C.SetConfig(filepath.Join(root, "other", "custom.yaml"))
 	for _, target := range []string{root, filepath.Join(root, "home"), filepath.Join(root, "other")} {
-		u := NewUiUpdater(target, "https://source.example/ui.zip", "")
+		u := uiTestSource(target, "https://source.example/ui.zip", "")
 		if _, err := u.target(); err == nil {
 			t.Fatalf("configuration-containing target accepted: %s", target)
 		}
 	}
 	if err := os.Symlink(filepath.Join(root, "home"), filepath.Join(root, "home-link")); err == nil {
 		C.SetHomeDir(filepath.Join(root, "home-link"))
-		if _, err = NewUiUpdater(filepath.Join(root, "home"), "https://source.example/ui.zip", "").target(); err == nil {
+		if _, err = uiTestSource(filepath.Join(root, "home"), "https://source.example/ui.zip", "").target(); err == nil {
 			t.Fatal("symlink home bypassed protection")
 		}
 	}
-	if _, err := NewUiUpdater(filepath.Join(root, "home", "ui"), "https://source.example/ui.zip", "").target(); err != nil {
+	if _, err := uiTestSource(filepath.Join(root, "home", "ui"), "https://source.example/ui.zip", "").target(); err != nil {
 		t.Fatalf("normal UI child of core directory was rejected: %v", err)
 	}
 }
@@ -491,7 +499,7 @@ func TestUIUpdaterReloadCancelsOldSourceAndPublishesAtomically(t *testing.T) {
 	finished := make(chan error, 1)
 	go func() { finished <- u.DownloadUI() }()
 	<-started
-	v := NewUiUpdater(u.externalUIPath, "https://different.example/another.zip", "")
+	v := uiTestSource(u.externalUIPath, "https://different.example/another.zip", "")
 	v.coordinator = u.coordinator
 	archive := uiTestZIP(t, map[string]string{"index.html": "from new source"})
 	v.request = func(context.Context, string, map[string][]string) (*http.Response, error) {
@@ -531,7 +539,7 @@ func TestUIUpdaterReloadCancelsOldSourceAndPublishesAtomically(t *testing.T) {
 		}
 	}()
 	for i := 0; i < 50; i++ {
-		SetUIUpdater(NewUiUpdater(v.externalUIPath, v.externalUIURL, ""))
+		SetUIUpdater(uiTestSource(v.externalUIPath, v.externalUIURL, ""))
 	}
 	close(stop)
 	readers.Wait()
@@ -547,7 +555,7 @@ func TestUIUpdaterSourceAndTargetSeparateCachedSnapshots(t *testing.T) {
 		t.Fatalf("first source check failed: %+v", s)
 	}
 	firstStage := u.state().latest.work
-	v := NewUiUpdater(filepath.Join(t.TempDir(), "other-ui"), "https://second.example/ui.zip", "")
+	v := uiTestSource(filepath.Join(t.TempDir(), "other-ui"), "https://second.example/ui.zip", "")
 	v.coordinator = u.coordinator
 	secondArchive := uiTestZIP(t, map[string]string{"index.html": "source two"})
 	v.request = func(context.Context, string, map[string][]string) (*http.Response, error) {

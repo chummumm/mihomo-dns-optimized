@@ -52,6 +52,10 @@ func newNativeTransportPool(capacity int) *nativeTransportPool {
 func (p *nativeTransportPool) signalLocked() { close(p.changed); p.changed = make(chan struct{}) }
 
 func closeNativeClient(client dnsClient) {
+	if wrapped, ok := client.(interface{ Unwrap() dnsClient }); ok {
+		closeNativeClient(wrapped.Unwrap())
+		return
+	}
 	if closer, ok := client.(interface{ Close() error }); ok {
 		_ = closer.Close()
 	} else {
@@ -195,7 +199,8 @@ func cloneNativeClient(dc dnsClient, plan *tunnel.DNSRoutingPlan, lifetime conte
 	var clone dnsClient
 	switch c := dc.(type) {
 	case *client:
-		clone = newClient(net.JoinHostPort(c.host, c.port), c.resolver, c.schema, nil, nil, "")
+		params["disable-reuse"] = fmt.Sprint(c.disableReuse)
+		clone = newClient(net.JoinHostPort(c.host, c.port), c.resolver, c.schema, params, nil, "")
 	case *dnsOverTLS:
 		params["skip-cert-verify"] = fmt.Sprint(c.skipCertVerify)
 		params["name-cert-verify"] = c.nameCertVerify
@@ -233,18 +238,15 @@ func cloneNativeClient(dc dnsClient, plan *tunnel.DNSRoutingPlan, lifetime conte
 
 func exchangeNativeTransport(ctx context.Context, message *D.Msg, dc dnsClient) (*D.Msg, error, bool) {
 	state, dialer, network, endpoint := nativeClientDetails(dc)
-	if state != nil && state.bound && state.isClosed() {
+	if state != nil && state.isClosed() {
 		return nil, net.ErrClosed, true
 	}
 	route := queryRoute(ctx)
 	if state == nil || state.bound || route == nil || icontext.DNSBootstrap(ctx) || !dialer.Automatic() {
 		return nil, nil, false
 	}
-	// Preserve the original per-datagram/framed tracker and strict wire path
-	// for ordinary port 53. Configured native non-53 clients use the dialer.
-	if c, ok := dc.(*client); ok && c.port == "53" {
-		return nil, nil, false
-	}
+	// Port 53 uses the same frozen transport pool as encrypted DNS. Logical
+	// query trackers remain separate from persistent DNS-TRANSPORT sockets.
 	if route.err != nil {
 		return nil, route.err, true
 	}

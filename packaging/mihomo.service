@@ -1,7 +1,7 @@
 # Based on the upstream MetaCubeX/mihomo systemd unit (GPL-3.0).
 [Unit]
-Description=Mihomo DNS optimized proxy core
-Documentation=https://github.com/chummumm/mihomo-dns-optimized/blob/main/docs/dns-proxy.md
+Description=mihomo-optimized proxy core
+Documentation=https://github.com/chummumm/mihomo-optimized/blob/main/docs/dns-proxy.md
 After=network-online.target nss-lookup.target
 Wants=network-online.target
 ConditionPathExists=/etc/mihomo/config.yaml

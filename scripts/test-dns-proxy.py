@@ -1033,6 +1033,9 @@ rules:
     try:
         with tempfile.TemporaryDirectory(prefix="dns-rule-routing-e2e-") as tmp:
             config_dir = pathlib.Path(tmp)
+            # Keep this DNS-only fixture independent of first-start UI downloads.
+            (config_dir / "ui").mkdir()
+            (config_dir / "ui" / "index.html").write_text("<!doctype html><title>DNS test</title>", encoding="utf-8")
             config_file = config_dir / "config.yaml"
             config_file.write_text(config, encoding="utf-8")
             subprocess.run([str(binary), "-t", "-d", str(config_dir), "-f", str(config_file)],

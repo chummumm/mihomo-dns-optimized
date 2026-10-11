@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -37,25 +38,64 @@ const (
 // CoreUpdater installs a checksummed release from this fork. It never falls
 // back to the official core. The empty value uses the production release URL.
 type CoreUpdater struct {
-	mu sync.Mutex
+	mu               sync.Mutex
+	policyMu         sync.Mutex
+	autoUpdate       bool
+	updateInterval   int
+	automatic        *coreAutomaticUpdate
+	restartHandler   CoreAutomaticRestartHandler
+	installedVersion string
+	pendingRestart   bool
 
 	// Tests can serve a complete release locally without changing global HTTP
 	// routing or executing the installed fixture. This is not a config option.
-	releaseURL string
+	releaseURL     string
+	newTicker      func(time.Duration) (<-chan time.Time, func())
+	executable     func() (string, error)
+	currentVersion func() string
+	beforeCommit   func()
 }
 
 var DefaultCoreUpdater = CoreUpdater{}
+var ErrCoreUpdateBusy = errors.New("a core update is already running")
+var ErrCoreConfigurationChanged = errors.New("core update configuration changed")
 
-func (u *CoreUpdater) Update(currentExePath string, channel string, force bool) (err error) {
-	u.mu.Lock()
-	defer u.mu.Unlock()
+func (u *CoreUpdater) Update(currentExePath string, channel string, force bool) error {
+	return u.UpdateContext(context.Background(), currentExePath, channel, force)
+}
+
+// UpdateContext preserves the manual compatibility API. Automatic updates use
+// the same operation gate and installer, with an additional policy transaction.
+func (u *CoreUpdater) UpdateContext(ctx context.Context, currentExePath string, channel string, force bool) error {
+	return u.updateContext(ctx, currentExePath, channel, force, nil)
+}
+
+func (u *CoreUpdater) updateContext(ctx context.Context, currentExePath string, channel string, force bool, automatic *coreAutomaticUpdate) (err error) {
+	if !u.mu.TryLock() {
+		return ErrCoreUpdateBusy
+	}
+	operationHeld := true
+	defer func() {
+		if operationHeld {
+			u.mu.Unlock()
+		}
+	}()
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	if u.pendingRestart {
+		if automatic != nil {
+			return nil
+		}
+		return fmt.Errorf("%w: installed version %s is waiting for restart", ErrCoreUpdateBusy, u.installedVersion)
+	}
 
 	switch strings.ToLower(channel) {
 	case "", "auto", ReleaseChannel:
 	case AlphaChannel:
-		return fmt.Errorf("DNS optimized has no alpha update channel; use release")
+		return fmt.Errorf("mihomo-optimized has no alpha update channel; use release")
 	default:
-		return fmt.Errorf("unsupported DNS optimized update channel %q", channel)
+		return fmt.Errorf("unsupported mihomo-optimized update channel %q", channel)
 	}
 	currentExePath, err = filepath.EvalSymlinks(currentExePath)
 	if err != nil {
@@ -68,6 +108,10 @@ func (u *CoreUpdater) Update(currentExePath string, channel string, force bool) 
 		}
 		return fmt.Errorf("check current executable: %w", err)
 	}
+	identity, err := snapshotCoreExecutable(ctx, currentExePath)
+	if err != nil {
+		return fmt.Errorf("snapshot current executable: %w", err)
+	}
 	target, err := coreTarget(runtime.GOOS, runtime.GOARCH, coreBuildSettings())
 	if err != nil {
 		return err
@@ -77,29 +121,33 @@ func (u *CoreUpdater) Update(currentExePath string, channel string, force bool) 
 		baseURL = coreReleaseURL
 	}
 	baseURL = strings.TrimRight(baseURL, "/") + "/"
-	latestVersion, err := u.getLatestVersion(baseURL + "latest/download/version.txt")
+	latestVersion, err := u.getLatestVersionContext(ctx, baseURL+"latest/download/version.txt")
 	if err != nil {
-		return fmt.Errorf("get latest DNS optimized version: %w", err)
+		return fmt.Errorf("get latest mihomo-optimized version: %w", err)
 	}
 	latest, err := parseReleaseVersion(latestVersion)
 	if err != nil {
 		return err
 	}
-	log.Infoln("current version %s, latest DNS optimized version %s", C.Version, latestVersion)
+	currentVersion := u.effectiveVersion()
+	log.Infoln("current version %s, latest mihomo-optimized version %s", currentVersion, latestVersion)
+	if automatic != nil && !u.isNewerVersion(latestVersion) {
+		return nil
+	}
 	if !force {
-		if latestVersion == C.Version {
+		if latestVersion == currentVersion {
 			// Some dashboards depend on this existing error text.
-			return fmt.Errorf("update error: already using latest version %s", C.Version)
+			return fmt.Errorf("update error: already using latest version %s", currentVersion)
 		}
-		if current, parseErr := parseReleaseVersion(C.Version); parseErr == nil && latest.compare(current) < 0 {
-			return fmt.Errorf("refusing DNS optimized downgrade from %s to %s without force", C.Version, latestVersion)
+		if current, parseErr := parseReleaseVersion(currentVersion); parseErr == nil && latest.compare(current) < 0 {
+			return fmt.Errorf("refusing mihomo-optimized downgrade from %s to %s without force", currentVersion, latestVersion)
 		}
 	}
 
 	// Only the initial version lookup uses Latest. All subsequent requests are
 	// pinned to the validated immutable tag, even if Latest changes meanwhile.
 	releaseURL := baseURL + "download/" + latestVersion + "/"
-	sums, err := u.readReleaseFile(releaseURL+"SHA256SUMS", maxReleaseMetadata)
+	sums, err := u.readReleaseFileContext(ctx, releaseURL+"SHA256SUMS", maxReleaseMetadata)
 	if err != nil {
 		return fmt.Errorf("get release checksums: %w", err)
 	}
@@ -118,27 +166,78 @@ func (u *CoreUpdater) Update(currentExePath string, channel string, force bool) 
 	}
 	defer os.RemoveAll(updateDir)
 	packagePath := filepath.Join(updateDir, packageName)
-	if err = u.download(packagePath, releaseURL+packageName, asset.checksum); err != nil {
-		return fmt.Errorf("download DNS optimized core: %w", err)
+	if err = u.downloadContext(ctx, packagePath, releaseURL+packageName, asset.checksum); err != nil {
+		return fmt.Errorf("download mihomo-optimized core: %w", err)
 	}
 	updateExePath := filepath.Join(updateDir, exeName)
-	if err = u.unpack(packagePath, updateExePath, exeName, info.Mode().Perm()); err != nil {
-		return fmt.Errorf("unpack DNS optimized core: %w", err)
+	if err = u.unpackContext(ctx, packagePath, updateExePath, exeName, info.Mode().Perm()); err != nil {
+		return fmt.Errorf("unpack mihomo-optimized core: %w", err)
 	}
 	if runtime.GOOS == "darwin" {
-		if err = exec.Command("/usr/bin/codesign", "--force", "--sign", "-", updateExePath).Run(); err != nil {
+		if err = exec.CommandContext(ctx, "/usr/bin/codesign", "--force", "--sign", "-", updateExePath).Run(); err != nil {
 			return fmt.Errorf("sign staged executable: %w", err)
 		}
 	}
-	if err = u.install(currentExePath, updateExePath); err != nil {
-		return fmt.Errorf("install DNS optimized core: %w", err)
+	if u.beforeCommit != nil {
+		u.beforeCommit()
 	}
-	log.Infoln("updater: installed DNS optimized %s", latestVersion)
-	return nil
+	commit := func() error {
+		if automatic != nil {
+			// A manual installation may have won the gate while this prepared
+			// auto job waited for configuration reload to finish.
+			if !u.mu.TryLock() {
+				return ErrCoreUpdateBusy
+			}
+			defer u.mu.Unlock()
+		}
+		// This lock protects only the final filesystem transaction, never network
+		// I/O or Shutdown. The restart bridge serializes this transaction with
+		// ApplyConfig, so a disabled/replaced policy cannot install or restart.
+		u.policyMu.Lock()
+		defer u.policyMu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if automatic != nil {
+			if u.automatic != automatic || !u.autoUpdate || automatic.ctx.Err() != nil || u.restartHandler == nil {
+				return ErrCoreConfigurationChanged
+			}
+			if u.pendingRestart || !u.isNewerVersion(latestVersion) {
+				return ErrCoreConfigurationChanged
+			}
+		}
+		currentIdentity, err := snapshotCoreExecutable(ctx, currentExePath)
+		if err != nil || !identity.equal(currentIdentity) {
+			return fmt.Errorf("current executable changed while preparing update")
+		}
+		if err = u.installContext(ctx, currentExePath, updateExePath, &identity); err != nil {
+			return fmt.Errorf("install mihomo-optimized core: %w", err)
+		}
+		u.installedVersion, u.pendingRestart = latestVersion, true
+		// The real handler may exec/exit and never return through our defers.
+		// Remove the verified archive before yielding to process shutdown.
+		if cleanupErr := os.RemoveAll(updateDir); cleanupErr != nil {
+			log.Warnln("updater: unable to remove completed staging directory: %s", cleanupErr)
+		}
+		log.Infoln("updater: installed mihomo-optimized %s", latestVersion)
+		return nil
+	}
+	if automatic != nil {
+		// The handler must commit and restart as one configuration transaction.
+		// Neither waiting for that transaction nor Shutdown holds updater locks.
+		u.mu.Unlock()
+		operationHeld = false
+		return automatic.restart(currentExePath, commit)
+	}
+	return commit()
 }
 
 func (u *CoreUpdater) readReleaseFile(url string, limit int64) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	return u.readReleaseFileContext(context.Background(), url, limit)
+}
+
+func (u *CoreUpdater) readReleaseFileContext(parent context.Context, url string, limit int64) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 	resp, err := mihomoHttp.HttpRequest(ctx, url, http.MethodGet, nil, nil,
 		mihomoHttp.WithCAOption(ca.Option{ZeroTrust: true}))
@@ -149,7 +248,7 @@ func (u *CoreUpdater) readReleaseFile(url string, limit int64) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("release request returned HTTP %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	body, err := io.ReadAll(io.LimitReader(coreContextReader{ctx, resp.Body}, limit+1))
 	if err != nil {
 		return nil, err
 	}
@@ -160,7 +259,11 @@ func (u *CoreUpdater) readReleaseFile(url string, limit int64) ([]byte, error) {
 }
 
 func (u *CoreUpdater) getLatestVersion(url string) (string, error) {
-	body, err := u.readReleaseFile(url, 256)
+	return u.getLatestVersionContext(context.Background(), url)
+}
+
+func (u *CoreUpdater) getLatestVersionContext(ctx context.Context, url string) (string, error) {
+	body, err := u.readReleaseFileContext(ctx, url, 256)
 	if err != nil {
 		return "", err
 	}
@@ -172,7 +275,11 @@ func (u *CoreUpdater) getLatestVersion(url string) (string, error) {
 }
 
 func (u *CoreUpdater) download(path, url string, expected []byte) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	return u.downloadContext(context.Background(), path, url, expected)
+}
+
+func (u *CoreUpdater) downloadContext(parent context.Context, path, url string, expected []byte) (err error) {
+	ctx, cancel := context.WithTimeout(parent, 90*time.Second)
 	defer cancel()
 	resp, err := mihomoHttp.HttpRequest(ctx, url, http.MethodGet, nil, nil,
 		mihomoHttp.WithCAOption(ca.Option{ZeroTrust: true}))
@@ -193,7 +300,7 @@ func (u *CoreUpdater) download(path, url string, expected []byte) (err error) {
 		}
 	}()
 	hash := sha256.New()
-	n, err := io.Copy(io.MultiWriter(file, hash), io.LimitReader(resp.Body, MaxPackageFileSize+1))
+	n, err := io.Copy(io.MultiWriter(file, hash), io.LimitReader(coreContextReader{ctx, resp.Body}, MaxPackageFileSize+1))
 	if err != nil {
 		return err
 	}
@@ -209,6 +316,10 @@ func (u *CoreUpdater) download(path, url string, expected []byte) (err error) {
 // unpack writes exactly one executable to a caller-selected path. Gzip header
 // names are ignored; Windows archives must contain the precise release member.
 func (u *CoreUpdater) unpack(packagePath, outputPath, exeName string, mode os.FileMode) error {
+	return u.unpackContext(context.Background(), packagePath, outputPath, exeName, mode)
+}
+
+func (u *CoreUpdater) unpackContext(ctx context.Context, packagePath, outputPath, exeName string, mode os.FileMode) error {
 	switch {
 	case strings.HasSuffix(packagePath, ".gz"):
 		file, err := os.Open(packagePath)
@@ -221,7 +332,7 @@ func (u *CoreUpdater) unpack(packagePath, outputPath, exeName string, mode os.Fi
 			return err
 		}
 		defer reader.Close()
-		return writeStagedCore(outputPath, reader, mode)
+		return writeStagedCoreContext(ctx, outputPath, reader, mode)
 	case strings.HasSuffix(packagePath, ".zip"):
 		archive, err := zip.OpenReader(packagePath)
 		if err != nil {
@@ -240,13 +351,17 @@ func (u *CoreUpdater) unpack(packagePath, outputPath, exeName string, mode os.Fi
 			return err
 		}
 		defer reader.Close()
-		return writeStagedCore(outputPath, reader, mode)
+		return writeStagedCoreContext(ctx, outputPath, reader, mode)
 	default:
 		return fmt.Errorf("unsupported archive format")
 	}
 }
 
 func writeStagedCore(path string, reader io.Reader, mode os.FileMode) (err error) {
+	return writeStagedCoreContext(context.Background(), path, reader, mode)
+}
+
+func writeStagedCoreContext(ctx context.Context, path string, reader io.Reader, mode os.FileMode) (err error) {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return err
@@ -256,7 +371,7 @@ func writeStagedCore(path string, reader io.Reader, mode os.FileMode) (err error
 			err = closeErr
 		}
 	}()
-	n, err := io.Copy(file, io.LimitReader(reader, maxCoreFileSize+1))
+	n, err := io.Copy(file, io.LimitReader(coreContextReader{ctx, reader}, maxCoreFileSize+1))
 	if err != nil {
 		return err
 	}
@@ -270,12 +385,34 @@ func writeStagedCore(path string, reader io.Reader, mode os.FileMode) (err error
 }
 
 func (u *CoreUpdater) install(currentPath, stagedPath string) error {
+	return u.installContext(context.Background(), currentPath, stagedPath, nil)
+}
+
+func (u *CoreUpdater) installContext(ctx context.Context, currentPath, stagedPath string, expected *coreExecutableSnapshot) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	verifyCurrent := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if expected != nil {
+			actual, err := snapshotCoreExecutable(ctx, currentPath)
+			if err != nil || !expected.equal(actual) {
+				return errors.New("current executable changed while preparing update")
+			}
+		}
+		return nil
+	}
 	backupDir := filepath.Join(filepath.Dir(currentPath), "meta-backup")
 	if err := os.MkdirAll(backupDir, 0o755); err != nil {
 		return err
 	}
 	backupPath := filepath.Join(backupDir, filepath.Base(currentPath))
 	if runtime.GOOS == "windows" {
+		if err := verifyCurrent(); err != nil {
+			return err
+		}
 		// A running Windows executable must first be moved out of the way.
 		if err := os.Remove(backupPath); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove previous backup: %w", err)
@@ -308,7 +445,10 @@ func (u *CoreUpdater) install(currentPath, stagedPath string) error {
 	}
 	backupTemp := backup.Name()
 	defer os.Remove(backupTemp)
-	_, copyErr := io.Copy(backup, source)
+	n, copyErr := io.Copy(backup, io.LimitReader(coreContextReader{ctx, source}, maxCoreFileSize+1))
+	if copyErr == nil && (n == 0 || n > maxCoreFileSize) {
+		copyErr = fmt.Errorf("invalid executable backup size: %d", n)
+	}
 	if copyErr == nil {
 		copyErr = backup.Chmod(info.Mode().Perm())
 	}
@@ -322,8 +462,86 @@ func (u *CoreUpdater) install(currentPath, stagedPath string) error {
 	if closeErr != nil {
 		return closeErr
 	}
+	// Copying the backup can take time. Recheck the path and content after it,
+	// immediately before either persistent name is replaced.
+	if err = verifyCurrent(); err != nil {
+		return err
+	}
 	if err = os.Rename(backupTemp, backupPath); err != nil {
 		return err
 	}
 	return os.Rename(stagedPath, currentPath)
+}
+
+type coreContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r coreContextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
+}
+
+type coreExecutableSnapshot struct {
+	info   os.FileInfo
+	digest [sha256.Size]byte
+}
+
+func snapshotCoreExecutable(ctx context.Context, path string) (coreExecutableSnapshot, error) {
+	var snapshot coreExecutableSnapshot
+	pathInfo, err := os.Lstat(path)
+	if err != nil {
+		return snapshot, err
+	}
+	if !pathInfo.Mode().IsRegular() {
+		return snapshot, errors.New("executable path is no longer a regular file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return snapshot, err
+	}
+	defer file.Close()
+	snapshot.info, err = file.Stat()
+	if err != nil {
+		return snapshot, err
+	}
+	if !snapshot.info.Mode().IsRegular() || !os.SameFile(pathInfo, snapshot.info) || snapshot.info.Size() <= 0 || snapshot.info.Size() > maxCoreFileSize {
+		return snapshot, fmt.Errorf("invalid executable size or type")
+	}
+	hash := sha256.New()
+	if _, err = io.Copy(hash, io.LimitReader(coreContextReader{ctx, file}, maxCoreFileSize+1)); err != nil {
+		return snapshot, err
+	}
+	copy(snapshot.digest[:], hash.Sum(nil))
+	return snapshot, nil
+}
+
+func (s coreExecutableSnapshot) equal(other coreExecutableSnapshot) bool {
+	return s.info != nil && other.info != nil && os.SameFile(s.info, other.info) &&
+		s.info.Size() == other.info.Size() && s.info.Mode() == other.info.Mode() &&
+		s.info.ModTime().Equal(other.info.ModTime()) && s.digest == other.digest
+}
+
+// mu must be held: a successfully installed version is authoritative until the
+// process restarts, because the running C.Version still names the old binary.
+func (u *CoreUpdater) effectiveVersion() string {
+	if u.installedVersion != "" {
+		return u.installedVersion
+	}
+	if u.currentVersion != nil {
+		return u.currentVersion()
+	}
+	return C.Version
+}
+
+func (u *CoreUpdater) isNewerVersion(version string) bool {
+	latest, err := parseReleaseVersion(version)
+	if err != nil {
+		return false
+	}
+	current, err := parseReleaseVersion(u.effectiveVersion())
+	return err == nil && latest.compare(current) > 0
 }

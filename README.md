@@ -1,10 +1,10 @@
-# DNS Route Kernel
+# mihomo-optimized
 
 基于 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) 稳定版维护的独立派生内核，让 DNS 查询直接复用已有业务分流规则。**不需要 SmartDNS，也不需要再维护一份 DNS 域名策略。** 本项目不是 MetaCubeX 官方发行版。
 
 **原生 DNS 上游支持 UDP、TCP、DoH、DoT、DoQ 和 DoH 的 HTTP/3。IP 测速与双栈优选只用于实际 DIRECT / Compatible 路径，走代理节点的 DNS 回答不测速。** 测速、双栈优选与主动预取默认关闭，可以按需开启。
 
-[下载 Releases](https://github.com/chummumm/mihomo-dns-optimized/releases) · [构建状态](https://github.com/chummumm/mihomo-dns-optimized/actions/workflows/build.yml) · [完整配置说明](docs/dns-proxy.md) · [验证记录](docs/dns-rule-routing-validation.md)
+[下载 Releases](https://github.com/chummumm/mihomo-optimized/releases) · [构建状态](https://github.com/chummumm/mihomo-optimized/actions/workflows/build.yml) · [完整配置说明](docs/dns-proxy.md) · [验证记录](docs/dns-rule-routing-validation.md)
 
 ## 解决什么问题
 
@@ -31,15 +31,17 @@ DNS 分流通过内置解析器提供，普通代理连接保持原转发行为�
 
 ## DNS 路径性能优化
 
+UDP、TCP 和 DoT 上游在实际出口固定时共享连接，多个查询通过独立请求 ID 分发，不再每次普通查询都重新建连。单个查询超时或取消只取消自身；ID 在同一连接整个生命周期内不重复使用，旧回复不会串到后续查询。共享仍按出口、路由代次、接口和 mark 隔离；动态或无法冻结的出口保留独占方式。DoH/HTTP3/DoQ 继续使用原有多路复用。
+
 开启 `dns-rule-routing` 时，DNS 规则执行使用派生视图和 classical 纯域名连续段索引，仍按原业务规则顺序判断 SRC / PROCESS / IN。成功的自动查询应答可以在同一来源、进程和入站作用域内跨临时源端口复用；每个请求仍先匹配当前规则，在途查询保持独立取消语义。DIRECT 探测使用共享有界任务池、同出口目标 IP 合并及短期结果复用，代理结果不进行本地探测。
 
 新增的 DNS 面板数据由本机控制器提供，查询记录、趋势和上游统计只保存在进程内存中，不写数据库或日志文件，也不发送遥测。无需维护第二份分流规则；观测不会改变 DNS 回答和出口选择。优化范围、缓存安全边界及测试方式见 [DNS 性能说明](docs/dns-performance.md)。
 
-正式版本采用 `vX.Y.Z-optimized-N`，本次为 `v1.19.32-optimized-13`；tag、发行标题与内核版本一致，源码哈希保留在 BUILDINFO 中供核对。修订号由 `OPTIMIZED_REVISION` 记录，更新文档不会消耗编号或自动发版。自 v9 起，发行文件统一使用 `mihomo-<target>-<version>`，Windows ZIP 内为 `mihomo-<target>.exe`。内核一键更新继续使用本二开仓库的正式发行并验证 SHA256；**包括 `v1.19.32-optimized-8` 在内的旧内核，首次升级 v9 或后续版本需要手动安装一次**，因为其编译内置的更新器要求旧资产文件名。安装 v9 或后续版本后可继续一键更新，见[更新说明](docs/releases.md#内核一键更新)。
+正式版本采用 **`mihomo-optimized-vX.Y.Z`**，本次为 `mihomo-optimized-v1.0.0`。tag、发行标题、`version.txt` 和运行内核版本一致；`PROJECT_VERSION` 记录独立项目版本，上游 mihomo 的版本与提交另存于 `UPSTREAM_VERSION` / `UPSTREAM_COMMIT`。源码哈希保留在 BUILDINFO 中。**旧版 `v1.19.32-optimized-N` 及更早内核首次切换到新系列，需要手动安装一次**；新系列随后可通过 YAML 启用内核后台检查和更新，详见[更新说明](docs/releases.md#内核自动更新)。
 
 ## DNS 状态与原版面板
 
-本仓库的 [Clash Dashboard 分支](https://github.com/chummumm/mihomo-dns-optimized/tree/clash-dashboard) 在原有面板上提供 DNS 概览、查询记录与上游统计，并保留嗅探域名显示兼容。连接页的“全部”与各 IP 从同一份保留记录计算数量；活跃连接完整保留，“保留关闭连接”最多保留最近 5000 条关闭记录。长表格按可见区域渲染，刷新时保持阅读位置。
+本仓库的 [Clash Dashboard 分支](https://github.com/chummumm/mihomo-optimized/tree/clash-dashboard) 在原有面板上提供 DNS 概览、查询记录与上游统计，并保留嗅探域名显示兼容。连接页的“全部”与各 IP 从同一份保留记录计算数量；活跃连接完整保留，“保留关闭连接”最多保留最近 5000 条关闭记录。长表格按可见区域渲染，刷新时保持阅读位置。
 
 连接页的 `DNS` 类型仅用于内核本机 resolver 发起的真实上游 DNS transport，由核心明确返回 `dns: true`；合成记录和客户端查询记录不携带这个标记。自内核 v10 起，普通 UDP / TCP 53 上游连接与原生共享传输一致，使用 `DNS-TRANSPORT` 入站标签和真实解析器地址，不再沿用客户端来源、查询域名或业务命中规则；选路、缓存及内存中的 DNS 查询记录继续保留真实来源。面板 0.3.2 无需更新即可显示修正后的信息，DNS 连接归入 `mihomo`，节点显示最终选择的出站；连接 API 仍保留完整节点链。面板同时提供移动端连接页、开始时间显示、重载入口和测速 URL 设置。
 
@@ -47,11 +49,13 @@ DNS 观测默认随 `dns.enable` 开启，可用 `dns.observability: false` 关�
 
 查询次数、实际上游交换次数和连接数采用不同口径，不能直接相加；NXDOMAIN 是 DNS 回答，竞争中取消的上游交换单独统计。完整字段、内存边界、安装方式和验证方法见 [DNS 状态展示](docs/dns-observability.md)。
 
-内核 v12 搭配面板 `0.3.6` 增加当前配置文件编辑与面板更新检查。保存配置只写当前 YAML 文件，仍由原有重载入口应用，不触发 DNS 重载；文件草稿不写浏览器存储。自内核 v13、面板 `0.3.7` 起，自动拉取改由 YAML 顶层的 `external-ui-auto-update` 和 `external-ui-update-interval` 控制，默认关闭、间隔默认 24 小时。内核后台检查始终跟随当前生效的 `external-ui-url`，无需打开网页；比较归档与本地 `build-info.json` 中的版本号，远端版本更高才自动安装，相同或更低版本不安装。缺失版本号时可明确手动安装。面板更新只替换静态文件，不重启内核或清理 DNS 缓存；下载、校验失败保留现有面板，更新区保留手动检查和刷新。接口和使用边界见 [面板维护说明](docs/dashboard-management.md)。
+面板 `0.4.0` 保留当前 YAML 文件编辑、保存冲突检测和未保存草稿保护，移除手动检查、安装、自动更新开关及状态区域。保存仅写当前文件，应用仍使用原有重载入口；草稿不写浏览器存储。
+
+面板来源固定为本仓库 `clash-dashboard-dist`，目录固定为内核工作目录下的 `./ui`（跟随 `-d`）。旧配置中的 `external-ui`、`external-ui-url`、`external-ui-name` 不再改变安装位置或来源。自动检查由 YAML 顶层 `external-ui-auto-update` / `external-ui-update-interval` 控制；内核自动升级由 `core-auto-update` / `core-update-interval` 控制，均默认关闭、默认每 24 小时检查。面板比较远端和本地 `build-info.json` 的版本号，内核比较当前实际版本与仓库 release 版本；仅严格更新的版本自动安装。面板更新不重启内核；内核更新成功后自动重启。完整行为与边界见[面板及内核维护说明](docs/dashboard-management.md)。
 
 ## 快速开始
 
-1. 从 [Releases](https://github.com/chummumm/mihomo-dns-optimized/releases) 下载对应系统和 CPU 的文件，核对 `SHA256SUMS`；直接运行可选 `.gz` / Windows `.zip`，Linux 也提供安装包。
+1. 从 [Releases](https://github.com/chummumm/mihomo-optimized/releases) 下载对应系统和 CPU 的文件，核对 `SHA256SUMS`；直接运行可选 `.gz` / Windows `.zip`，Linux 也提供安装包。
 2. 保存下面的示例为 `config.yaml`，或把其中 DNS 设置并入自己的配置，保留已有节点、策略组和业务规则。
 3. 校验并运行，将 DNS 客户端指向配置中的监听地址。
 
@@ -65,24 +69,24 @@ DNS 观测默认随 `dns.enable` 开启，可用 `dns.observability: false` 关�
 
 完整矩阵为 **37 个平台 / CPU 目标、66 个二进制归档和安装包**，另附 `BUILDINFO.json` 与 `SHA256SUMS`。`linux-amd64` 保持 GOAMD64=v1；v2/v3 单独提供。当前不重复上游旧 Go 工具链、LoongArch ABI1 等兼容变体。完整 CPU、最低兼容边界和安装说明见[预编译文件与安装包](docs/releases.md)。
 
-Debian / Ubuntu 例如使用 `mihomo-linux-amd64-<version>.deb`：
+Debian / Ubuntu 例如使用 `mihomo-optimized-linux-amd64.deb`：
 
 ```bash
-sudo apt install ./mihomo-linux-amd64-<version>.deb
+sudo apt install ./mihomo-optimized-linux-amd64.deb
 # 将自己的配置放入 /etc/mihomo/config.yaml 后再校验和启动。
 sudo mihomo -t -d /etc/mihomo
 sudo systemctl daemon-reload
 sudo systemctl enable --now mihomo
 ```
 
-安装包使用 `/usr/bin/mihomo`、`/etc/mihomo/config.yaml` 和 `mihomo.service`，通过包管理器保护已有配置，不自动启动服务。文件改名后，包管理器内部名称仍保留 `mihomo-dns-optimized`，声明替换官方 `mihomo` 包，已有安装可按同一个包正常升级。通用起始配置只有本机 mixed 和 DIRECT；私人节点与规则需自行提供。
+安装包使用 `/usr/bin/mihomo`、`/etc/mihomo/config.yaml` 和 `mihomo.service`，通过包管理器保护已有配置，不自动启动服务。包名改为 `mihomo-optimized`，声明替换旧 `mihomo-dns-optimized` 和官方 `mihomo`。deb/rpm/pkg 下载文件名固定、不带版本；包内部保留合法版本元数据。安装后可由内核自更新，无需每次重新安装包；系统包管理器记录的仍是当初安装包版本，当前实际版本请看 `mihomo -v`。通用起始配置只有本机 mixed 和 DIRECT；私人节点与规则需自行提供。
 
-直接使用压缩核心时，解压并命名为 `dns-route-kernel` 后运行：
+直接使用压缩核心时，解压并命名为 `mihomo-optimized` 后运行：
 
 ```bash
-chmod +x ./dns-route-kernel
-./dns-route-kernel -t -f config.yaml
-./dns-route-kernel -f config.yaml
+chmod +x ./mihomo-optimized
+./mihomo-optimized -t -f config.yaml
+./mihomo-optimized -f config.yaml
 ```
 
 下面是可独立校验的配置，直连池使用普通 DNS，代理池使用 Cloudflare DoH；请按网络可达性调整。`代理出口` 暂只含 DIRECT 占位项，**加入自己的节点后才会真正走代理**；接入已有配置时直接使用原来的策略组即可。
@@ -205,19 +209,19 @@ rules:
 
 ## 云编译、更新与验证
 
-[构建工作流](https://github.com/chummumm/mihomo-dns-optimized/actions/workflows/build.yml)先执行规定 Go 测试、DNS race、同步保护与安装包检查，再构建完整 37 目标矩阵；Linux amd64 产物运行本地模拟服务的实际二进制端到端测试。其他目标为交叉编译，不等同于在各设备实际执行。所有必需归档和安装包齐全、摘要一致后才发布。
+[构建工作流](https://github.com/chummumm/mihomo-optimized/actions/workflows/build.yml)先执行规定 Go 测试、DNS race、同步保护与安装包检查，再构建完整 37 目标矩阵；Linux amd64 产物运行本地模拟服务的实际二进制端到端测试。其他目标为交叉编译，不等同于在各设备实际执行。所有必需归档和安装包齐全、摘要一致后才发布。
 
 `main` 的源码、依赖或构建配置变更通过验证后自动发布带源提交标识和 SHA-256 的下载包；PR 只生成 Actions artifact。纯文档更新跳过自动构建和发布，具体路径与显式发布入口见[发行文档](docs/releases.md)。当前 `main` 对应构建才能更新 Latest，旧构建重跑不会覆盖新版本入口。
 
-[稳定版同步](https://github.com/chummumm/mihomo-dns-optimized/actions/workflows/sync-upstream.yml)计划每日北京时间 04:23 检查上游正式 release，定时任务可能延迟。先合并、测试和编译，通过后普通推送；冲突、验证失败或远端分支并发变化时停止，不强推覆盖本项目修改。基线见 [UPSTREAM_VERSION](UPSTREAM_VERSION) / [UPSTREAM_COMMIT](UPSTREAM_COMMIT)。
+[稳定版同步](https://github.com/chummumm/mihomo-optimized/actions/workflows/sync-upstream.yml)计划每日北京时间 04:23 检查上游正式 release，定时任务可能延迟。先合并、测试和编译，通过后普通推送；冲突、验证失败或远端分支并发变化时停止，不强推覆盖本项目修改。基线见 [UPSTREAM_VERSION](UPSTREAM_VERSION) / [UPSTREAM_COMMIT](UPSTREAM_COMMIT)。
 
 本地验证使用项目当前工具链；CI 的 Go 版本与来源见工作流。常用命令：
 
 ```bash
 bash scripts/ci-check.sh test
-go build -tags with_gvisor -o dns-route-kernel
-python3 scripts/test-dns-proxy.py ./dns-route-kernel
-python3 scripts/test-dns-observability.py ./dns-route-kernel
+go build -tags with_gvisor -o mihomo-optimized
+python3 scripts/test-dns-proxy.py ./mihomo-optimized
+python3 scripts/test-dns-observability.py ./mihomo-optimized
 ```
 
 测试事实、ICMP / PROCESS 平台跳过项与验证范围见[实施与复查记录](docs/dns-rule-routing-validation.md)。发布成功以精确提交的 Actions / Releases 记录为准。
