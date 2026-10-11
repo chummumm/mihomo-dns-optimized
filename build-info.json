@@ -1,8 +1,8 @@
 {
   "name": "mihomo-optimized",
-  "version": "0.4.1",
-  "source_commit": "a5ec2c58c7ebe6d450eaede9ab40126781a71f2c",
-  "source_url": "https://github.com/chummumm/mihomo-optimized/tree/a5ec2c58c7ebe6d450eaede9ab40126781a71f2c",
+  "version": "0.4.2",
+  "source_commit": "c4441d1a35bab23e826703a56b49e0ea57fdb5d2",
+  "source_url": "https://github.com/chummumm/mihomo-optimized/tree/c4441d1a35bab23e826703a56b49e0ea57fdb5d2",
   "upstream_commit": "9a32d9d163ad233141c384ba365c6ef18c58cb94",
   "display_host_order": [
     "host",
