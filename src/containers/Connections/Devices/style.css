@@ -39,6 +39,10 @@
     color: var(--text);
 }
 
+.connections-devices-item:focus-visible {
+    outline-offset: -2px;
+}
+
 .connections-devices-item.selected {
     border-color: transparent;
     color: var(--text);
@@ -57,12 +61,14 @@
 /* The selection glides between sources: a lit gradient outline. */
 .device-highlight {
     position: absolute;
-    inset: -1px;
+    /* A negative pixel inset can escape the first row at fractional zoom. */
+    inset: 0;
     z-index: -1;
     border: 1px solid transparent;
     border-radius: inherit;
     background: linear-gradient(var(--panel-solid), var(--panel-solid)) padding-box, var(--accent-grad) border-box;
     box-shadow: 0 0 22px -8px var(--glow);
+    pointer-events: none;
 }
 
 /* Share of live traffic as a ring; the arc eases between readings. */

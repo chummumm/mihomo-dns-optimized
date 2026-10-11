@@ -1,6 +1,6 @@
 {
     "name": "clash-dashboard",
-    "version": "0.3.4",
+    "version": "0.3.5",
     "packageManager": "pnpm@8.15.9",
     "description": "Web port of clash.",
     "keywords": [

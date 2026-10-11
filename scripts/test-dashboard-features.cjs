@@ -6,6 +6,7 @@ const http = require('node:http')
 const path = require('node:path')
 const { WebSocketServer } = require('ws')
 const { chromium } = require('playwright')
+const assertSelectionOutline = require('./assert-selection-outline.cjs')
 
 const dist = path.resolve(process.env.UI_DIST_DIR || path.join(__dirname, '../dist'))
 const defaultURL = 'https://www.gstatic.com/generate_204'
@@ -161,6 +162,7 @@ async function main() {
     const topology = page.locator('.topology-canvas')
     const groupCard = page.locator('.proxy-group[data-group="select-group"]')
     assert.equal(await groupCard.count(), 1, 'Card forwards the topology navigation target')
+    await assertSelectionOutline(page, '.proxy-group[data-group="select-group"] .chip-here', '/tmp/mihomo-chip-outline-150.png')
     await page.waitForFunction(() => document.querySelector('.topology-canvas')?.width > 0)
     // A tap can arrive before a pointer-move animation frame; click coordinates
     // must identify the group independently of the last hovered node.

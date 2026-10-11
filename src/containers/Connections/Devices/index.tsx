@@ -60,7 +60,7 @@ const SourceButton = forwardRef<HTMLButtonElement, SourceButtonProps>(function S
             tabIndex={isPresent ? undefined : -1}
             className={classnames('connections-devices-item', { selected })}
             onClick={() => { if (isPresent) props.onChange?.(props.sourceKey) }}>
-            {selected && <motion.span className="device-highlight" layoutId="device-highlight" transition={springs.snap} />}
+            {selected && <motion.span className="device-highlight" layoutId="device-highlight" transition={springs.snap} aria-hidden="true" />}
             <ShareMark rate={props.rate} total={props.total} />
             <span className="device-label">{ props.label }</span> <span className="device-count">({ props.count })</span>
         </motion.button>
@@ -84,7 +84,7 @@ export function Devices (props: DevicesProps) {
         <LayoutGroup id={highlight}>
             <div className={classname} style={style} role="group" aria-label={t('filter.sources')}>
                 <button type="button" aria-pressed={props.selected === ALL_CONNECTIONS} className={classnames('connections-devices-item', { selected: props.selected === ALL_CONNECTIONS })} onClick={() => props.onChange?.(ALL_CONNECTIONS)}>
-                    {props.selected === ALL_CONNECTIONS && <motion.span className="device-highlight" layoutId="device-highlight" transition={springs.snap} />}
+                    {props.selected === ALL_CONNECTIONS && <motion.span className="device-highlight" layoutId="device-highlight" transition={springs.snap} aria-hidden="true" />}
                     <ShareMark rate={totalRate} total={totalRate} />
                     <span className="device-label">{ t('filter.all') }</span> <span className="device-count">({ props.total })</span>
                 </button>

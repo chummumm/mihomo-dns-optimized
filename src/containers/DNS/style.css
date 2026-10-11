@@ -38,6 +38,23 @@
     font-variant-numeric: tabular-nums;
 }
 
+.dns-upstream-outbound {
+    font-weight: 600;
+}
+
+.dns-upstream-result {
+    display: grid;
+    gap: 2px;
+}
+
+.dns-upstream-wait {
+    color: var(--text-3);
+    font-family: var(--font-mono);
+    font-size: var(--t-2xs);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
 /* Memory-only storage facts under the title */
 .dns-storage-note {
     display: flex;

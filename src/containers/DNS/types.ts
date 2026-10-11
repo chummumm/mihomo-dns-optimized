@@ -106,6 +106,8 @@ export interface DNSStats {
 export interface DNSUpstream {
     id: string
     address: string
+    outbound?: string
+    outbound_type?: 'direct' | 'proxy' | 'unknown'
     attempts: number
     successes: number
     errors: number
@@ -113,6 +115,9 @@ export interface DNSUpstream {
     timeouts: number
     rcode_errors: number
     elapsed_ms_avg: number
+    success_elapsed_ms_avg?: number
+    error_elapsed_ms_avg?: number
+    canceled_elapsed_ms_avg?: number
 }
 
 export interface DNSUpstreams {

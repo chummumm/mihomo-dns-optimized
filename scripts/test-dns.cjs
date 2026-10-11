@@ -40,7 +40,7 @@ function makeRecords (prefix, count) {
 }
 
 function state (name, count) {
-    return { name, instance: `${name}-1`, records: makeRecords(name, count), secret: `test-${name}-secret`, supported: true, enabled: true, emptyStats: false, capabilityFailure: false, delay: '', pending: 0 }
+    return { name, instance: `${name}-1`, records: makeRecords(name, count), secret: `test-${name}-secret`, supported: true, enabled: true, emptyStats: false, detailedUpstreams: true, capabilityFailure: false, delay: '', pending: 0 }
 }
 
 const stateA = state('controller-a', 140)
@@ -112,9 +112,18 @@ function api (req, res, current) {
         data = { items, next_cursor: hasMore ? items.at(-1).id : '', has_more: hasMore, retained: current.records.length, evicted: 12, scope: 'retained', instance_id: current.instance }
     } else if (url.pathname.endsWith('/upstreams')) {
         data = { instance_id: current.instance, scope: 'process', attempt_scope: 'resolver_exchange', limit: 128, overflowed: 0, items: [
-            { id: 'server-1', address: 'https://same.example/<redacted>', attempts: 100, successes: 8, errors: 2, canceled: 80, timeouts: 1, rcode_errors: 1, elapsed_ms_avg: 10 },
+            { id: 'server-1', address: 'https://same.example/<redacted>', attempts: 100, successes: 8, errors: 2, canceled: 80, timeouts: 1, rcode_errors: 1, elapsed_ms_avg: 200 },
             { id: 'server-2', address: 'https://same.example/<redacted>', attempts: 3, successes: 0, errors: 0, canceled: 3, timeouts: 0, rcode_errors: 0, elapsed_ms_avg: 8 },
+            { id: 'server-3', address: 'udp://resolver.example:53', attempts: 1, successes: 1, errors: 0, canceled: 0, timeouts: 0, rcode_errors: 0, elapsed_ms_avg: 4 },
         ] }
+        if (current.detailedUpstreams) {
+            const attribution = [
+                { outbound: 'DIRECT', outbound_type: 'direct', success_elapsed_ms_avg: 10, error_elapsed_ms_avg: 1000, canceled_elapsed_ms_avg: 199 },
+                { outbound: 'node-a', outbound_type: 'proxy', success_elapsed_ms_avg: 0, error_elapsed_ms_avg: 0, canceled_elapsed_ms_avg: 8 },
+                { outbound: '', outbound_type: 'unknown', success_elapsed_ms_avg: 4, error_elapsed_ms_avg: 0, canceled_elapsed_ms_avg: 0 },
+            ]
+            data.items = data.items.map((item, index) => ({ ...item, ...attribution[index] }))
+        }
     } else return json(res, 404, {})
     if (current.delay && url.pathname.endsWith(current.delay)) {
         current.pending++
@@ -212,12 +221,32 @@ async function run () {
         console.log('PASS DNS overview: global windows, cache ratio, QPS, approximate P95, real CORS')
 
         await page.getByRole('tab', { name: 'Upstreams', exact: true }).click()
-        await until(async () => await page.locator('.dns-query-card tbody tr').count() === 2, 'upstream rows')
+        await until(async () => await page.locator('.dns-query-card tbody tr').count() === 3, 'upstream rows')
         const upstreamRows = await page.locator('.dns-query-card tbody tr').allTextContents()
         assert.match(upstreamRows[0], /80%/)
         assert.match(upstreamRows[1], /—/)
         assert.equal(await page.getByText('https://same.example/<redacted>', { exact: true }).count(), 2, 'sanitized identical addresses retain separate IDs/rows')
-        console.log('PASS DNS upstreams: canceled/in-flight excluded from success denominator and stable IDs')
+        const upstreamTable = page.locator('.dns-query-card table')
+        const upstreamColumn = async name => (await upstreamTable.locator('thead th').allTextContents()).indexOf(name)
+        const latencyColumn = await upstreamColumn('Successful average latency')
+        assert(latencyColumn >= 0)
+        assert.equal(await upstreamTable.locator('tbody tr').nth(0).locator('td').nth(latencyColumn).textContent(), '10 ms', 'successful latency excludes errors and canceled waits')
+        assert.equal(await upstreamTable.locator('tbody tr').nth(1).locator('td').nth(latencyColumn).textContent(), '—', 'no successful observations are not a zero-ms success')
+        assert.equal(await upstreamTable.locator('tbody tr').nth(0).locator('td').first().textContent(), 'DIRECT')
+        assert.equal(await upstreamTable.locator('tbody tr').nth(1).locator('td').first().textContent(), 'node-a', 'the same endpoint on another actual node stays separate')
+        assert.equal(await upstreamTable.locator('tbody tr').nth(2).locator('td').first().textContent(), 'Unknown / not attributed', 'unattributed work is never labeled DIRECT')
+        assert.match(await upstreamTable.locator('tbody tr').nth(0).locator('td').nth(await upstreamColumn('Errors')).textContent(), /Avg\. 1,000 ms/)
+
+        stateA.detailedUpstreams = false
+        await page.getByRole('button', { name: 'Refresh', exact: true }).click()
+        await until(async () => await upstreamColumn('Combined average latency') >= 0, 'legacy kernel has an accurate combined label')
+        const legacyColumn = await upstreamColumn('Combined average latency')
+        assert.equal(await upstreamTable.locator('tbody tr').nth(0).locator('td').nth(legacyColumn).textContent(), '200 ms', 'old combined latency is preserved without calling it successful latency')
+        assert.equal(await upstreamColumn('Successful average latency'), -1)
+        assert.match(await page.locator('.dns-captions').textContent(), /including failed and canceled exchanges/)
+        assert.equal(await upstreamTable.locator('tbody tr').nth(0).locator('td').first().textContent(), 'Unknown / not attributed')
+        stateA.detailedUpstreams = true
+        console.log('PASS DNS upstreams: actual outbound identities, successful latency, zero observations, accurate legacy fallback and success denominator')
 
         await page.getByRole('tab', { name: 'Query log', exact: true }).click()
         await until(async () => await queryButtons().count() === 50, 'default 50-row page')

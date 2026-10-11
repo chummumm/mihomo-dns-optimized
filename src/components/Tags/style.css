@@ -48,6 +48,10 @@ button.chip-body:hover {
     color: var(--text);
 }
 
+button.chip-body:focus-visible {
+    outline-offset: -2px;
+}
+
 .chip-dot {
     flex-shrink: 0;
     width: 6px;
@@ -88,12 +92,14 @@ button.chip-body:hover {
 
 .chip-here {
     position: absolute;
-    inset: -1px;
+    /* Keep the outline inside the scroll window even when zoom rounds borders. */
+    inset: 0;
     z-index: -1;
     border: 1px solid transparent;
     border-radius: var(--r-chip);
     background: linear-gradient(var(--panel-solid), var(--panel-solid)) padding-box, var(--accent-grad) border-box;
     box-shadow: 0 0 20px -6px var(--glow);
+    pointer-events: none;
 }
 
 .chip.is-current .chip-dot {

@@ -6,6 +6,7 @@ const http = require('node:http')
 const path = require('node:path')
 const { WebSocketServer } = require('ws')
 const { chromium } = require('playwright')
+const assertSelectionOutline = require('./assert-selection-outline.cjs')
 
 const dist = path.resolve(process.env.UI_DIST_DIR || path.join(__dirname, '../dist'))
 const config = { port: 0, 'socks-port': 0, 'mixed-port': 0, 'redir-port': 0, mode: 'rule', 'log-level': 'info', 'allow-lan': false }
@@ -202,6 +203,7 @@ async function main() {
     await waitCount(400); await waitRows(400)
     assert.deepEqual((await position('all_400')).devices, ['All (400)', '192.0.2.101 (200)', '192.0.2.102 (200)'])
     await assertPinnedInternal(400, 0, 'initial empty internal bucket')
+    await assertSelectionOutline(page, '.connections-devices-item.selected .device-highlight', '/tmp/mihomo-source-outline-150.png')
     await page.locator('.connections-devices-item').filter({ hasText: '192.0.2.101' }).click()
     await waitRows(200)
     await page.locator('.connections-devices-item').first().click()
