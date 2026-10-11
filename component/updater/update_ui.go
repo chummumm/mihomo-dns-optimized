@@ -74,7 +74,7 @@ type uiSnapshot struct {
 // A reload replaces UIUpdater instances. The lock, one-entry check cache, and
 // bounded staging lifetime belong to the process rather than to one instance.
 type uiUpdateCoordinator struct {
-	operation   sync.Mutex
+	operation   updateOperationGate
 	updating    atomic.Bool
 	mu          sync.Mutex
 	checked     time.Time
@@ -84,6 +84,7 @@ type uiUpdateCoordinator struct {
 	checking    chan struct{}
 	checkingKey string
 	expiry      *time.Timer
+	bootstrap   *uiInitialDownload
 }
 
 var uiUpdates uiUpdateCoordinator
@@ -101,6 +102,12 @@ func CurrentUIUpdater() *UIUpdater {
 }
 
 func SetUIUpdater(u *UIUpdater) {
+	SetUIUpdaterWhenReady(u, nil)
+}
+
+// SetUIUpdaterWhenReady activates the immutable source and policy immediately.
+// Background work follows the latest reset barrier shared by that source.
+func SetUIUpdaterWhenReady(u *UIUpdater, ready <-chan struct{}) {
 	uiActivation.Lock()
 	defer uiActivation.Unlock()
 	previous := currentUIUpdater.Load()
@@ -109,14 +116,22 @@ func SetUIUpdater(u *UIUpdater) {
 	}
 	if previous != nil && previous.key() == u.key() && previous.active() {
 		u.activeCtx, u.activeCancel = previous.activeCtx, previous.activeCancel
+		u.readiness = previous.readiness
 	} else {
 		if previous != nil && previous.activeCancel != nil {
 			previous.activeCancel()
 		}
 		u.activeCtx, u.activeCancel = context.WithCancel(context.Background())
 	}
-	u.configureAutomaticUpdates(previous)
+	if u.readiness == nil {
+		u.readiness = &updateReadiness{}
+	}
+	u.readiness.set(ready)
+	start := u.configureAutomaticUpdates(previous)
 	currentUIUpdater.Store(u)
+	if start != nil {
+		start()
+	}
 }
 
 type UIUpdater struct {
@@ -128,6 +143,7 @@ type UIUpdater struct {
 	activeCtx      context.Context
 	activeCancel   context.CancelFunc
 	automatic      *uiAutomaticUpdate
+	readiness      *updateReadiness
 
 	// Test-only injection; neither requests nor filesystem functions are API or
 	// YAML options. Production always uses UIArchiveURL and UIPath().
@@ -564,9 +580,40 @@ func readUIBuildInfo(root string) uiBuildInfo {
 // StartAutoDownloadUI does the cheap directory check before scheduling work.
 // Reloading an already installed panel does not create a bootstrap goroutine.
 func (u *UIUpdater) StartAutoDownloadUI() {
-	if u.needsInitialDownload() {
-		go u.AutoDownloadUI()
+	// The activation check already bootstraps an empty directory. Let its
+	// policy context own that download instead of racing a second installer.
+	if job := u.automatic; job != nil && job.ctx.Err() == nil {
+		if !job.initialDownloadClaimed.CompareAndSwap(false, true) {
+			return
+		}
 	}
+	if !u.active() || !u.needsInitialDownload() {
+		return
+	}
+	state := u.state()
+	state.mu.Lock()
+	if job := state.bootstrap; job != nil && job.key == u.key() && job.ctx.Err() == nil {
+		state.mu.Unlock()
+		return
+	}
+	lifetime := u.activeCtx
+	if lifetime == nil {
+		lifetime = context.Background()
+	}
+	ctx, cancel := context.WithCancel(lifetime)
+	job := &uiInitialDownload{key: u.key(), ctx: ctx, done: make(chan struct{})}
+	state.bootstrap = job
+	state.mu.Unlock()
+	go func() {
+		defer cancel()
+		u.downloadInitialUI(ctx)
+		state.mu.Lock()
+		if state.bootstrap == job {
+			state.bootstrap = nil
+		}
+		close(job.done)
+		state.mu.Unlock()
+	}()
 }
 
 func (u *UIUpdater) needsInitialDownload() bool {
@@ -585,7 +632,26 @@ func (u *UIUpdater) AutoDownloadUI() {
 	if !u.needsInitialDownload() {
 		return
 	}
-	if err := u.installUIContext(context.Background(), false, true); err != nil && !errors.Is(err, ErrUIUpdateBusy) {
+	lifetime := u.activeCtx
+	if lifetime == nil {
+		lifetime = context.Background()
+	}
+	ctx, cancel := context.WithCancel(lifetime)
+	defer cancel()
+	u.downloadInitialUI(ctx)
+}
+
+func (u *UIUpdater) downloadInitialUI(ctx context.Context) {
+	// A canceled automatic bootstrap can retain the installation gate briefly.
+	// In particular, disabling the automatic policy must still allow the new
+	// empty-directory initializer to finish after that old holder releases it.
+	err := u.state().operation.runWhenAvailable(ctx, ErrUIUpdateBusy, func() error {
+		if err := u.readiness.wait(ctx); err != nil {
+			return err
+		}
+		return u.installUIContext(ctx, false, true)
+	})
+	if err != nil && ctx.Err() == nil {
 		log.Errorln("Error downloading UI: %s", err)
 	}
 }

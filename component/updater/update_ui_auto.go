@@ -21,6 +21,18 @@ type uiAutomaticUpdate struct {
 	done     chan struct{}
 	interval time.Duration
 	next     atomic.Pointer[time.Time]
+	// A new activation owns initialization itself. An interval-only policy
+	// change may claim one separate empty-directory bootstrap, but an ordinary
+	// reload must never enqueue another one for the same job.
+	initialDownloadClaimed atomic.Bool
+}
+
+// Empty-directory initialization also survives same-source reloads. Its
+// lifetime belongs to the source, so it remains available with auto-update off.
+type uiInitialDownload struct {
+	key  string
+	ctx  context.Context
+	done chan struct{}
 }
 
 func (u *UIUpdater) AutoUpdate() bool { return u.autoUpdateUI }
@@ -42,22 +54,26 @@ func (u *UIUpdater) nextAutomaticCheck() string {
 	return ""
 }
 
-// Called only by SetUIUpdater while uiActivation is held, before u is published.
-func (u *UIUpdater) configureAutomaticUpdates(previous *UIUpdater) {
+// Called only by SetUIUpdater while uiActivation is held. The returned function
+// starts background work after the immutable updater has been published.
+func (u *UIUpdater) configureAutomaticUpdates(previous *UIUpdater) func() {
 	if previous != nil && previous.automatic != nil {
 		if previous.key() == u.key() && previous.AutoUpdate() == u.AutoUpdate() &&
 			previous.UpdateInterval() == u.UpdateInterval() && previous.automatic.ctx.Err() == nil {
 			u.automatic = previous.automatic
-			return
+			return nil
 		}
 		previous.automatic.cancel()
 	}
 	if !u.AutoUpdate() || u.externalUIPath == "" || !u.sourceValid() {
-		return
+		return nil
 	}
+	immediate := previous == nil || !previous.AutoUpdate() || previous.automatic == nil ||
+		previous.key() != u.key() || !previous.active()
 	ctx, cancel := context.WithCancel(u.activeCtx)
 	interval := time.Duration(u.UpdateInterval()) * time.Hour
 	job := &uiAutomaticUpdate{ctx: ctx, cancel: cancel, done: make(chan struct{}), interval: interval}
+	job.initialDownloadClaimed.Store(immediate)
 	next := time.Now().Add(interval)
 	job.next.Store(&next)
 	u.automatic = job
@@ -69,28 +85,48 @@ func (u *UIUpdater) configureAutomaticUpdates(previous *UIUpdater) {
 		ticker := time.NewTicker(interval)
 		ticks, stop = ticker.C, ticker.Stop
 	}
-	go u.runAutomaticUpdates(job, ticks, stop)
+	return func() { go u.runAutomaticUpdates(job, ticks, stop, immediate) }
 }
 
-func (u *UIUpdater) runAutomaticUpdates(job *uiAutomaticUpdate, ticks <-chan time.Time, stop func()) {
+func (u *UIUpdater) runAutomaticUpdates(job *uiAutomaticUpdate, ticks <-chan time.Time, stop func(), immediate bool) {
 	defer close(job.done)
 	defer stop()
-	// The first check waits one configured interval. Existing empty-directory
-	// bootstrap remains immediate and cannot cause a duplicate first download.
+	if immediate {
+		u.runAutomaticCheck(job, true)
+	}
 	for {
 		select {
 		case <-job.ctx.Done():
 			return
-		case tick := <-ticks:
-			if job.ctx.Err() != nil {
+		case tick, ok := <-ticks:
+			if !ok || job.ctx.Err() != nil {
 				return
 			}
 			next := tick.Add(job.interval)
 			job.next.Store(&next)
-			if err := u.automaticUpdate(job.ctx); err != nil && job.ctx.Err() == nil && !errors.Is(err, ErrUIUpdateBusy) {
-				log.Warnln("Automatic external UI update failed: %s", err)
-			}
+			u.runAutomaticCheck(job, false)
 		}
+	}
+}
+
+func (u *UIUpdater) runAutomaticCheck(job *uiAutomaticUpdate, waitForOperation bool) {
+	if job.ctx.Err() != nil {
+		return
+	}
+	action := func() error {
+		if err := u.readiness.wait(job.ctx); err != nil {
+			return err
+		}
+		return u.automaticUpdate(job.ctx)
+	}
+	var err error
+	if waitForOperation {
+		err = u.state().operation.runWhenAvailable(job.ctx, ErrUIUpdateBusy, action)
+	} else {
+		err = action()
+	}
+	if err != nil && job.ctx.Err() == nil && !errors.Is(err, ErrUIUpdateBusy) {
+		log.Warnln("Automatic external UI update failed: %s", err)
 	}
 }
 

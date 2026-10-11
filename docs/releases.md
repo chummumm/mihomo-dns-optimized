@@ -97,7 +97,7 @@ sudo systemctl enable --now mihomo
 
 构建脚本检查每个 native 包的架构、版本、配置保护、文件清单/权限、无安装脚本，以及其二进制与对应归档完全一致。回归还在隔离 dpkg 根目录执行旧包到新包的真实迁移，验证本地修改的配置保留与文件归属。Linux amd64 产物实际执行 `-v`、`-t` 和本地模拟上游的 DNS 端到端回归；不会安装到测试宿主机或启动宿主服务。
 
-开发者可运行 `python3 scripts/release-build.py matrix` 查看 37 目标矩阵，或 `bash scripts/ci-check.sh build <target> <绝对输出目录> mihomo-optimized-v1.0.0 <ISO时间>` 构建单个目标；`amd64` / `arm64` 是 Linux 别名。依赖 `dpkg-deb`、`rpm`/`rpmbuild`/`rpm2cpio`、`cpio`、`zstd`、`fakeroot`、Python 3.12 和 MetaCubeX Go；Android 还需矩阵指定的固定 NDK。
+开发者可运行 `python3 scripts/release-build.py matrix` 查看 37 目标矩阵，或 `bash scripts/ci-check.sh build <target> <绝对输出目录> mihomo-optimized-v1.0.1 <ISO时间>` 构建单个目标；版本参数须与当前 `PROJECT_VERSION` 一致，`amd64` / `arm64` 是 Linux 别名。依赖 `dpkg-deb`、`rpm`/`rpmbuild`/`rpm2cpio`、`cpio`、`zstd`、`fakeroot`、Python 3.12 和 MetaCubeX Go；Android 还需矩阵指定的固定 NDK。
 
 ## 内核自动更新
 
@@ -105,24 +105,28 @@ sudo systemctl enable --now mihomo
 
 ```yaml
 core-auto-update: true
-core-update-interval: 24 # 小时；默认 24，最小 1
+core-update-interval: 24 # 整数小时；默认 24，范围 1..2562047
 external-ui-auto-update: true
-external-ui-update-interval: 24 # 面板检查间隔，小时
+external-ui-update-interval: 24 # 面板检查间隔，采用相同单位和范围
 ```
 
-两个开关默认都是 `false`，检查无需打开面板。启用后按间隔检查；相同配置重载保留计时，改变策略或关闭功能会取消旧任务。core 开关启用同时表示允许成功安装后自动重启，重启会关闭当前连接、重建内存 DNS 状态。
+两个开关默认都是 `false`，两个间隔默认 `24`，检查无需打开面板。间隔必须写为整数小时，不接受 `24h`、`"24"`、小数或 `0`；关闭使用对应开关。保存后完整重载才应用，`mihomo -t` 不启动检查或初始面板下载。
+
+从内核 **`mihomo-optimized-v1.0.1`** 起，开关已启用的进程每次启动 / 重启会在网络与配置就绪后立即异步检查一次，然后按间隔检查；运行中关闭改为开启也立即检查。相同策略完整重载保留原计时器，不重复检查或重置下次时间；保持开启而只改间隔时，取消旧任务并从该次重载按新间隔计时，不追加立即检查。关闭会取消对应旧任务，迟到结果不能继续安装。
+
+启动 / 启用检查可取消地等待前一个操作释放，避免快速关闭再开启时丢失本次检查；周期检查遇忙跳过，不堆积安装请求。后台网络准备、下载与等待不阻塞配置重载。core 开关启用同时表示允许成功安装后自动重启，重启会关闭当前连接、重建内存 DNS 状态。
 
 内核从本仓库 Latest 的 `version.txt` 读取远端版本，按数值比较当前实际项目版本，只有严格更高版本才自动安装。比如 `1.0.12 > 1.0.2`；相同版本、降级、非法版本或开发版不会触发自动替换。整个下载固定到首次确定的 tag，再读取该 tag 的 `SHA256SUMS` 与精确 `.gz` / `.zip`，Latest 在途中变化不会混用附件。
 
 选择保持现有操作系统、CPU 指令集与浮点 ABI。清单重复/格式错误、缺少该架构、HTTP 失败、摘要错误或解压失败都保留当前内核。通过校验后先暂存；最终替换前再次核对当前策略、版本与原文件身份/摘要，配置已经改变或二进制被外部更换时放弃该任务。操作串行化，并记录已安装版本与等待重启状态，避免使用尚未重启的旧 `C.Version` 重复安装。
 
-原文件保存在同目录 `meta-backup/`；替换后沿用现有进程重启流程。默认、`auto`、`release` 通道使用本仓库，不使用官方 alpha。兼容的 `/upgrade` API 保留给其他客户端，面板 `0.4.0` 不提供手动更新、安装或自动更新控制区，也不调用该 API。
+原文件保存在同目录 `meta-backup/`；替换后沿用现有进程重启流程。默认、`auto`、`release` 通道使用本仓库，不使用官方 alpha。兼容的 `/upgrade` API 保留给其他客户端；自面板 `0.4.0` 起，不再提供手动更新、安装或自动更新控制区，也不调用该 API。
 
-面板始终来自本仓库 `clash-dashboard-dist`，存于 HomeDir 下的 `ui`，跟随 `-d`。旧 `external-ui`、`external-ui-url`、`external-ui-name` 配置不再改变行为。面板通过本地和归档的 `build-info.json` SemVer 比较更新，仅替换静态资源，不重启内核或清理 DNS 数据。完整调度、首次安装和取消语义见[面板及内核维护说明](dashboard-management.md)。
+面板始终来自本仓库 `clash-dashboard-dist`，存于 HomeDir 下的 `ui`，跟随 `-d`。旧 `external-ui`、`external-ui-url`、`external-ui-name` 配置及命令行 `-ext-ui` 均被忽略。面板通过本地和归档的 `build-info.json` SemVer 比较更新，仅严格新版会自动替换静态资源，不重启内核或清理 DNS 数据。目录缺失或为空时，即使面板自动更新关闭，仍会后台下载初始面板；初始安装与启动检查去重。完整调度、首次安装和取消语义见[面板及内核维护说明](dashboard-management.md)，其他旧配置的保留与停用边界见 [README 迁移表](../README.md#旧配置迁移与停用范围)。
 
 ## 旧内核首次切换新系列
 
-**包括已发布 `v1.19.32-optimized-13` 在内的旧内核，首次切换到 `mihomo-optimized-v1.0.0` 需要手动安装一次。** 旧二进制内置解析器只支持旧版 tag；本次新源码不能改变已经安装的程序。仓库重命名重定向解决的是旧链接访问，不会改变旧版解析规则。
+**包括已发布 `v1.19.32-optimized-13` 在内的旧内核，首次切换到 `mihomo-optimized-v1.0.0` 或更新的新系列内核，需要手动安装一次。** 旧二进制内置解析器只支持旧版 tag；新源码不能改变已经安装的程序。仓库重命名重定向解决的是旧链接访问，不会改变旧版解析规则。
 
 下载并校验对应平台的新归档或 native 包，按原安装方式替换并重启，确认 `mihomo -v` 显示新系列，然后启用 YAML 自动更新。没有新增旧名 bridge Release 或复制旧资产；历史 tag 和文件不修改。
 

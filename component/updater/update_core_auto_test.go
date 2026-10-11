@@ -250,7 +250,6 @@ func TestCoreUpdaterAutomaticFixtureAcceptsPathAliases(t *testing.T) {
 				t.Fatal("fixture did not create a distinct path spelling")
 			}
 			f.u.ConfigureAutoUpdate(true, 1)
-			f.clock.ticker(t, 0).fire(t, time.Now())
 			if err := f.commitResult(t); err != nil {
 				t.Fatal("temporary executable alias was rejected", err)
 			}
@@ -296,8 +295,8 @@ func TestCoreUpdaterAutomaticDefaultsReloadAndNoBrowser(t *testing.T) {
 	f.u.ConfigureAutoUpdate(true, 6)
 	timer := f.clock.ticker(t, 0)
 	job, initialNext := f.job(), f.u.NextCheck()
-	if timer.interval != 6*time.Hour || initialNext == "" || f.requests.Load() != 0 {
-		t.Fatal("first core check did not wait its configured interval")
+	if timer.interval != 6*time.Hour || initialNext == "" {
+		t.Fatal("activation did not create the configured periodic schedule")
 	}
 	for i := 0; i < 30; i++ {
 		f.u.ConfigureAutoUpdate(true, 6)
@@ -305,8 +304,7 @@ func TestCoreUpdaterAutomaticDefaultsReloadAndNoBrowser(t *testing.T) {
 	if f.job() != job || f.u.NextCheck() != initialNext || f.clock.ticker(t, 0) != timer {
 		t.Fatal("same-policy reload replaced or postponed the core timer")
 	}
-	at := time.Now()
-	timer.fire(t, at)
+	// Activation must reach this install without a fake clock tick or browser.
 	if err := f.commitResult(t); err != nil {
 		t.Fatal(err)
 	}
@@ -314,8 +312,8 @@ func TestCoreUpdaterAutomaticDefaultsReloadAndNoBrowser(t *testing.T) {
 	if f.requests.Load() != 3 || f.archives.Load() != 1 || f.restarts.Load() != 1 {
 		t.Fatalf("background update did not perform exactly one checked install: requests=%d archives=%d restarts=%d", f.requests.Load(), f.archives.Load(), f.restarts.Load())
 	}
-	if got := f.u.NextCheck(); got != at.Add(6*time.Hour).UTC().Format(time.RFC3339) {
-		t.Fatalf("next check=%s", got)
+	if got := f.u.NextCheck(); got != initialNext {
+		t.Fatalf("activation or ordinary reload reset the next check: %s != %s", got, initialNext)
 	}
 	backup, err := os.ReadFile(filepath.Join(filepath.Dir(f.path), "meta-backup", filepath.Base(f.path)))
 	if err != nil || !bytes.Equal(backup, f.old) {
@@ -323,7 +321,8 @@ func TestCoreUpdaterAutomaticDefaultsReloadAndNoBrowser(t *testing.T) {
 	}
 	// C.Version remains old until restart. A second tick must not repeat the
 	// download/install during that window, even if the fake restart returns.
-	timer.fire(t, at.Add(6*time.Hour))
+	at := *job.next.Load()
+	timer.fire(t, at)
 	coreAutomaticWait(t, f.settled)
 	if f.requests.Load() != 3 || f.restarts.Load() != 1 {
 		t.Fatal("pending restart triggered a repeated install")
@@ -343,7 +342,6 @@ func TestCoreUpdaterAutomaticRequiresStrictlyNewerVersion(t *testing.T) {
 		t.Run(current, func(t *testing.T) {
 			f := newCoreAutomaticFixture(t, current, "mihomo-optimized-v1.0.1", nil)
 			f.u.ConfigureAutoUpdate(true, 1)
-			f.clock.ticker(t, 0).fire(t, time.Now())
 			coreAutomaticWait(t, func() bool { return f.requests.Load() == 1 && f.settled() })
 			if f.archives.Load() != 0 {
 				t.Fatal("same, older, or unrecognized current version downloaded an archive")
@@ -377,7 +375,6 @@ func TestCoreUpdaterAutomaticCancelsNetworkOnDisableOrReschedule(t *testing.T) {
 				t.Cleanup(func() { close(unblock) })
 				f.u.ConfigureAutoUpdate(true, 6)
 				old := f.job()
-				f.clock.ticker(t, 0).fire(t, time.Now())
 				coreAutomaticDone(t, started)
 				applied := make(chan struct{})
 				go func() { f.u.ConfigureAutoUpdate(enabled, 12); close(applied) }()
@@ -405,7 +402,6 @@ func TestCoreUpdaterAutomaticRechecksPolicyAndVersionAtCommit(t *testing.T) {
 			f.u.beforeCommit = func() { close(ready); <-release }
 			f.u.ConfigureAutoUpdate(true, 6)
 			old := f.job()
-			f.clock.ticker(t, 0).fire(t, time.Now())
 			coreAutomaticDone(t, ready)
 			switch change {
 			case "disable":
@@ -445,7 +441,6 @@ func TestCoreUpdaterAutomaticCannotRestartAfterWaitingForReload(t *testing.T) {
 	})
 	f.u.ConfigureAutoUpdate(true, 1)
 	old := f.job()
-	f.clock.ticker(t, 0).fire(t, time.Now())
 	coreAutomaticDone(t, ready)
 	f.u.ConfigureAutoUpdate(false, 1)
 	close(release)
@@ -463,7 +458,6 @@ func TestCoreUpdaterAutomaticPreservesExternalReplacement(t *testing.T) {
 			ready, release := make(chan struct{}), make(chan struct{})
 			f.u.beforeCommit = func() { close(ready); <-release }
 			f.u.ConfigureAutoUpdate(true, 1)
-			f.clock.ticker(t, 0).fire(t, time.Now())
 			coreAutomaticDone(t, ready)
 			info, err := os.Stat(f.path)
 			if err != nil {
@@ -518,21 +512,18 @@ func TestCoreUpdaterAutomaticSharesManualGateAndInstalledVersion(t *testing.T) {
 				}
 				return false
 			})
-			f.u.ConfigureAutoUpdate(true, 1)
-			timer := f.clock.ticker(t, 0)
 			manualDone := make(chan error, 1)
 			if manualFirst {
 				go func() { manualDone <- f.u.UpdateContext(context.Background(), f.path, ReleaseChannel, false) }()
-			} else {
-				timer.fire(t, time.Now())
+				coreAutomaticDone(t, started)
 			}
+			f.u.ConfigureAutoUpdate(true, 1)
+			timer := f.clock.ticker(t, 0)
 			coreAutomaticDone(t, started)
-			if manualFirst {
-				at := time.Now()
-				timer.fire(t, at)
-				coreAutomaticWait(t, func() bool { return f.u.NextCheck() == at.Add(time.Hour).UTC().Format(time.RFC3339) })
-			} else if err := f.u.UpdateContext(context.Background(), f.path, ReleaseChannel, false); !errors.Is(err, ErrCoreUpdateBusy) {
-				t.Fatalf("manual update did not share automatic operation gate: %v", err)
+			if !manualFirst {
+				if err := f.u.UpdateContext(context.Background(), f.path, ReleaseChannel, false); !errors.Is(err, ErrCoreUpdateBusy) {
+					t.Fatalf("manual update did not share automatic operation gate: %v", err)
+				}
 			}
 			close(release)
 			if manualFirst {
@@ -580,7 +571,6 @@ func TestCoreUpdaterAutomaticChecksumFailureRecoversNextCycle(t *testing.T) {
 	})
 	f.u.ConfigureAutoUpdate(true, 1)
 	timer := f.clock.ticker(t, 0)
-	timer.fire(t, time.Now())
 	coreAutomaticWait(t, func() bool { return f.requests.Load() == 3 && f.settled() })
 	f.unchanged(t)
 	fail.Store(false)
@@ -607,7 +597,6 @@ func TestCoreUpdaterAutomaticRechecksAfterManualInstallWinsCommit(t *testing.T) 
 		return err
 	})
 	f.u.ConfigureAutoUpdate(true, 1)
-	f.clock.ticker(t, 0).fire(t, time.Now())
 	coreAutomaticDone(t, ready)
 	// The automatic archive is ready but the executor's transaction is not.
 	// A manual install is now allowed to win, and its version must be honored.
@@ -629,9 +618,14 @@ func TestCoreUpdaterAutomaticRechecksAfterManualInstallWinsCommit(t *testing.T) 
 
 func TestCoreUpdaterAutomaticRequiresRuntimeRestartHandler(t *testing.T) {
 	f := newCoreAutomaticFixture(t, "mihomo-optimized-v1.0.0", "mihomo-optimized-v1.0.1", nil)
+	restart := f.u.restartHandler
 	f.u.SetAutomaticRestartHandler(nil)
 	f.u.ConfigureAutoUpdate(true, 6)
 	if !f.u.AutoUpdate() || f.job() != nil || f.u.NextCheck() != "" || f.requests.Load() != 0 {
 		t.Fatal("embedded updater scheduled replacement of the host executable")
+	}
+	f.u.SetAutomaticRestartHandler(restart)
+	if err := f.commitResult(t); err != nil || f.restarts.Load() != 1 {
+		t.Fatal("late runtime registration lost the initial check", err)
 	}
 }
