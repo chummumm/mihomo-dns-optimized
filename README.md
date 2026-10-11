@@ -1,6 +1,6 @@
-# Clash Dashboard：流光界面与 DNS 状态
+# mihomo-optimized：流光面板与 DNS 状态
 
-在现有原版 Clash Dashboard 上维护，采用“流光”网络控制台风格界面，保留纯内存 DNS 状态展示、连接列表刷新与计数修复。侧栏、代理、连接、日志、规则、DNS 和设置使用同一套面板、读数与青蓝流光视觉，读数变化有滚动、滑入和发光反馈，支持系统深浅色和减少动态效果偏好。连接列表、主机名排序和连接详情统一按 `host → sniffHost → destinationIP` 取值；原目标域名优先，旧内核没有 `sniffHost` 时仍正常工作。
+mihomo-optimized 的配套网络控制台，基于原版 Clash Dashboard 维护，采用“流光”界面，保留纯内存 DNS 状态展示、连接列表刷新与计数修复。侧栏、代理、连接、日志、规则、DNS 和设置使用同一套面板、读数与青蓝流光视觉，支持系统深浅色和减少动态效果偏好。连接列表、主机名排序和连接详情统一按 `host → sniffHost → destinationIP` 取值；原目标域名优先，旧内核没有 `sniffHost` 时仍正常工作。
 
 连接展示不会写回连接元数据，不会改变实际连接目标或 DNS 分流。使用 `enhanced-mode: normal` 和 `override-destination: false` 时，已经嗅探到的域名也能显示；未获得任何域名的连接仍显示 IP。
 
@@ -38,7 +38,7 @@ DNS 连接在列表和详情中统一显示类型 `DNS`，节点链只显示实�
 
 ## 配置编辑
 
-设置页的“编辑配置”读取当前控制器正在使用的 YAML 文件，支持行号、光标位置和 Ctrl-S / Cmd-S 保存。需要本仓库 `v1.19.32-optimized-12` 或后续内核提供的 `/configs/file` API，并沿用控制器鉴权。
+设置页的“编辑配置”读取当前控制器正在使用的 YAML 文件，支持行号、光标位置和 Ctrl-S / Cmd-S 保存。使用本仓库 `mihomo-optimized-v1.0.0` 内核提供的 `/configs/file` API，并沿用控制器鉴权。
 
 **保存只写配置文件，不立即应用。** 保存时检查单个 YAML 文档及基础字段类型；要使修改生效，关闭编辑器后点击原有“重新加载配置”，由内核执行完整配置校验和应用。读取和保存不触发内核重载，不清理 DNS 缓存、观测或现有连接；完整重载沿用内核原有规则。
 
@@ -72,41 +72,19 @@ DNS 页由本二开内核的 `/dns/observability` API 提供数据：
 
 浏览器只保留当前页与正在显示的有限聚合，不向 `localStorage`、`IndexedDB` 或 PWA 缓存写 DNS 数据。查询记录默认暂停自动刷新，手动开启实时后也不会累积已看过的页面；离页、隐藏标签页或切换控制器会取消对应请求。常规 reload 保留内核观测，关闭观测释放数据，重新开启或重启从零开始。
 
-旧内核没有这些 API 时，DNS 页会明确提示不支持并停止轮询，其他页面继续工作。默认随 `dns.enable` 收集，可设 `dns.observability: false` 并完整重载关闭。协议和后端边界见 [DNS 状态文档](https://github.com/chummumm/mihomo-dns-optimized/blob/main/docs/dns-observability.md)。
+旧内核没有这些 API 时，DNS 页会明确提示不支持并停止轮询，其他页面继续工作。默认随 `dns.enable` 收集，可设 `dns.observability: false` 并完整重载关闭。协议和后端边界见 [DNS 状态文档](https://github.com/chummumm/mihomo-optimized/blob/main/docs/dns-observability.md)。
 
 ## 安装和更新
 
-面板版本使用纯 `x.y.z` 格式（当前 `0.3.7`），不添加后缀。请搭配本仓库 `v1.19.32-optimized-13` 或后续版本，以使用内核管理的面板自动更新；配置编辑与手动更新检查从 `v1.19.32-optimized-12` 起可用，旧内核保留其他功能的兼容显示。
+面板版本使用纯 `x.y.z` 格式（当前 `0.4.0`），产品与构建元数据名称统一为 **`mihomo-optimized`**。请搭配本仓库 `mihomo-optimized-v1.0.0` 或后续内核使用。
 
-源码维护在本仓库的 [`clash-dashboard`](https://github.com/chummumm/mihomo-dns-optimized/tree/clash-dashboard) 分支。构建后的静态文件维护在 [`clash-dashboard-dist`](https://github.com/chummumm/mihomo-dns-optimized/tree/clash-dashboard-dist) 分支，使用独立 UI 工作流，不创建内核发行版。
+源码维护在本仓库的 [`clash-dashboard`](https://github.com/chummumm/mihomo-optimized/tree/clash-dashboard) 分支。构建后的静态文件发布到固定的 [`clash-dashboard-dist`](https://github.com/chummumm/mihomo-optimized/tree/clash-dashboard-dist) 分支。内核固定从本仓库获取面板，并管理核心工作目录下的 **`./ui`**；在控制器地址的 `/ui/` 打开面板即可。
 
-下载可直接安装的 [UI ZIP](https://github.com/chummumm/mihomo-dns-optimized/archive/refs/heads/clash-dashboard-dist.zip)。解压后，把唯一顶层目录中的 `index.html`、`assets` 等文件放入现有 `external-ui` 目录；先备份旧 UI 文件。
+面板不提供面板路径、下载 URL、面板或内核的手动检查、安装、自动更新开关、间隔和更新状态区域。相关 Provider、API 调用、计时器和事件处理已删除；打开面板、切换控制器、重新联网和时间推移均不会发起 `/upgrade` 请求。旧版浏览器保存的自动更新偏好不会生效。内核的配置仍可通过原 YAML 编辑器读取、修改、保存，再使用原“重新加载配置”应用。
 
-也可以让 Mihomo 使用这个更新地址，保留你当前的 `external-ui` 路径：
+浏览器继续使用当前站点的 service worker 缓存静态资源。它只处理网页资源，不发起内核或面板安装请求；面板不会因后台安装主动刷新正在编辑的页面。编辑器原有未保存离页保护、关闭确认及冲突草稿保留均继续有效。若浏览器保留旧资源，可重新打开页面或使用浏览器刷新。
 
-```yaml
-external-ui-url: "https://github.com/chummumm/mihomo-dns-optimized/archive/refs/heads/clash-dashboard-dist.zip"
-external-ui-auto-update: true
-external-ui-update-interval: 24 # 检查间隔，单位：小时
-```
-
-设置页保留“检查更新”和“立即更新”，只读显示内核的自动更新状态、检查间隔及下次计划检查时间（若内核提供）。**自动更新开关和检查间隔均在 Mihomo YAML 配置文件中设置**：`external-ui-auto-update` 默认 `false`；`external-ui-update-interval` 为正整数小时，默认 `24`。修改配置后需要重载使其生效，再点击“检查更新”同步页面状态。
-
-自动更新由内核运行，关闭网页或浏览器后仍会检查。启动或启用后等待一个配置间隔才首次自动检查；重载相同配置不会重建计时器，修改间隔则从重载时按新间隔安排，手动检查或安装不重置自动计时。原有的空 UI 目录首次下载仍立即执行。
-
-面板不再保留自动更新开关，不创建检查计时器，也不因标签页可见性或网络变化发起检查或安装。升级前浏览器保存的自动拉取偏好会被忽略，不会自动转换为内核配置。打开面板或切换控制器只读取内核本地状态；手动“检查更新”只检查，“立即更新”才请求安装。
-
-更新源始终跟随内核当前生效的 **`external-ui-url`**，不限定本仓库。内核读取本地和远端面板 `build-info.json` 中的版本号，按 SemVer 比较：**只有远端版本严格高于本地，才判断为可自动更新**。版本相同或更低时不更新，即使文件内容有变化也不会重新安装。要求完整的 `x.y.z`，支持可选的小写 `v` 前缀及预发行版本（如 `0.3.8-rc.1`）；构建元数据（如 `+build.2`）不影响高低顺序。本地或远端缺少版本信息、版本格式无法识别时不自动安装，面板明确提示无法比较版本，并在原更新按钮处提供“手动安装”，按配置源显式安装。版本相同或更低时不显示该按钮。文件摘要继续用于完整性校验和安装身份记录，不决定是否有新版本。
-
-多个请求由内核合并控制，5 分钟内复用检查结果；更新源支持 ETag / Last-Modified 时使用条件请求，减少重复下载。
-
-本地状态接口为 `GET /upgrade/ui`，检查接口为 `GET /upgrade/ui?check=true`，手动安装继续使用 `POST /upgrade/ui`，均沿用控制器鉴权。内核先有界下载、解包和校验，再替换 UI 目录；下载或校验失败时保留原面板。只更新面板静态文件，不重新加载核心配置，不清 DNS 缓存或观测，也不重启内核。自动更新关闭时，已有 UI 目录非空则单纯重启内核仍不会替换旧面板。
-
-下载完成后提示手动刷新，不自动打断配置编辑；编辑器打开时不能刷新。当前页面由所选内核的 `/ui/` 托管时，“刷新面板”会仅注销该 UI 范围内的旧 service worker，再载入新文件，不清控制器设置和其他站点缓存。若正在使用另一个站点托管的页面，则提供“打开内核面板”，不会假称已更新当前外部站点。
-
-更新后重新打开或强制刷新面板。若浏览器仍缓存旧版，可在开发者工具的 Application → Service Workers 中注销旧 worker 后刷新，无需清除保存控制器设置的 localStorage。新构建使用自动接管更新的 worker，PWA 从当前 UI 路径启动。
-
-静态目录中的 `build-info.json` 标明源码提交与 UI 版本，`SHA256SUMS` 提供各文件校验值。GitHub Actions 的安装包 artifact 另含根目录直接可用的 `clash-dashboard-ui.zip` 及其校验值。
+静态目录中的 `build-info.json` 标明源码提交与 UI 版本，`SHA256SUMS` 提供各文件校验值。独立 UI 工作流不创建内核发行版；其构建 artifact 提供 `mihomo-optimized-ui.zip` 及校验值。
 
 ## 构建
 
@@ -118,12 +96,12 @@ corepack pnpm@8.15.9 test:unit
 corepack pnpm@8.15.9 build
 corepack pnpm@8.15.9 exec playwright install chromium
 corepack pnpm@8.15.9 test:browser
-python3 scripts/package-ui.py --source-sha "$(git rev-parse HEAD)" --repository chummumm/mihomo-dns-optimized
+python3 scripts/package-ui.py --source-sha "$(git rev-parse HEAD)" --repository chummumm/mihomo-optimized
 ```
 
 UI 工作流只处理 `clash-dashboard` 分支的代码变更及指向该分支的 PR。文档修改不触发构建，PR 不发布静态文件。浏览器回归使用本机模拟控制器，不连接生产设备；发布前验证来源计数与筛选、底部刷新、关闭历史上限、滚动位置、DNS API 兼容与内存生命周期，以及移动界面、重载、测速和控制器切换边界。
 
-日志回归另验证全局 `silent` 下的等级选择、鼠标与键盘操作、菜单滚动、200 条内存上限，以及切换等级不会发送配置修改或缓存清理请求。配置编辑与面板更新回归覆盖冲突保留草稿、控制器切换、错误兼容、文件与运行态分离，以及通用更新源和旧 service worker 切换。
+日志回归另验证全局 `silent` 下的等级选择、鼠标与键盘操作、菜单滚动、200 条内存上限，以及切换等级不会发送配置修改或缓存清理请求。配置编辑回归覆盖冲突保留草稿、控制器切换、错误兼容及文件与运行态分离。更新移除回归验证两种语言均没有更新控件，多个页面、控制器切换、联网事件和长时间运行均不发起更新请求，同时验证 YAML 保存、重载与草稿保护仍可用。
 
 ## 原项目与许可
 

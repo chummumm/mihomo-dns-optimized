@@ -1,4 +1,4 @@
-name: Clash Dashboard
+name: mihomo-optimized dashboard
 
 on:
   push:
@@ -28,12 +28,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: clash-dashboard-${{ github.event.pull_request.number || github.ref }}
+  group: mihomo-optimized-dashboard-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
-    name: Build original UI
+    name: Build mihomo-optimized UI
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -63,20 +63,20 @@ jobs:
         run: python3 scripts/package-ui.py --source-sha "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY"
       - uses: actions/upload-artifact@v4
         with:
-          name: clash-dashboard-static
+          name: mihomo-optimized-ui-static
           path: dist/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
       - uses: actions/upload-artifact@v4
         with:
-          name: clash-dashboard-install
+          name: mihomo-optimized-ui-install
           path: artifacts/
           if-no-files-found: error
           retention-days: 14
 
   publish:
-    name: Publish UI update branch
+    name: Publish mihomo-optimized UI
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/clash-dashboard'
     runs-on: ubuntu-latest
@@ -86,7 +86,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: clash-dashboard-static
+          name: mihomo-optimized-ui-static
           path: ui-dist
       - name: Publish static files
         env:
@@ -105,7 +105,7 @@ jobs:
             echo 'A newer UI code change exists; skipping this publication.'
             exit 0
           fi
-          publish_dir="$RUNNER_TEMP/clash-dashboard-publish"
+          publish_dir="$RUNNER_TEMP/mihomo-optimized-ui-publish"
           if git ls-remote --exit-code --heads origin refs/heads/clash-dashboard-dist >/dev/null; then
             git fetch --no-tags origin refs/heads/clash-dashboard-dist
             git worktree add --detach "$publish_dir" FETCH_HEAD
@@ -120,7 +120,7 @@ jobs:
             echo 'The UI update branch already contains this build.'
             exit 0
           fi
-          git -C "$publish_dir" -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "Publish Clash Dashboard from $SOURCE_SHA"
+          git -C "$publish_dir" -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "Publish mihomo-optimized UI from $SOURCE_SHA"
           git fetch --no-tags origin refs/heads/clash-dashboard
           if git diff --quiet "$SOURCE_SHA" FETCH_HEAD -- . ':(top,exclude,glob)**/*.md' ':(top,exclude,glob)**/*.mdx' ':(top,exclude,glob)**/*.markdown' ':(top,exclude,glob)**/*.rst' ':(top,exclude,glob)**/*.adoc' ':(top,exclude)docs/**' ':(top,exclude)LICENSE' ':(top,exclude).all-contributorsrc'; then
             :

@@ -5,7 +5,6 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 
 import { Header, Card, Switch, Button, ButtonSelect, type ButtonSelectOptions, Input, Select, success, error } from '@components'
-import { DashboardUpdateSettings, useDashboardUpdates } from '@containers/DashboardUpdate'
 import { type Lang } from '@i18n'
 import { useObject } from '@lib/hook'
 import { jsBridge } from '@lib/jsBridge'
@@ -38,7 +37,6 @@ export default function Settings () {
     const [probeURL, setProbeURL] = useState(savedProbeURL)
     const [reloading, setReloading] = useState(false)
     const [editorOpen, setEditorOpen] = useState(false)
-    const { setEditorOpen: setUpdateEditorOpen } = useDashboardUpdates()
     const reloadRequest = useRef<AbortController | null>(null)
     const [info, set] = useObject({
         socks5ProxyPort: 7891,
@@ -53,11 +51,6 @@ export default function Settings () {
     }, [general, set])
 
     useEffect(() => { setProbeURL(savedProbeURL) }, [savedProbeURL])
-
-    useEffect(() => {
-        setUpdateEditorOpen(editorOpen)
-        return () => setUpdateEditorOpen(false)
-    }, [editorOpen, setUpdateEditorOpen])
 
     useEffect(() => { setEditorOpen(false) }, [client])
 
@@ -309,8 +302,6 @@ export default function Settings () {
                     </form>
                 </Card>
             </section>
-
-            <DashboardUpdateSettings />
 
             <section className="settings-section">
                 <h2 className="settings-section-title">{t('sections.system')}</h2>

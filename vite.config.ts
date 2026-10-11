@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs'
-
 import react from '@vitejs/plugin-react'
 import jotaiDebugLabel from 'jotai/babel/plugin-debug-label'
 import jotaiReactRefresh from 'jotai/babel/plugin-react-refresh'
@@ -9,9 +7,6 @@ import tsConfigPath from 'vite-tsconfig-paths'
 
 export default defineConfig(
     env => ({
-        define: {
-            DASHBOARD_VERSION: JSON.stringify(JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version),
-        },
         plugins: [
             // only use react-fresh
             env.mode === 'development' && react({
@@ -28,8 +23,8 @@ export default defineConfig(
                         type: 'image/png',
                     }],
                     start_url: './',
-                    short_name: 'Clash Dashboard',
-                    name: 'Clash Dashboard',
+                    short_name: 'mihomo-optimized',
+                    name: 'mihomo-optimized',
                     theme_color: '#141e2f',
                     background_color: '#f3f6f9',
                 },

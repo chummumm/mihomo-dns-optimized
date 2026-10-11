@@ -198,8 +198,6 @@ const CN = {
             direct: '直连',
             script: '脚本',
         },
-        versionString: '当前 ClashX 已是最新版本：{{version}}',
-        checkUpdate: '检查更新',
         sections: {
             system: '系统',
             proxy: '代理',
@@ -208,7 +206,7 @@ const CN = {
         },
         externalControllerSetting: {
             title: '编辑外部控制设置',
-            note: '请注意，修改该配置项并不会修改你的 Clash 配置文件，请确认修改后的外部控制地址和 Clash 配置文件内的地址一致，否则会导致 Dashboard 无法连接。',
+            note: '这里只修改面板连接方式，不会修改内核配置文件。请使用 mihomo-optimized 配置中的控制器地址。',
             host: 'Host',
             port: '端口',
             secret: '密钥',
