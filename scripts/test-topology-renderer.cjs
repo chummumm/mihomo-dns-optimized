@@ -21,12 +21,25 @@ class Events {
     count() { return [...this.listeners.values()].reduce((total, listeners) => total + listeners.size, 0) }
 }
 
-function fixture() {
+function fixture({ dark = false, bitmaps = false } = {}) {
     let now = 1000
     let nextFrame = 0
     const frames = new Map()
     const media = new Map()
-    const document = Object.assign(new Events(), { hidden: false, fonts: new Events() })
+    const surfaces = []
+    const pictures = []
+    const texts = []
+    // Offscreen canvases (the link layer and sprites) share the same counters.
+    const document = Object.assign(new Events(), {
+        hidden: false,
+        fonts: new Events(),
+        createElement() {
+            const ctx = context2d(true)
+            const canvas = { width: 0, height: 0, getContext: () => ctx }
+            surfaces.push(canvas)
+            return canvas
+        },
+    })
     const window = Object.assign(new Events(), {
         devicePixelRatio: 1,
         matchMedia(query) {
@@ -48,15 +61,39 @@ function fixture() {
         disconnect() { this.connected = false }
         emit() { if (this.connected) this.callback([]) }
     }
-    const metrics = { frames: 0, measurements: 0, arcs: 0 }
-    const ctx = {
-        font: '',
-        measureText(text) { metrics.measurements++; return { width: Array.from(text).length * 7 } },
-        clearRect() { metrics.frames++ },
-        arc() { metrics.arcs++ },
-        createLinearGradient() { return { addColorStop() {} } },
+    const metrics = { frames: 0, measurements: 0, arcs: 0, stamps: 0, strokes: 0, layerPaints: 0, blurs: 0, texts: 0 }
+    function context2d(offscreen) {
+        const context = {
+            font: '',
+            shadowBlur: 0,
+            measureText(text) { metrics.measurements++; return { width: Array.from(text).length * 7 } },
+            clearRect() { if (offscreen) metrics.layerPaints++; else metrics.frames++ },
+            arc() { metrics.arcs++ },
+            createLinearGradient() { return { addColorStop() {} } },
+            drawImage(image) {
+                assert.ok(!image.closed && image.width > 0 && image.height > 0, 'a released image is never drawn')
+                metrics.stamps++
+            },
+            stroke() { metrics.strokes++; if (context.shadowBlur > 0) metrics.blurs++ },
+            fill() { if (context.shadowBlur > 0) metrics.blurs++ },
+            fillText(text) { metrics.texts++; texts.push(text) },
+        }
+        for (const name of ['setTransform', 'save', 'restore', 'setLineDash', 'beginPath', 'moveTo', 'bezierCurveTo', 'roundRect', 'rect']) context[name] = () => {}
+        return context
     }
-    for (const name of ['setTransform', 'save', 'restore', 'setLineDash', 'beginPath', 'moveTo', 'bezierCurveTo', 'stroke', 'fill', 'roundRect', 'rect', 'fillText']) ctx[name] = () => {}
+    class OffscreenCanvas {
+        constructor(width, height) { this.width = width; this.height = height; this.ctx = context2d(true) }
+        getContext() { return this.ctx }
+        transferToImageBitmap() {
+            const image = {
+                width: this.width, height: this.height, closed: false,
+                close() { assert.equal(this.closed, false, 'a bitmap is released exactly once'); this.closed = true },
+            }
+            pictures.push(image)
+            return image
+        }
+    }
+    const ctx = context2d(false)
     const canvas = Object.assign(new Events(), {
         clientWidth: 900, clientHeight: 250, width: 0, height: 0, isConnected: true, style: {},
         getContext() { return ctx },
@@ -74,13 +111,18 @@ function fixture() {
         performance: { now: () => now },
         requestAnimationFrame(callback) { const id = ++nextFrame; frames.set(id, callback); return id },
         cancelAnimationFrame(id) { frames.delete(id) },
-        getComputedStyle() { return { getPropertyValue: name => name === '--panel-solid' ? '#ffffff' : '#0090c4' } },
+        getComputedStyle() { return { getPropertyValue: name => name === '--panel-solid' ? (dark ? '#0c1426' : '#ffffff') : '#0090c4' } },
+        ...(bitmaps ? { OffscreenCanvas } : {}),
     })
     vm.runInContext(compiled, context, { filename })
     const picked = []
     const renderer = new module.exports.TopologyRenderer(canvas, tooltip, { onPick: target => picked.push(target) })
     return {
-        renderer, canvas, tooltip, document, window, frames, media, intersections, resizes, metrics, picked,
+        renderer, canvas, tooltip, document, window, frames, media, intersections, resizes, metrics, picked, surfaces, pictures, texts,
+        setDark(value) {
+            dark = value
+            media.get('(prefers-color-scheme: dark)').emit('change')
+        },
         step(count = 1) {
             for (let i = 0; i < count; i++) {
                 now += 1000 / 60
@@ -153,6 +195,28 @@ test('flow and exits animate; offscreen and background churn retain only the lat
     f.renderer.destroy()
 })
 
+test('steady flow stamps sprites each frame without repainting links, blurs or text', () => {
+    const f = fixture({ dark: true })
+    f.renderer.setModel(model('steady'))
+    f.step(240)
+    assert.ok(f.renderer.particles.length > 0, 'particles keep flowing')
+    const before = { ...f.metrics }
+    f.step(60)
+    assert.equal(f.metrics.frames - before.frames, 60, 'every frame is still drawn')
+    assert.ok(f.metrics.stamps - before.stamps > 60 * 7, 'boxes and particles are stamped every frame')
+    assert.equal(f.metrics.layerPaints - before.layerPaints, 0, 'settled links are not repainted')
+    assert.equal(f.metrics.strokes - before.strokes, 0, 'no link strokes while nothing about them changes')
+    assert.equal(f.metrics.blurs - before.blurs, 0, 'no shadow blur per frame')
+    assert.equal(f.metrics.texts - before.texts, 0, 'no text layout per frame')
+    assert.ok(before.blurs > 0, 'dark glows were rendered once, into sprites')
+
+    const next = model('steady', 65536)
+    f.renderer.setModel(next)
+    f.step(1)
+    assert.equal(f.metrics.layerPaints - before.layerPaints, 1, 'new rates repaint the link layer once')
+    f.renderer.destroy()
+})
+
 test('reduced motion settles immediately and resumes live flow when the preference changes', () => {
     const f = fixture()
     f.renderer.setModel(model('flow'))
@@ -206,6 +270,101 @@ test('idle resize redraws geometry; long labels are fitted once and tooltips upd
     assert.ok(f.metrics.measurements > beforeFontLoad, 'self-hosted font completion refits canvas labels')
     f.renderer.destroy()
 })
+
+function released(image) {
+    return image.closed === true || (image.width === 0 && image.height === 0)
+}
+
+test('a cached card follows a node kind change even when its text and color stay the same', t => {
+    const f = fixture({ bitmaps: true })
+    t.after(() => f.renderer.destroy())
+    f.renderer.setModel(model('shape', 0))
+    f.step(240)
+    const groupCard = f.renderer.cards.get('g:shape').image
+    const updated = model('shape', 0)
+    updated.nodes[1].kind = 'source'
+    f.renderer.setModel(updated)
+    f.step(3)
+    assert.notEqual(f.renderer.cards.get('g:shape').image, groupCard, 'the former square status mark is replaced by a dot')
+    assert.ok(released(groupCard), 'the obsolete card is released')
+})
+
+for (const bitmaps of [false, true]) {
+    const backend = bitmaps ? 'ImageBitmap' : 'canvas fallback'
+
+    test(`cached text follows model, font and theme changes; resize rebuilds at the new scale (${backend})`, () => {
+        const f = fixture({ bitmaps })
+        f.renderer.setModel(model('cached', 0))
+        f.step(240)
+        assert.equal(f.frames.size, 0)
+        const initialFace = f.renderer.faces.get('x:cached').image
+        const initialCard = f.renderer.cards.get('x:cached').image
+
+        const updated = model('cached', 0)
+        updated.nodes[2].title = 'Updated node'
+        updated.nodes[2].sub = '48 ms'
+        f.renderer.setModel(updated)
+        f.step(3)
+        assert.ok(released(initialFace) && released(initialCard), 'obsolete text and its composed card are released')
+        assert.ok(f.texts.includes('Updated node') && f.texts.includes('48 ms'), 'fresh text is painted for the same node')
+
+        const beforeFont = f.renderer.faces.get('x:cached').image
+        const beforeFontMeasurements = f.metrics.measurements
+        f.document.fonts.emit('loadingdone')
+        assert.ok(released(beforeFont), 'font completion invalidates the cached text image')
+        f.step(3)
+        assert.ok(f.metrics.measurements > beforeFontMeasurements, 'font metrics are read again')
+
+        const beforeTheme = f.renderer.cards.get('x:cached').image
+        f.setDark(true)
+        assert.ok(released(beforeTheme), 'old colors are not reused after the theme changes')
+        f.step(3)
+        assert.ok(f.metrics.blurs > 0, 'the refreshed dark sprites contain the status glows')
+
+        const beforeResize = f.renderer.faces.get('x:cached').image
+        f.window.devicePixelRatio = 2
+        f.canvas.clientWidth = 450
+        f.resizes[0].emit()
+        f.step(240)
+        assert.equal(f.canvas.width, 900)
+        assert.equal(f.canvas.height, 500)
+        assert.ok(released(beforeResize), 'old-size text sprites are released')
+        assert.equal(f.renderer.faces.get('x:cached').image.height, 72, 'narrow text is painted at the new device scale')
+        assert.equal(f.frames.size, 0, 'an idle resized graph settles again')
+        f.renderer.destroy()
+        assert.ok([...f.pictures, ...f.surfaces].every(released), 'all generated images are released')
+    })
+
+    test(`departed nodes release sprites; hiding releases link buffers; destroy releases the rest (${backend})`, () => {
+        const f = fixture({ dark: true, bitmaps })
+        f.renderer.setModel(model('departing'))
+        f.step(120)
+        const oldFace = f.renderer.faces.get('x:departing').image
+        const oldCard = f.renderer.cards.get('x:departing').image
+        f.renderer.setModel(model('remaining'))
+        f.step(240)
+        assert.ok(released(oldFace) && released(oldCard), 'outgoing node images live through their fade and are then released')
+        assert.equal(f.renderer.faces.size, 3)
+        assert.equal(f.renderer.cards.size, 3)
+        const layers = f.renderer.layers.filter(Boolean)
+        assert.equal(layers.length, 2, 'both link buffers were used')
+
+        f.intersections[0].emit(false)
+        assert.ok(layers.every(released), 'full-size link buffers are released while offscreen')
+        assert.equal(f.frames.size, 0)
+        f.renderer.setModel(model('hidden'))
+        assert.equal(f.renderer.faces.size, 0, 'offscreen graph replacement releases the previous nodes without waiting for RAF')
+        assert.equal(f.renderer.cards.size, 0)
+        f.intersections[0].emit(true)
+        f.step(120)
+        assert.ok(f.renderer.particles.length > 0, 'new graph renders normally when shown again')
+        assert.equal(f.renderer.faces.size, 3)
+        f.renderer.destroy()
+        f.renderer.destroy()
+        assert.ok([...f.pictures, ...f.surfaces].every(released), 'destroy closes every bitmap or fallback canvas exactly once')
+        assert.equal(f.frames.size, 0)
+    })
+}
 
 test('destroy releases frames, observers, listeners and graph data; late work cannot restart it', () => {
     const f = fixture()
