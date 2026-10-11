@@ -71,6 +71,12 @@ func newCoreAutomaticFixture(t *testing.T, current, latest string, hook func(htt
 	if err := os.WriteFile(f.path, f.old, 0o751); err != nil {
 		t.Fatal(err)
 	}
+	// Keep the actual temporary file as the guard's anchor. Production resolves
+	// symlinks, which also normalizes Windows path spelling and Darwin /var.
+	fixturePath, err := filepath.EvalSymlinks(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	archive := coreAutomaticArchive(t)
 	digest := sha256.Sum256(archive)
 	target, err := coreTarget(runtime.GOOS, runtime.GOARCH, coreBuildSettings())
@@ -108,11 +114,18 @@ func newCoreAutomaticFixture(t *testing.T, current, latest string, hook func(htt
 		executable:     func() (string, error) { return f.path, nil },
 		currentVersion: func() string { return f.version.Load().(string) },
 	}
-	f.u.SetAutomaticRestartHandler(func(path string, commit func() error) error {
-		if path != f.path {
-			return fmt.Errorf("attempt to restart the real executable")
+	f.u.SetAutomaticRestartHandler(func(path string, commit func() error) (err error) {
+		// Report guard failures too, instead of leaving commitResult to time out.
+		defer func() { f.commits <- err }()
+		expected, err := os.Stat(fixturePath)
+		if err != nil {
+			return fmt.Errorf("inspect temporary executable: %w", err)
 		}
-		err := commit()
+		actual, err := os.Stat(path)
+		if err != nil || !actual.Mode().IsRegular() || !os.SameFile(expected, actual) {
+			return fmt.Errorf("attempt to restart outside the temporary fixture: %q", path)
+		}
+		err = commit()
 		if err == nil {
 			if !f.u.mu.TryLock() {
 				err = errors.New("restart retained the installation operation lock")
@@ -132,7 +145,6 @@ func newCoreAutomaticFixture(t *testing.T, current, latest string, hook func(htt
 		if err == nil {
 			f.restarts.Add(1)
 		}
-		f.commits <- err
 		return err
 	})
 	t.Cleanup(func() {
@@ -205,6 +217,71 @@ func (f *coreAutomaticFixture) commitResult(t *testing.T) error {
 		t.Fatal("automatic core never reached commit")
 		return nil
 	}
+}
+
+func TestCoreUpdaterAutomaticFixtureAcceptsPathAliases(t *testing.T) {
+	for _, alias := range []string{"dot-component", "directory-symlink", "windows-case"} {
+		t.Run(alias, func(t *testing.T) {
+			if alias == "windows-case" && runtime.GOOS != "windows" {
+				t.Skip("Windows path spelling regression")
+			}
+			f := newCoreAutomaticFixture(t, "mihomo-optimized-v1.0.0", "mihomo-optimized-v1.0.1", nil)
+			switch alias {
+			case "dot-component":
+				// Do not use Join: this spelling must reach production unchanged.
+				f.path = filepath.Dir(f.path) + string(os.PathSeparator) + "." + string(os.PathSeparator) + filepath.Base(f.path)
+			case "directory-symlink":
+				link := filepath.Join(t.TempDir(), "fixture-alias")
+				if err := os.Symlink(filepath.Dir(f.path), link); err != nil {
+					t.Skipf("directory symlinks unavailable: %v", err)
+				}
+				f.path = filepath.Join(link, filepath.Base(f.path))
+			case "windows-case":
+				f.path = strings.ToUpper(f.path)
+				if _, err := os.Stat(f.path); err != nil {
+					t.Skipf("case-sensitive temporary filesystem: %v", err)
+				}
+			}
+			resolved, err := filepath.EvalSymlinks(f.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resolved == f.path {
+				t.Fatal("fixture did not create a distinct path spelling")
+			}
+			f.u.ConfigureAutoUpdate(true, 1)
+			f.clock.ticker(t, 0).fire(t, time.Now())
+			if err := f.commitResult(t); err != nil {
+				t.Fatal("temporary executable alias was rejected", err)
+			}
+			if f.restarts.Load() != 1 {
+				t.Fatal("temporary executable alias did not complete one recorded restart")
+			}
+		})
+	}
+}
+
+func TestCoreUpdaterAutomaticFixtureRejectsOtherExecutables(t *testing.T) {
+	f := newCoreAutomaticFixture(t, "mihomo-optimized-v1.0.0", "mihomo-optimized-v1.0.1", nil)
+	host, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(t.TempDir(), "unrelated-core")
+	if err := os.WriteFile(other, f.old, 0o751); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{host, other} {
+		committed := false
+		err := f.u.restartHandler(path, func() error { committed = true; return nil })
+		if err == nil || committed {
+			t.Fatalf("fixture allowed a non-fixture executable to reach installation: %q", path)
+		}
+		if reported := f.commitResult(t); reported != err {
+			t.Fatal("fixture did not report its rejected restart immediately")
+		}
+	}
+	f.unchanged(t)
 }
 
 func TestCoreUpdaterAutomaticDefaultsReloadAndNoBrowser(t *testing.T) {
