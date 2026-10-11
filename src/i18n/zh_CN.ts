@@ -8,6 +8,8 @@ const CN = {
         Connections: '连接',
         DNS: 'DNS',
         Version: '版本',
+        Core: '内核',
+        Dashboard: '面板',
         Online: '在线',
         Offline: '离线',
     },
