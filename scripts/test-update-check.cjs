@@ -37,12 +37,18 @@ function makeController (name, version) {
 function items (current) {
     return [
         { id: 'kernel', kind: 'kernel', name: 'mihomo-optimized', status: 'pending', current_version: current.version, auto_update: false, update_interval: 6, interval_unit: 'hours' },
-        { id: 'ui', kind: 'ui', name: 'mihomo', status: 'pending', current_version: current.uiVersion, auto_update: true, update_interval: 12, interval_unit: 'hours' },
-        { id: 'geodata:geoip', kind: 'geodata', name: 'geoip.dat', status: 'pending', auto_update: true, update_interval: 48, interval_unit: 'hours' },
-        { id: 'geodata:geosite', kind: 'geodata', name: 'geosite.dat', status: 'pending', auto_update: true, update_interval: 48, interval_unit: 'hours' },
-        { id: 'rule-provider:remote', kind: 'rule-provider', name: `${current.name}-remote-rules`, status: 'pending', auto_update: true, update_interval: 3600, interval_unit: 'seconds' },
+        { id: 'ui', kind: 'ui', name: 'mihomo', status: 'pending', current_version: current.uiVersion, auto_update: true, update_interval: 12, interval_unit: 'hours', ...schedule(7200000) },
+        { id: 'geodata:geoip', kind: 'geodata', name: 'geoip.dat', status: 'pending', auto_update: true, update_interval: 48, interval_unit: 'hours', ...schedule(172800000) },
+        { id: 'geodata:geosite', kind: 'geodata', name: 'geosite.dat', status: 'pending', auto_update: true, update_interval: 48, interval_unit: 'hours', ...schedule(172800000) },
+        { id: 'rule-provider:remote', kind: 'rule-provider', name: `${current.name}-remote-rules`, status: 'pending', auto_update: true, update_interval: 3600, interval_unit: 'seconds', ...schedule(3600000) },
         { id: 'rule-provider:local', kind: 'rule-provider', name: `${current.name}-local-rules`, status: 'skipped', reason: 'local_provider', auto_update: false },
     ]
+}
+
+// Deliberately wrong device calendar time. The actual timer delay must be
+// mapped to the browser clock; the policy interval is not its remaining delay.
+function schedule (remaining) {
+    return { next_check: '1970-01-02T00:00:00Z', next_check_in_ms: remaining, auto_update_state: 'scheduled' }
 }
 
 function idle (current) {
@@ -230,6 +236,11 @@ async function main () {
         localStorage.setItem('profile', JSON.stringify({ autoUpdateDashboard: true, autoUpdateCore: true }))
     }, { port: a.port, secret: a.secret })
     const page = await context.newPage()
+    // Use one CDP session for both the initial zone and later changes. A
+    // context-level timezoneId would reserve the override in Playwright's own
+    // session and make a second session's override fail before the assertion.
+    const devtools = await context.newCDPSession(page)
+    await devtools.send('Emulation.setTimezoneOverride', { timezoneId: 'Asia/Shanghai' })
     page.setDefaultTimeout(10000)
     page.on('pageerror', reason => errors.push(String(reason)))
     page.on('request', request => {
@@ -238,7 +249,7 @@ async function main () {
         }
     })
     page.on('framenavigated', frame => { if (frame === page.mainFrame()) navigations++ })
-    await page.clock.install()
+    await page.clock.install({ time: new Date('2026-10-12T15:58:00Z') })
     const hash = (current, route = 'settings') => `/${route}?host=127.0.0.1&port=${current.port}&secret=${encodeURIComponent(current.secret)}&protocol=http:`
     const navigate = async (current, route) => page.evaluate(value => { location.hash = value }, hash(current, route))
     const updates = page.locator('.settings-update')
@@ -272,6 +283,49 @@ async function main () {
     assert.match(await row('geodata:geoip').textContent(), /every 48 h/)
     assert.match(await row('rule-provider:remote').textContent(), /every 3600 s/)
     assert.match(await row('rule-provider:local').textContent(), /Local provider/)
+
+    const nextTime = id => row(id).locator('.settings-update-schedule time')
+    assert.equal(await nextTime('kernel').count(), 0, 'disabled core schedule has no invented time')
+    assert.equal(await nextTime('rule-provider:local').count(), 0, 'local rules have no automatic download time')
+    assert.match(await nextTime('ui').textContent(), /10\/13\/2026/, 'Shanghai display crosses midnight using the browser calendar')
+    assert.match(await nextTime('ui').textContent(), /GMT\+8/)
+    assert.equal(await updates.locator('details > summary time').count(), 2, 'both collapsed resource classes expose their next check')
+    const corePolicy = a.snapshot.items.find(item => item.id === 'kernel')
+    Object.assign(corePolicy, { auto_update: true, ...schedule(21600000) })
+    await poll(async () => await nextTime('kernel').count() === 1, 'new core automatic policy appears through read-only schedule refresh', 31000)
+    for (const id of ['kernel', 'ui', 'geodata:geoip', 'geodata:geosite', 'rule-provider:remote']) {
+        const due = Date.parse(await nextTime(id).getAttribute('datetime'))
+        const browserNow = await page.evaluate(() => Date.now())
+        const remaining = a.snapshot.items.find(item => item.id === id).next_check_in_ms
+        assert(Math.abs(due - browserNow - remaining) < 10000, `${id} uses actual remaining delay and browser clock, not device 1970 or policy interval`)
+    }
+    assert.equal(posts().length, 0, 'schedule refresh never starts an installation')
+
+    await devtools.send('Emulation.setTimezoneOverride', { timezoneId: 'America/Los_Angeles' })
+    await poll(async () => /PDT/.test(await nextTime('ui').textContent()), 'time zone changes follow the browser default', 31000)
+    assert.match(await nextTime('ui').textContent(), /10\/12\/2026/, 'the same instant is still the preceding date in Los Angeles')
+    const wallClock = await page.evaluate(() => Date.now())
+    await page.clock.setSystemTime(new Date(wallClock + 7 * 24 * 3600000))
+    await poll(async () => /10\/19\/2026/.test(await nextTime('ui').textContent()), 'browser clock corrections also change displayed update dates', 31000)
+    await page.clock.setSystemTime(new Date(wallClock))
+    await devtools.send('Emulation.setTimezoneOverride', { timezoneId: 'Asia/Shanghai' })
+
+    const providerPolicy = a.snapshot.items.find(item => item.id === 'rule-provider:remote')
+    Object.assign(providerPolicy, { ...schedule(60000), auto_update_state: 'retrying' })
+    await poll(async () => /Next retry/.test(await row('rule-provider:remote').textContent()), 'provider error backoff uses its real retry deadline', 31000)
+    Object.assign(providerPolicy, { next_check: undefined, next_check_in_ms: undefined, auto_update_state: 'checking' })
+    await poll(async () => /Automatic check in progress/.test(await row('rule-provider:remote').textContent()), 'running provider waits for completion before reporting its following timer', 31000)
+    assert.equal(await nextTime('rule-provider:remote').count(), 0)
+    const uiPolicy = a.snapshot.items.find(item => item.id === 'ui')
+    Object.assign(uiPolicy, { next_check: undefined, next_check_in_ms: undefined, auto_update_state: undefined })
+    await poll(async () => /has not provided/.test(await row('ui').textContent()), 'old core missing schedule metadata degrades explicitly', 31000)
+    assert.equal(await nextTime('ui').count(), 0, 'the page cannot calculate now plus the configured 12 hours')
+    Object.assign(corePolicy, { auto_update: false })
+    await poll(async () => await nextTime('kernel').count() === 0, 'turning automatic updates off clears the displayed time', 31000)
+    Object.assign(uiPolicy, schedule(7200000))
+    Object.assign(providerPolicy, schedule(3600000))
+    await poll(async () => await nextTime('ui').count() === 1, 'configured schedules recover through GET', 31000)
+    console.log('PASS automatic schedules: all four classes, collapsed summaries, actual provider backoff, browser time zones/clock correction, disabled and legacy cases, GET-only refresh')
 
     await page.getByRole('button', { name: 'Edit configuration file', exact: true }).click()
     await until(async () => await text.inputValue().catch(() => '') === a.file.content, 'retained editor content')

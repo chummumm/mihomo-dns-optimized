@@ -17,6 +17,7 @@ interface View {
     disconnected: boolean
     unconfirmedStart?: boolean
     startRejected?: boolean
+    scheduleRequestedAt?: number
 }
 
 interface Session {
@@ -61,7 +62,7 @@ export function useUpdateTask (client: Client) {
         current.timer = setTimeout(() => { void read(current) }, delay)
     }
 
-    function accept (current: Session, value: unknown, acceptedPost = false) {
+    function accept (current: Session, value: unknown, requestedAt: number, acceptedPost = false) {
         const snapshot = readUpdateSnapshot(value)
         if (snapshot === undefined) throw new SyntaxError('Invalid update task')
         const attempt = current.awaitingAcceptance
@@ -79,15 +80,18 @@ export function useUpdateTask (client: Client) {
             loading: false,
             starting: false,
             disconnected: false,
+            scheduleRequestedAt: requestedAt,
         })
         if (updateTaskActive(snapshot)) schedule(current)
+        else if (snapshot.items.some(item => item.auto_update)) schedule(current, 30000)
     }
 
     async function read (current: Session) {
         if (current.busy || current.abort.signal.aborted) return
         current.busy = true
+        const requestedAt = performance.now()
         try {
-            accept(current, (await current.client.getUpdateTask(current.abort.signal)).data)
+            accept(current, (await current.client.getUpdateTask(current.abort.signal)).data, requestedAt)
         } catch (reason) {
             if (current.abort.signal.aborted) return
             const problem = problemFor(reason)
@@ -102,6 +106,7 @@ export function useUpdateTask (client: Client) {
                 problem: retry && expired ? 'interrupted' : problem,
             })
             if (retry && !expired) schedule(current, 2000)
+            else if (!following && problem === 'network' && current.view.snapshot?.items.some(item => item.auto_update)) schedule(current, 30000)
         } finally {
             current.busy = false
         }
@@ -113,7 +118,8 @@ export function useUpdateTask (client: Client) {
         setState({ client, view: INITIAL })
         void read(current)
         const visible = () => {
-            if (!document.hidden && (updateTaskActive(current.view.snapshot) || current.view.disconnected)) void read(current)
+            if (document.hidden) clearTimeout(current.timer)
+            else void read(current)
         }
         document.addEventListener('visibilitychange', visible)
         return () => {
@@ -146,8 +152,9 @@ export function useUpdateTask (client: Client) {
         const requestId = Array.from(crypto.getRandomValues(new Uint8Array(16)), value => value.toString(16).padStart(2, '0')).join('')
         current.awaitingAcceptance = { instance: snapshot.instance_id, request: requestId }
         publish(current, { starting: true, previous: undefined, restart: undefined, problem: undefined, unconfirmedStart: false, startRejected: false })
+        const requestedAt = performance.now()
         try {
-            accept(current, (await current.client.startUpdateTask(current.abort.signal, snapshot.instance_id, requestId)).data, true)
+            accept(current, (await current.client.startUpdateTask(current.abort.signal, snapshot.instance_id, requestId)).data, requestedAt, true)
         } catch (reason) {
             if (current.abort.signal.aborted) return
             const problem = problemFor(reason)
