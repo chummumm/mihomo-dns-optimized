@@ -2,6 +2,14 @@
 
 项目使用独立版本 **`mihomo-optimized-vX.Y.Z`**，首版为 `mihomo-optimized-v1.0.0`。`main` 的源码、依赖或构建配置变更在全部测试和完整编译成功后生成固定提交的 GitHub Release。Latest 仅在该构建仍对应当前 `main` 时更新；PR 只生成 Actions artifacts。纯文档变更不消耗版本号，也不触发自动发布。
 
+## 1.0.9：修复接口重建时的 sysctl 瞬态错误
+
+`mihomo-optimized-v1.0.9` 修复接口快照与 sysctl 读写之间的竞态：`utun` 等接口在快照后消失或重建时，其 `forwarding`、`rp_filter` 等逐接口项可能已经不存在。即使 `ENOENT` 被路径和操作上下文包装，也按接口瞬态缺项处理，覆盖 IPv4 / IPv6 转发与反向路径过滤的同类读写窗口，避免误判为持续的配置故障。
+
+这项修复保留已准备的黑洞保护；后续网络事件和完整快照继续按真实接口索引及后端状态收敛，重建接口使用自己的原值。权限不足、只读文件系统、全局 sysctl 读写失败等真实故障继续报错并保持保护，不因忽略逐接口 `ENOENT` 而放行。
+
+观察或核对故障后的首次完整应用成功会输出一次 INFO 级别的 `Network synchronization restored` 日志，并列出 TCP / UDP 各地址族实际提交的 `ready`、`protected` 或 `disabled` 状态。核对恢复时，部分后端仍可能处于保护中；`ready` 也不代表 WAN 连通性探测通过。重复 RA 和后续健康核对不会重复输出这条日志，详见[系统事件驱动](transparent-proxy-plan.md#系统事件驱动)。
+
 ## 1.0.8：减少 PR 的重复全量构建
 
 从 `mihomo-optimized-v1.0.8` 起，普通 PR 使用 7 个代表目标，合并后的正式构建仍使用完整 37 目标矩阵。矩阵选择只减少 PR 的跨平台编译和打包任务：现有功能测试、race 检查、真实网络命名空间中的路由 / 防火墙与防泄漏测试、systemd 生命周期测试，以及 Windows / macOS 更新器测试全部保留。
@@ -144,7 +152,7 @@ python3 scripts/release-build.py matrix
 python3 scripts/release-build.py matrix --profile pr --base <base-sha> --head <head-sha>
 ```
 
-运行 `bash scripts/ci-check.sh build <target> <绝对输出目录> mihomo-optimized-v1.0.8 <ISO时间>` 可构建单个目标；版本参数须与当前 `PROJECT_VERSION` 一致，`amd64` / `arm64` 是 Linux 别名。依赖 `dpkg-deb`、`rpm`/`rpmbuild`/`rpm2cpio`、`cpio`、`zstd`、`fakeroot`、Python 3.12 和 MetaCubeX Go；Android 还需矩阵指定的固定 NDK。
+运行 `bash scripts/ci-check.sh build <target> <绝对输出目录> mihomo-optimized-v1.0.9 <ISO时间>` 可构建单个目标；版本参数须与当前 `PROJECT_VERSION` 一致，`amd64` / `arm64` 是 Linux 别名。依赖 `dpkg-deb`、`rpm`/`rpmbuild`/`rpm2cpio`、`cpio`、`zstd`、`fakeroot`、Python 3.12 和 MetaCubeX Go；Android 还需矩阵指定的固定 NDK。
 
 ## 内核自动更新
 

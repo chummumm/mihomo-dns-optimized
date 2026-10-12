@@ -155,6 +155,14 @@ flowchart TD
 
 接收循环只接收与排队，不执行耗时下载、重载或防火墙提交。单一应用队列串行收敛状态，所有入口共享同一份配置代次和对象所有权。
 
+从 `1.0.9` 起，观察或核对故障后，首次完整读取网络状态并成功应用路由、sysctl 与防火墙时，输出一次 INFO 恢复日志，例如：
+
+```text
+[Transparent Proxy] Network synchronization restored; applied backend availability: TCP=tproxy (IPv4=ready, IPv6=ready); UDP=tun (IPv4=ready, IPv6=protected)
+```
+
+这里记录本次已应用的后端状态：`ready` 表示对应协议 / 地址族的后端就绪，不包含 WAN 连通性探测；`protected` 表示仍通过保护规则阻断，可能因后端尚未就绪或正在进行受控重启；`disabled` 表示配置或地址族停用，协议为 `off` 则显示 `off`。因此核对恢复可以与部分流量仍受保护同时发生。普通 RA 和后续健康核对保持静默，不重复输出恢复日志。
+
 ### 复用范围与需要补齐的底层能力
 
 当前固定的 `sing-tun v0.4.27` 网络监视器只订阅 route / link，并通过无参数回调通知变化；它没有 address、rule、nftables 完整订阅，也没有完整的订阅故障恢复。其生命周期跟随 TUN listener，因此不能直接承担纯 TProxy 模式的独立管理。
@@ -199,6 +207,8 @@ WAN 地址、隐私地址轮换、接口重连、默认路由变化按 IPv4 / IP
 处理顺序为：自身出站与 TUN 回流防环 → 已标记的 TProxy 本机回流 → 接管接口范围 → FakeIP → 本地 / 特殊 / 动态前缀排除 → 本机端口排除 → 其余选中流量。不能一概排除 `lo`，因为 TProxy 本机 OUTPUT 流量正是经 local 路由回到 PREROUTING；`bypass-ports.udp` 和 `bypass-ports.tcp` 保持仅本机生效，且不抢在 FakeIP 之前。
 
 网关模式配置所需转发、rp_filter 和 IPv6 RA 接收。IPv4 对需要转发的接口设置 forwarding，避免全局 `ip_forward` 切换的额外重置；IPv6 所需的全局 forwarding 改动及默认/接口副作用，在写入前把原值保存在本进程内存中。原本接受 RA 的出口在转发期间使用 `accept_ra=2`，明确配置为 `0` 的接口保持不接受。退出只在当前值仍等于本模块写入值、接口身份也匹配时恢复原值。
+
+从 `1.0.9` 起，接口快照后设备消失造成的逐接口 sysctl `ENOENT`，包括带路径与操作上下文的包装错误，均按接口瞬态缺项处理。此处理覆盖 `utun` 等接口重建期间 `forwarding`、`rp_filter` 等项目的读取、写入和恢复窗口，并保留已准备的黑洞保护；后续网络事件和完整快照继续按真实接口索引及后端状态收敛，重建接口使用自己的原值。真实权限错误、只读文件系统和全局 sysctl 故障继续报错并进入保护，黑洞准备、实际设备校验和恢复转发的原有顺序不变。
 
 ## 启停、重载与外部修改
 

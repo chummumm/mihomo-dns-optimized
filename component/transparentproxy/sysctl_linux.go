@@ -40,6 +40,34 @@ func sysctlInterface(path string) string {
 	return ""
 }
 
+// Interface proc entries can disappear after a netlink snapshot or an earlier
+// read. Global/default settings are required, and a joined write/close failure
+// is harmless only when every cause is a missing entry.
+func isMissingInterfaceSysctl(path string, ifIndex int, err error) bool {
+	return ifIndex > 0 && sysctlInterface(path) != "" && onlySysctlNotExist(err)
+}
+
+func onlySysctlNotExist(err error) bool {
+	switch err := err.(type) {
+	case interface{ Unwrap() []error }:
+		found := false
+		for _, cause := range err.Unwrap() {
+			if cause == nil {
+				continue
+			}
+			if !onlySysctlNotExist(cause) {
+				return false
+			}
+			found = true
+		}
+		return found
+	case interface{ Unwrap() error }:
+		return onlySysctlNotExist(err.Unwrap())
+	default:
+		return errors.Is(err, os.ErrNotExist)
+	}
+}
+
 func validateOwnedSysctl(setting ownedSysctl) error {
 	maximum := 1
 	if setting.Path != "net/ipv4/ip_forward" {
@@ -149,6 +177,9 @@ func (s *linuxRouteSystem) ApplySysctls(ctx context.Context, state networkState,
 			return err
 		}
 		if err := s.ownSysctl(setting); err != nil {
+			if isMissingInterfaceSysctl(setting.Path, setting.InterfaceIndex, err) {
+				return nil
+			}
 			return fmt.Errorf("configure %s: %w", setting.Path, err)
 		}
 		return nil
@@ -162,7 +193,7 @@ func (s *linuxRouteSystem) ApplySysctls(ctx context.Context, state networkState,
 			if !gatewayInterface(config, state, link.Name) && !(config.Uses(ModeTUN) && link.Name == runtime.TunName) {
 				continue
 			}
-			if err := apply(desiredSysctl{Path: "net/ipv4/conf/" + link.Name + "/forwarding", Value: "1", InterfaceIndex: link.Index}); err != nil && !os.IsNotExist(err) {
+			if err := apply(desiredSysctl{Path: "net/ipv4/conf/" + link.Name + "/forwarding", Value: "1", InterfaceIndex: link.Index}); err != nil {
 				return err
 			}
 		}
@@ -199,7 +230,7 @@ func (s *linuxRouteSystem) ApplySysctls(ctx context.Context, state networkState,
 					continue
 				}
 				path := "net/ipv6/conf/" + link.Name + "/accept_ra"
-				if err := s.ownRouterAdvertisements(path, link.Index, inheritedRA, enableRA); err != nil && !os.IsNotExist(err) {
+				if err := s.ownRouterAdvertisements(path, link.Index, inheritedRA, enableRA); err != nil && !isMissingInterfaceSysctl(path, link.Index, err) {
 					return err
 				}
 				wanted[path] = true
@@ -229,7 +260,7 @@ func (s *linuxRouteSystem) ApplySysctls(ctx context.Context, state networkState,
 					force, err := s.readSysctl(forcePath)
 					if err == nil {
 						settings = append(settings, desiredSysctl{Path: forcePath, Value: force, InterfaceIndex: link.Index})
-					} else if !os.IsNotExist(err) {
+					} else if !isMissingInterfaceSysctl(forcePath, link.Index, err) {
 						return err
 					}
 				}
@@ -237,7 +268,7 @@ func (s *linuxRouteSystem) ApplySysctls(ctx context.Context, state networkState,
 				var originals []ownedSysctl
 				for _, setting := range settings {
 					current, err := s.readSysctl(setting.Path)
-					if os.IsNotExist(err) {
+					if isMissingInterfaceSysctl(setting.Path, setting.InterfaceIndex, err) {
 						continue
 					}
 					if err != nil {
@@ -314,7 +345,7 @@ func (s *linuxRouteSystem) ApplySysctls(ctx context.Context, state networkState,
 			captured = captured || config.Gateway.Enable && gatewayInterface(config, state, link.Name)
 			path := "net/ipv4/conf/" + link.Name + "/rp_filter"
 			value, err := s.readSysctl(path)
-			if os.IsNotExist(err) {
+			if isMissingInterfaceSysctl(path, link.Index, err) {
 				continue
 			}
 			if err != nil {
@@ -430,6 +461,9 @@ func (s *linuxRouteSystem) rememberSysctlEffects(settings []desiredSysctl) error
 			continue
 		}
 		current, err := s.readSysctl(setting.Path)
+		if isMissingInterfaceSysctl(setting.Path, setting.InterfaceIndex, err) {
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -487,9 +521,6 @@ func (s *linuxRouteSystem) restoreSysctlsLocked(ctx context.Context, keep map[st
 			continue
 		}
 		current, err := s.readSysctl(baseline.Path)
-		if os.IsNotExist(err) {
-			continue
-		}
 		if err != nil {
 			return err
 		}
@@ -501,7 +532,7 @@ func (s *linuxRouteSystem) restoreSysctlsLocked(ctx context.Context, keep map[st
 			if keep[path] || slices.ContainsFunc(s.state.Sysctls, func(old ownedSysctl) bool { return old.Path == path && old.InterfaceIndex == link.Index }) {
 				continue
 			}
-			if err := s.ownRouterAdvertisements(path, link.Index, &baseline, false); err != nil && !os.IsNotExist(err) {
+			if err := s.ownRouterAdvertisements(path, link.Index, &baseline, false); err != nil && !isMissingInterfaceSysctl(path, link.Index, err) {
 				return err
 			}
 		}
@@ -520,7 +551,7 @@ func (s *linuxRouteSystem) restoreSysctlsLocked(ctx context.Context, keep map[st
 			continue
 		}
 		current, err := s.readSysctl(setting.Path)
-		if os.IsNotExist(err) {
+		if isMissingInterfaceSysctl(setting.Path, setting.InterfaceIndex, err) {
 			continue
 		}
 		if err != nil {
@@ -555,7 +586,7 @@ func (s *linuxRouteSystem) restoreSysctlsLocked(ctx context.Context, keep map[st
 		for _, setting := range paths {
 			index := slices.IndexFunc(restore, func(old ownedSysctl) bool { return old.Path == setting.Path })
 			value, err := s.readSysctl(setting.Path)
-			if os.IsNotExist(err) {
+			if isMissingInterfaceSysctl(setting.Path, setting.InterfaceIndex, err) {
 				continue
 			}
 			if err != nil {
@@ -606,7 +637,7 @@ func (s *linuxRouteSystem) restoreSysctlsLocked(ctx context.Context, keep map[st
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := s.writeSysctl(setting.Path, setting.Original); err != nil && !os.IsNotExist(err) {
+		if err := s.writeSysctl(setting.Path, setting.Original); err != nil && !isMissingInterfaceSysctl(setting.Path, setting.InterfaceIndex, err) {
 			return fmt.Errorf("restore %s: %w", setting.Path, err)
 		}
 	}

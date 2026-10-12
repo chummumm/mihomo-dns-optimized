@@ -5,10 +5,12 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/metacubex/mihomo/log"
 	"golang.org/x/exp/slices"
 )
 
@@ -34,7 +36,7 @@ type managerTestSystem struct {
 	network                                networkState
 	ensureErr, quiesceErr                  error
 	recoverErr, closeRoutesErr, restoreErr error
-	snapshotErr, pruneErr                  error
+	snapshotErr, pruneErr, sysctlErr       error
 	prunedPolicies                         []routePolicy
 	watchMu                                sync.Mutex
 	watches                                []chan systemEvent
@@ -75,7 +77,7 @@ func (s *managerTestSystem) CloseRoutes(context.Context) error {
 }
 func (s *managerTestSystem) ApplySysctls(context.Context, networkState, Config, Runtime) error {
 	s.recorder.add("sysctls")
-	return nil
+	return s.sysctlErr
 }
 func (s *managerTestSystem) RestoreSysctls(context.Context) error {
 	s.recorder.add("restore-sysctls")
@@ -138,6 +140,130 @@ func TestManagerRoutesBeforeCaptureAndRetiredRoutesAfter(t *testing.T) {
 	want := []string{"snapshot", "read-capture", "recover-routes", "ensure", "sysctls", "capture", "prune"}
 	if !slices.Equal(r.all(), want) {
 		t.Fatalf("unsafe application order: %v", r.all())
+	}
+}
+
+func managerRecoveryLogs(t *testing.T) func() []string {
+	t.Helper()
+	subscription := log.Subscribe()
+	t.Cleanup(func() { log.UnSubscribe(subscription) })
+	return func() []string {
+		// A marker follows all earlier events through the same observable,
+		// so checking for absent/duplicate logs never depends on a sleep.
+		marker := "transparent proxy recovery log barrier: " + t.Name()
+		log.Debugln("%s", marker)
+		timeout := time.NewTimer(5 * time.Second)
+		defer timeout.Stop()
+		var recovered []string
+		for {
+			select {
+			case event := <-subscription:
+				if event.Payload == marker {
+					return recovered
+				}
+				if strings.Contains(event.Payload, "[Transparent Proxy] Network synchronization restored;") {
+					if event.LogLevel != log.INFO {
+						t.Fatalf("recovery was not informational: %+v", event)
+					}
+					recovered = append(recovered, event.Payload)
+				}
+			case <-timeout.C:
+				t.Fatal("log observable did not reach recovery barrier")
+			}
+		}
+	}
+}
+
+func TestManagerSysctlRecoveryLogsOnlyAfterCompleteApply(t *testing.T) {
+	recoveryLogs := managerRecoveryLogs(t)
+	m, system, wall, _ := testManager(t)
+	if logs := recoveryLogs(); len(logs) != 0 {
+		t.Fatalf("normal startup reported recovery: %v", logs)
+	}
+	system.sysctlErr = errors.New("interface sysctl disappeared")
+	err := m.reconcileLocked()
+	if err == nil {
+		t.Fatal("sysctl failure was accepted")
+	}
+	m.loseObservationLocked(err)
+	if !m.uncertain || !reflect.DeepEqual(wall.state, blockedFirewall(wall.state)) {
+		t.Fatal("failed synchronization did not retain capture protection")
+	}
+	if logs := recoveryLogs(); len(logs) != 0 {
+		t.Fatalf("failed sysctl apply reported recovery: %v", logs)
+	}
+	system.sysctlErr = nil
+	wall.applyErr = errors.New("firewall transaction failed")
+	if err := m.reconcileLocked(); err == nil || !m.uncertain {
+		t.Fatal("failed firewall apply cleared uncertainty")
+	}
+	if logs := recoveryLogs(); len(logs) != 0 {
+		t.Fatalf("sysctl alone falsely reported complete recovery: %v", logs)
+	}
+	wall.applyErr = nil
+	if err := m.reconcileLocked(); err != nil {
+		t.Fatal(err)
+	}
+	if m.uncertain || !wall.state.TProxyTCP4 || !wall.state.Tun4 || !wall.state.Tun6 {
+		t.Fatal("successful retry did not restore the applied capture state")
+	}
+	logs := recoveryLogs()
+	want := "[Transparent Proxy] Network synchronization restored; applied backend availability: TCP=tproxy (IPv4=ready, IPv6=ready); UDP=tun (IPv4=ready, IPv6=ready)"
+	if len(logs) != 1 || logs[0] != want {
+		t.Fatalf("unexpected recovery logs: %v", logs)
+	}
+	if err := m.reconcileLocked(); err != nil {
+		t.Fatal(err)
+	}
+	if logs := recoveryLogs(); len(logs) != 0 {
+		t.Fatalf("healthy repeated synchronization repeated recovery: %v", logs)
+	}
+}
+
+func TestManagerRecoveryReportsSelectedBackendAvailability(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*manager)
+		want   string
+	}{
+		{"tun-missing-ipv6-without-repair-intent", func(m *manager) {
+			m.runtime.TunIPv6Ready, m.runtime.TunIPv6Requested = false, false
+		}, "TCP=tproxy (IPv4=ready, IPv6=ready); UDP=tun (IPv4=ready, IPv6=protected)"},
+		{"tcp-tproxy-missing-ipv4", func(m *manager) {
+			m.runtime.TProxyTCP = false
+		}, "TCP=tproxy (IPv4=protected, IPv6=ready); UDP=tun (IPv4=ready, IPv6=ready)"},
+		{"udp-tproxy-missing-ipv6", func(m *manager) {
+			m.config.TCP, m.config.UDP = ModeTUN, ModeTProxy
+			m.runtime.TProxyUDPIPv6 = false
+		}, "TCP=tun (IPv4=ready, IPv6=ready); UDP=tproxy (IPv4=ready, IPv6=protected)"},
+		{"redir-missing-ipv6", func(m *manager) {
+			m.config.TCP = ModeRedir
+			m.runtime.RedirPort, m.runtime.RedirTCP = 7892, true
+		}, "TCP=redir (IPv4=ready, IPv6=protected); UDP=tun (IPv4=ready, IPv6=ready)"},
+		{"ipv6-disabled-and-udp-off", func(m *manager) {
+			m.runtime.IPv6 = false
+			m.config.UDP = ModeOff
+		}, "TCP=tproxy (IPv4=ready, IPv6=disabled); UDP=off"},
+		{"disabled", func(m *manager) {
+			m.config.Enable = false
+		}, "TCP=disabled; UDP=disabled"},
+		{"restart-protected", func(m *manager) {
+			m.restartPrepared = true
+		}, "TCP=tproxy (IPv4=protected, IPv6=protected); UDP=tun (IPv4=protected, IPv6=protected)"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recoveryLogs := managerRecoveryLogs(t)
+			m, _, _, _ := testManager(t)
+			m.loseObservationLocked(errors.New("network synchronization interrupted"))
+			test.change(m)
+			if err := m.reconcileLocked(); err != nil {
+				t.Fatal(err)
+			}
+			logs := recoveryLogs()
+			if len(logs) != 1 || !strings.HasSuffix(logs[0], test.want) {
+				t.Fatalf("recovery overstated applied backend availability: %v, want %s", logs, test.want)
+			}
+		})
 	}
 }
 
