@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -228,9 +229,11 @@ func runDaemon(options []hub.Option) error {
 	signal.Notify(hupSign, syscall.SIGHUP)
 	defer signal.Stop(termSign)
 	defer signal.Stop(hupSign)
+	stopRequests, stopWatching := relayStopSignals(termSign, executor.RequestShutdown)
+	defer stopWatching()
 	configured := false
 	defer func() {
-		shutdownUntilComplete(executor.Shutdown, termSign)
+		shutdownUntilComplete(executor.Shutdown, stopRequests)
 		if configured && postDown != "" {
 			if _, err := cmd.ExecShell(postDown); err != nil {
 				log.Errorln("post-down script error: %s", err.Error())
@@ -238,11 +241,14 @@ func runDaemon(options []hub.Option) error {
 		}
 	}()
 	if err := hub.Parse(configBytes, options...); err != nil {
+		if errors.Is(err, executor.ErrShuttingDown) {
+			return nil
+		}
 		return fmt.Errorf("parse config error: %w", err)
 	}
 	configured = true
 	select {
-	case <-termSign:
+	case <-stopRequests:
 		return nil
 	default:
 	}
@@ -253,14 +259,44 @@ func runDaemon(options []hub.Option) error {
 	}
 	for {
 		select {
-		case <-termSign:
+		case <-stopRequests:
 			return nil
 		case <-hupSign:
 			if err := hub.Parse(configBytes, options...); err != nil {
+				if errors.Is(err, executor.ErrShuttingDown) {
+					return nil
+				}
 				log.Errorln("Parse config error: %s", err.Error())
 			}
 		}
 	}
+}
+
+// Publish stop intent independently of configuration parsing and the executor
+// lock, then wake the existing exit/retry loop. Repeated signals never block
+// this relay while the main goroutine is busy with startup or cleanup.
+func relayStopSignals(received <-chan os.Signal, publish func()) (<-chan os.Signal, func()) {
+	requests := make(chan os.Signal, 1)
+	cancel, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-cancel:
+				return
+			case sig, ok := <-received:
+				if !ok {
+					return
+				}
+				publish()
+				select {
+				case requests <- sig:
+				default:
+				}
+			}
+		}
+	}()
+	return requests, func() { close(cancel); <-done }
 }
 
 // A failed graceful cleanup must not become a successful process exit. Keep

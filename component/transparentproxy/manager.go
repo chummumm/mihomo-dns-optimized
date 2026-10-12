@@ -431,9 +431,10 @@ func AbortRestart(state BackendState) error {
 }
 
 // CompleteRestart follows successful listener cleanup, before canceling the
-// running configuration. Restore this process's sysctl baseline while capture
-// is blocked, then release observation. Only working rules and blackholes cross
-// exec; the replacement reads them and samples its own current sysctl baseline.
+// running configuration. Remove retired policy identities while their ownership
+// is still in memory, then restore this process's sysctl baseline. Only current
+// working rules and blackholes cross exec; the replacement can recover them
+// from its configuration and samples its own current sysctl baseline.
 func CompleteRestart() error {
 	managed.Lock()
 	defer managed.Unlock()
@@ -447,7 +448,26 @@ func CompleteRestart() error {
 		return errors.New("refuse to relinquish unprepared restart protection")
 	}
 	ctx, cancel := context.WithTimeout(m.ctx, operationTimeout)
-	err := m.system.RestoreSysctls(ctx)
+	network, err := m.system.Snapshot(ctx)
+	if err != nil {
+		cancel()
+		m.mu.Unlock()
+		return fmt.Errorf("read transparent-proxy network state before restart: %w", err)
+	}
+	policies, _ := desiredState(m.config, m.runtime, network, m.uids, m.marks)
+	for i := range policies {
+		policies[i].Ready = false
+	}
+	// A previous reload may have left failed retired-resource cleanup pending.
+	// Those old marks need not appear in the current nft capture or YAML, so a
+	// fresh manager cannot safely infer their ownership after we relinquish it.
+	// Keep the current blackholes and guards while completing that cleanup.
+	if err := m.system.PruneRoutes(ctx, policies); err != nil {
+		cancel()
+		m.mu.Unlock()
+		return fmt.Errorf("retire transparent-proxy route policies before restart: %w", err)
+	}
+	err = m.system.RestoreSysctls(ctx)
 	cancel()
 	if err != nil {
 		m.mu.Unlock()

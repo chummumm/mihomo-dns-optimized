@@ -34,6 +34,8 @@ type managerTestSystem struct {
 	network                                networkState
 	ensureErr, quiesceErr                  error
 	recoverErr, closeRoutesErr, restoreErr error
+	snapshotErr, pruneErr                  error
+	prunedPolicies                         []routePolicy
 	watchMu                                sync.Mutex
 	watches                                []chan systemEvent
 }
@@ -52,15 +54,16 @@ func (s *managerTestSystem) Watch(context.Context) (<-chan systemEvent, io.Close
 }
 func (s *managerTestSystem) Snapshot(context.Context) (networkState, error) {
 	s.recorder.add("snapshot")
-	return s.network, nil
+	return s.network, s.snapshotErr
 }
 func (s *managerTestSystem) EnsureRoutes(context.Context, []routePolicy) error {
 	s.recorder.add("ensure")
 	return s.ensureErr
 }
-func (s *managerTestSystem) PruneRoutes(context.Context, []routePolicy) error {
+func (s *managerTestSystem) PruneRoutes(_ context.Context, policies []routePolicy) error {
 	s.recorder.add("prune")
-	return nil
+	s.prunedPolicies = slices.Clone(policies)
+	return s.pruneErr
 }
 func (s *managerTestSystem) QuiesceTUN(context.Context) error {
 	s.recorder.add("blackhole-ack")
@@ -205,8 +208,84 @@ func TestRestartRetainsCaptureAndBlackholesForNextProcess(t *testing.T) {
 	if err := CompleteRestart(); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(r.all(), []string{"restore-sysctls", "close-system"}) || managed.handoff != m || managed.current != nil {
+	if !slices.Equal(r.all(), []string{"snapshot", "prune", "restore-sysctls", "close-system"}) || managed.handoff != m || managed.current != nil {
 		t.Fatal("completed restart did not retain protection while relinquishing transport ownership")
+	}
+}
+
+func TestRestartCompletesRetiredPolicyCleanupBeforeHandoff(t *testing.T) {
+	m, s, _, r := testManager(t)
+	oldPolicy := m.config.Routing.TUN
+	cfg := m.config.Clone()
+	cfg.Routing.TUN.Mark, cfg.Routing.TUN.Table, cfg.Routing.TUN.Priority = 0x163, 102, 1012
+	s.pruneErr = errors.New("old policy cleanup temporarily failed")
+	if err := m.applyConfigurationLocked(cfg, testRuntime(), nil, m.marks); err != nil || !m.retryNeeded {
+		t.Fatalf("reload did not retain failed cleanup for retry: %v", err)
+	}
+	withPublicManager(t, m)
+	if err := PrepareRestart(); err != nil {
+		t.Fatal(err)
+	}
+	s.pruneErr, s.prunedPolicies = nil, nil
+	r.reset()
+	if err := CompleteRestart(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(r.all(), []string{"snapshot", "prune", "restore-sysctls", "close-system"}) {
+		t.Fatalf("restart lost retired ownership before cleanup: %v", r.all())
+	}
+	if len(s.prunedPolicies) != 4 {
+		t.Fatalf("restart discarded current dual-stack protection: %+v", s.prunedPolicies)
+	}
+	for _, policy := range s.prunedPolicies {
+		wanted := cfg.Routing.TProxy
+		if policy.Backend == ModeTUN {
+			wanted = cfg.Routing.TUN
+		} else if policy.Backend != ModeTProxy {
+			t.Fatalf("restart introduced an external cleanup scope: %+v", policy)
+		}
+		if policy.Ready || policy.Mark != wanted.Mark || policy.Table != wanted.Table || policy.Priority != wanted.Priority || policy.Mark == oldPolicy.Mark {
+			t.Fatalf("restart retained obsolete forwarding or broadened the keep scope: %+v", policy)
+		}
+	}
+}
+
+func TestRestartPolicyCleanupFailureRetainsOwnershipForRetry(t *testing.T) {
+	for _, stage := range []string{"snapshot", "prune"} {
+		t.Run(stage, func(t *testing.T) {
+			m, s, _, r := testManager(t)
+			withPublicManager(t, m)
+			if err := m.subscribe(); err != nil {
+				t.Fatal(err)
+			}
+			watch := m.watch
+			if err := PrepareRestart(); err != nil {
+				t.Fatal(err)
+			}
+			failure := errors.New("temporary " + stage + " failure")
+			want := []string{"snapshot"}
+			if stage == "snapshot" {
+				s.snapshotErr = failure
+			} else {
+				s.pruneErr = failure
+				want = append(want, "prune")
+			}
+			r.reset()
+			if err := CompleteRestart(); !errors.Is(err, failure) {
+				t.Fatalf("restart hid pending policy cleanup: %v", err)
+			}
+			if !slices.Equal(r.all(), want) || managed.current != m || managed.handoff != nil || !IsEnabled() || m.closed || !m.restartPrepared || m.ctx.Err() != nil || m.watch != watch {
+				t.Fatalf("failed cleanup relinquished ownership, observation or settings: %v", r.all())
+			}
+			s.snapshotErr, s.pruneErr = nil, nil
+			r.reset()
+			if err := CompleteRestart(); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(r.all(), []string{"snapshot", "prune", "restore-sysctls", "close-system"}) || managed.current != nil || managed.handoff != m || !m.closed || m.watch != nil {
+				t.Fatalf("retry did not complete cleanup before handoff: %v", r.all())
+			}
+		})
 	}
 }
 
@@ -349,7 +428,7 @@ func TestRestartSettingsFailureKeepsObservationUntilAbort(t *testing.T) {
 	if err := CompleteRestart(); !errors.Is(err, s.restoreErr) {
 		t.Fatalf("restart hid failed settings restoration: %v", err)
 	}
-	if managed.current != m || m.closed || !m.restartPrepared || !slices.Equal(r.all(), []string{"restore-sysctls"}) {
+	if managed.current != m || m.closed || !m.restartPrepared || !slices.Equal(r.all(), []string{"snapshot", "prune", "restore-sysctls"}) {
 		t.Fatal("failed restart restoration relinquished its observer")
 	}
 	if f.state.Tun4 || f.state.Tun6 || f.state.TProxyTCP4 {

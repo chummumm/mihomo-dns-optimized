@@ -49,7 +49,7 @@ func transparentProxyRuntime(cfg *config.Config) transparentproxy.Runtime {
 func ApplyConfigPatch(patch func() error) error {
 	mux.Lock()
 	defer mux.Unlock()
-	if stopping {
+	if ShutdownRequested() {
 		return ErrShuttingDown
 	}
 	return patch()

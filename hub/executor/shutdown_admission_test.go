@@ -2,6 +2,7 @@ package executor
 
 import (
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,12 +15,11 @@ import (
 func preserveStopAdmission(t *testing.T) {
 	t.Helper()
 	mux.Lock()
-	previous := stopping
-	stopping = false
+	previous := stopping.Swap(false)
 	mux.Unlock()
 	t.Cleanup(func() {
 		mux.Lock()
-		stopping = previous
+		stopping.Store(previous)
 		mux.Unlock()
 	})
 }
@@ -162,6 +162,103 @@ func TestControlledRestartKeepsRecoveryAdmission(t *testing.T) {
 			beginTransparentProxyApply = func(transparentproxy.Config, transparentproxy.Runtime) error { return admitted }
 			if err := ApplyConfig(&config.Config{General: &config.General{}}, true); !errors.Is(err, admitted) {
 				t.Fatalf("recoverable restart blocked full configuration application: %v", err)
+			}
+		})
+	}
+}
+
+func TestStopDuringRestartPreparationPreventsExecAndAllowsCleanup(t *testing.T) {
+	for _, installed := range []bool{false, true} {
+		name := "restart"
+		if installed {
+			name = "installed update"
+		}
+		t.Run(name, func(t *testing.T) {
+			preserveTransparentProxyIntegration(t)
+			preserveUpdateConfiguration(t)
+			previousUI := updater.CurrentUIUpdater()
+			t.Cleanup(func() { updater.SetUIUpdater(previousUI) })
+			entered, release := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			defer unblock()
+			prepareTransparentRestart = func() error { return nil }
+			cleanupTunListener = func() error { return nil }
+			var handedOff atomic.Bool
+			completeTransparentRestart = func() error {
+				close(entered)
+				<-release
+				handedOff.Store(true)
+				return nil
+			}
+			var cleaned atomic.Bool
+			closeTransparentProxy = func() error {
+				cleaned.Store(handedOff.Load())
+				return nil
+			}
+			var executed atomic.Bool
+			restarted, stopped := make(chan error, 1), make(chan error, 1)
+			go func() {
+				callback := func() { executed.Store(true) }
+				if installed {
+					restarted <- ApplyUpdateAndRestart(func() error { return nil }, callback)
+				} else {
+					restarted <- Restart(callback)
+				}
+			}()
+			<-entered // The restart owns mux until process replacement.
+			go func() { stopped <- Shutdown() }()
+			deadline := time.Now().Add(2 * time.Second)
+			for !ShutdownRequested() && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			published := ShutdownRequested()
+			unblock()
+			if err := <-restarted; !errors.Is(err, ErrShuttingDown) {
+				t.Errorf("prepared restart ignored the stop request: %v", err)
+			}
+			if err := <-stopped; err != nil {
+				t.Errorf("normal stop could not finish handoff cleanup: %v", err)
+			}
+			if !published || executed.Load() || !cleaned.Load() {
+				t.Fatalf("stop lost to exec: published=%v executed=%v cleaned=%v", published, executed.Load(), cleaned.Load())
+			}
+		})
+	}
+}
+
+func TestStopAfterCoreInstallSkipsRestartPreparation(t *testing.T) {
+	preserveTransparentProxyIntegration(t)
+	prepared, executed := false, false
+	prepareTransparentRestart = func() error { prepared = true; return nil }
+	err := ApplyUpdateAndRestart(func() error { RequestShutdown(); return nil }, func() { executed = true })
+	if !errors.Is(err, ErrShuttingDown) || prepared || executed {
+		t.Fatalf("stop during installation proceeded to restart: err=%v prepared=%v executed=%v", err, prepared, executed)
+	}
+}
+
+func TestExecCallbackStopIsReturnedToCaller(t *testing.T) {
+	for _, installed := range []bool{false, true} {
+		name := "restart"
+		if installed {
+			name = "installed update"
+		}
+		t.Run(name, func(t *testing.T) {
+			preserveTransparentProxyIntegration(t)
+			preserveUpdateConfiguration(t)
+			previousUI := updater.CurrentUIUpdater()
+			t.Cleanup(func() { updater.SetUIUpdater(previousUI) })
+			prepareTransparentRestart = func() error { return nil }
+			cleanupTunListener = func() error { return nil }
+			completeTransparentRestart = func() error { return nil }
+			var err error
+			if installed {
+				err = ApplyUpdateAndRestart(func() error { return nil }, RequestShutdown)
+			} else {
+				err = Restart(RequestShutdown)
+			}
+			if !errors.Is(err, ErrShuttingDown) {
+				t.Fatalf("exec cancellation was reported as a completed restart: %v", err)
 			}
 		})
 	}

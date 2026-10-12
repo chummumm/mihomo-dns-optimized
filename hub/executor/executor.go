@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 	_ "unsafe"
 
@@ -51,9 +52,17 @@ var mux sync.Mutex
 // ErrShuttingDown rejects new configuration work after a normal stop request.
 var ErrShuttingDown = errors.New("mihomo is shutting down")
 
-// Protected by mux. Only Shutdown sets this: a failed controlled restart must
-// still permit the running process to recover through configuration changes.
-var stopping bool
+// Publish stop intent before waiting for mux: another goroutine may own mux
+// while preparing an exec that would discard the waiting shutdown goroutine.
+// Controlled restart failures do not publish a normal stop request.
+var stopping atomic.Bool
+
+// RequestShutdown closes admission immediately, including during startup or
+// restart preparation. Shutdown performs the serialized resource cleanup.
+func RequestShutdown() { stopping.Store(true) }
+
+// ShutdownRequested permits a final check immediately before process exec.
+func ShutdownRequested() bool { return stopping.Load() }
 
 // Serialized by mux. A later configuration's activation must also wait for
 // earlier resets, since they can still touch the shared system resolver.
@@ -104,7 +113,7 @@ func ParseWithBytes(buf []byte) (*config.Config, error) {
 func ApplyConfig(cfg *config.Config, force bool) error {
 	mux.Lock()
 	defer mux.Unlock()
-	if stopping {
+	if ShutdownRequested() {
 		return ErrShuttingDown
 	}
 	wasManaged := transparentproxy.IsEnabled()
@@ -683,12 +692,12 @@ func updateIPTables(cfg *config.Config) {
 }
 
 func Shutdown() error {
+	RequestShutdown()
 	mux.Lock()
 	defer mux.Unlock()
 	// Keep admission closed across cleanup retries and post-down execution.
 	// Releasing mux must never allow a queued controller request to recreate
 	// the TUN or its capture policy after graceful cleanup has completed.
-	stopping = true
 	return shutdownLocked()
 }
 
