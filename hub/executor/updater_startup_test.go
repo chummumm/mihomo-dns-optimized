@@ -36,11 +36,13 @@ func updaterStartupConfig(t *testing.T) *config.Config {
 	t.Helper()
 	previousUI, previousHome := updater.CurrentUIUpdater(), C.Path.HomeDir()
 	coreEnabled, coreInterval := updater.DefaultCoreUpdater.AutomaticPolicy()
+	geoEnabled, geoInterval := updater.DefaultGeoUpdater.AutomaticPolicy()
 	previousMain, previousSystem, previousDone := resolver.DefaultResolver, resolver.SystemResolver, updaterResetDone
 	t.Cleanup(func() {
 		updater.StopAutomaticUpdates()
 		updater.DefaultCoreUpdater.SetAutomaticRestartHandler(nil)
 		updater.DefaultCoreUpdater.ConfigureAutoUpdate(coreEnabled, coreInterval)
+		updater.DefaultGeoUpdater.ConfigureAutoUpdate(geoEnabled, geoInterval)
 		updater.SetUIUpdater(previousUI)
 		resolver.DefaultResolver, resolver.SystemResolver = previousMain, previousSystem
 		updaterResetDone = previousDone
@@ -53,7 +55,7 @@ func updaterStartupConfig(t *testing.T) *config.Config {
 	if err := os.WriteFile(filepath.Join(updater.UIPath(), "index.html"), []byte("existing panel"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return &config.Config{General: &config.General{CoreUpdateInterval: 24, ExternalUIUpdateInterval: 24}}
+	return &config.Config{General: &config.General{CoreUpdateInterval: 24, ExternalUIUpdateInterval: 24, GeoUpdateInterval: 24}}
 }
 
 func TestCoreUpdaterStartupResetCapturesResolversAndOrdersGenerations(t *testing.T) {
@@ -114,23 +116,23 @@ func TestCoreUpdaterStartupPendingResetDoesNotDelayPolicyCancellation(t *testing
 	updater.DefaultCoreUpdater.SetAutomaticRestartHandler(func(string, func() error) error {
 		return errors.New("test must never restart its executable")
 	})
-	cfg.General.CoreAutoUpdate, cfg.General.ExternalUIAutoUpdate = true, true
+	cfg.General.CoreAutoUpdate, cfg.General.ExternalUIAutoUpdate, cfg.General.GeoAutoUpdate = true, true, true
 	finish := updateUpdater(cfg)
-	if updater.DefaultCoreUpdater.NextCheck() == "" || updater.CurrentUIUpdater().Status(context.Background(), false).NextCheck == "" {
+	if updater.DefaultCoreUpdater.NextCheck() == "" || updater.CurrentUIUpdater().Status(context.Background(), false).NextCheck == "" || updater.DefaultGeoUpdater.NextCheck() == "" {
 		t.Fatal("enabled policies were not published before readiness")
 	}
 	finish()
 	updaterStartupDone(t, entered)
 	firstDone := updaterResetDone
-	// The readiness barrier remains blocked until both policies are canceled.
+	// The readiness barrier remains blocked until all policies are canceled.
 	// This fixture never reaches a real HTTP request or host executable install.
-	cfg.General.CoreAutoUpdate, cfg.General.ExternalUIAutoUpdate = false, false
+	cfg.General.CoreAutoUpdate, cfg.General.ExternalUIAutoUpdate, cfg.General.GeoAutoUpdate = false, false, false
 	var finishDisabled func()
 	applied := make(chan struct{})
 	go func() { finishDisabled = updateUpdater(cfg); close(applied) }()
 	updaterStartupDone(t, applied)
 	status := updater.CurrentUIUpdater().Status(context.Background(), false)
-	if updater.DefaultCoreUpdater.AutoUpdate() || updater.DefaultCoreUpdater.NextCheck() != "" || status.AutoUpdate || status.NextCheck != "" {
+	if updater.DefaultCoreUpdater.AutoUpdate() || updater.DefaultCoreUpdater.NextCheck() != "" || status.AutoUpdate || status.NextCheck != "" || updater.GeoAutoUpdate() || updater.DefaultGeoUpdater.NextCheck() != "" {
 		t.Fatal("a pending reset delayed cancellation of the active update policy")
 	}
 	resolver.DefaultResolver = updaterStartupResolver{reset: func() {}}

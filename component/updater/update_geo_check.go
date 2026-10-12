@@ -175,16 +175,7 @@ func updateOneGeoDatabase(name string) error {
 	return err
 }
 
-func checkAndUpdateGeoDatabase(ctx context.Context, config GeoUpdateConfig, name string) (bool, error) {
-	if config.Context != nil {
-		if err := config.Context.Err(); err != nil {
-			return false, err
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	var source, path string
+func geoDatabaseResource(config GeoUpdateConfig, name string) (source, path string, err error) {
 	switch name {
 	case "geoip":
 		source, path = config.GeoIPURL, C.Path.GeoIP()
@@ -195,7 +186,23 @@ func checkAndUpdateGeoDatabase(ctx context.Context, config GeoUpdateConfig, name
 	case "geosite":
 		source, path = config.GeoSiteURL, C.Path.GeoSite()
 	default:
-		return false, errors.New("unknown GeoData family")
+		err = errors.New("unknown GeoData family")
+	}
+	return
+}
+
+func checkAndUpdateGeoDatabase(ctx context.Context, config GeoUpdateConfig, name string) (bool, error) {
+	if config.Context != nil {
+		if err := config.Context.Err(); err != nil {
+			return false, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	source, path, err := geoDatabaseResource(config, name)
+	if err != nil {
+		return false, err
 	}
 	if source == "" {
 		return false, errors.New("GeoData source is not configured")

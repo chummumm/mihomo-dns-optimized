@@ -143,8 +143,6 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	loadProvider(cfg.RuleProviders)
 	runtime.GC()
 	tunnel.OnRunning()
-	updater.SetGeoAutoUpdate(cfg.General.GeoAutoUpdate)
-	updater.SetGeoUpdateInterval(cfg.General.GeoUpdateInterval)
 	publishUpdateConfiguration(cfg)
 	finishUpdates()
 }
@@ -157,6 +155,7 @@ func GetGeneral() *config.General {
 	ports := listener.GetPorts()
 	uiUpdater := updater.CurrentUIUpdater()
 	coreAutoUpdate, coreUpdateInterval := updater.DefaultCoreUpdater.AutomaticPolicy()
+	geoAutoUpdate, geoUpdateInterval := updater.DefaultGeoUpdater.AutomaticPolicy()
 	var authenticator []string
 	if auth := authStore.Default.Authenticator(); auth != nil {
 		authenticator = auth.Users()
@@ -195,8 +194,8 @@ func GetGeneral() *config.General {
 			ASN:     geodata.ASNUrl(),
 			GeoSite: geodata.GeoSiteUrl(),
 		},
-		GeoAutoUpdate:            updater.GeoAutoUpdate(),
-		GeoUpdateInterval:        updater.GeoUpdateInterval(),
+		GeoAutoUpdate:            geoAutoUpdate,
+		GeoUpdateInterval:        geoUpdateInterval,
 		ExternalUIAutoUpdate:     uiUpdater.AutoUpdate(),
 		ExternalUIUpdateInterval: uiUpdater.UpdateInterval(),
 		CoreAutoUpdate:           coreAutoUpdate,
@@ -459,6 +458,7 @@ func updateUpdater(cfg *config.Config) func() {
 	uiUpdater := updater.NewFixedUIUpdater(general.ExternalUIAutoUpdate, general.ExternalUIUpdateInterval)
 	updater.SetUIUpdaterWhenReady(uiUpdater, ready)
 	updater.DefaultCoreUpdater.ConfigureAutoUpdateWhenReady(general.CoreAutoUpdate, general.CoreUpdateInterval, ready)
+	updater.DefaultGeoUpdater.ConfigureAutoUpdateWhenReady(general.GeoAutoUpdate, general.GeoUpdateInterval, ready)
 	// Bootstrap an empty managed directory without holding the reload mutex
 	// during a network download. The updater gate rechecks emptiness itself.
 	uiUpdater.StartAutoDownloadUI()

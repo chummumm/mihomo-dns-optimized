@@ -23,8 +23,12 @@ import (
 func geoCheckFixture(t *testing.T) {
 	t.Helper()
 	previousHome, previousLoader := C.Path.HomeDir(), geodata.LoaderName()
+	previousIP, previousSite, previousASN := C.GeoipName, C.GeositeName, C.ASNName
 	previous := configuredGeo.Swap(nil)
 	C.SetHomeDir(t.TempDir())
+	// Path discovery remembers filenames globally, including MMDB versus DAT.
+	// Isolate fixtures that exercise both formats from later matcher tests.
+	C.GeoipName, C.GeositeName, C.ASNName = "GeoIP.dat", "GeoSite.dat", "ASN.mmdb"
 	geodata.SetLoader("standard")
 	geodata.ClearGeoIPCache()
 	geodata.ClearGeoSiteCache()
@@ -33,6 +37,7 @@ func geoCheckFixture(t *testing.T) {
 			current.cancel()
 		}
 		C.SetHomeDir(previousHome)
+		C.GeoipName, C.GeositeName, C.ASNName = previousIP, previousSite, previousASN
 		geodata.SetLoader(previousLoader)
 		geodata.ClearGeoIPCache()
 		geodata.ClearGeoSiteCache()
