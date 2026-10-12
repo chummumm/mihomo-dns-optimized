@@ -108,26 +108,42 @@ func TestDatabaseUpdateDoesNotCloseReaderDuringLookup(t *testing.T) {
 	retained := IPReader{Reader: reader, databaseType: typeMaxmind, managed: state}
 	stop := make(chan struct{})
 	var queries atomic.Int32
-	var readers sync.WaitGroup
+	lookup := func() bool {
+		got := retained.LookupCode(net.ParseIP("1.2.3.4"))
+		if len(got) != 1 || (got[0] != "cn" && got[0] != "us") {
+			t.Errorf("lookup observed closed or partial data: %v", got)
+			return false
+		}
+		queries.Add(1)
+		return true
+	}
+	var readers, started sync.WaitGroup
 	for i := 0; i < 4; i++ {
 		readers.Add(1)
+		started.Add(1)
 		go func() {
 			defer readers.Done()
+			ok := lookup()
+			started.Done()
+			if !ok {
+				return
+			}
 			for {
 				select {
 				case <-stop:
 					return
 				default:
-					got := retained.LookupCode(net.ParseIP("1.2.3.4"))
-					if len(got) != 1 || (got[0] != "cn" && got[0] != "us") {
-						t.Errorf("lookup observed closed or partial data: %v", got)
+					if !lookup() {
 						return
 					}
-					queries.Add(1)
 				}
 			}
 		}()
 	}
+	// A fast writer may otherwise finish before the reader goroutines are
+	// scheduled, especially on Windows. Start only after every reader has
+	// performed its first real lookup; no sleep or scheduler guess is needed.
+	started.Wait()
 	current := old
 	for i := 0; i < 20; i++ {
 		data := next
