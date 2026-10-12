@@ -19,36 +19,21 @@ import (
 )
 
 var (
-	coreAutoArchiveOnce  sync.Once
-	coreAutoArchive      []byte
-	coreAutoArchiveError error
+	coreAutoArchiveOnce sync.Once
+	coreAutoArchive     []byte
 )
 
-// Only a temporary executable is ever installed. Darwin gets a native binary
-// so the real signing stage is also exercised, but the restart is a recorder.
+// Only a temporary native executable is installed and run with -v. Process
+// restart remains a recorder, so no test can replace the test runner itself.
 func coreAutomaticArchive(t *testing.T) []byte {
 	t.Helper()
 	coreAutoArchiveOnce.Do(func() {
-		payload := []byte("new core fixture, never executed\n")
-		if runtime.GOOS == "darwin" {
-			var path string
-			path, coreAutoArchiveError = os.Executable()
-			if coreAutoArchiveError == nil {
-				payload, coreAutoArchiveError = os.ReadFile(path)
-			}
-		}
-		if coreAutoArchiveError != nil {
-			return
-		}
 		member := DefaultCoreUpdater.CoreBaseName()
 		if runtime.GOOS == "windows" {
 			member += ".exe"
 		}
-		coreAutoArchive = testCoreArchive(t, payload, member, runtime.GOOS == "windows")
+		coreAutoArchive = testCoreArchive(t, coreTestExecutable(t), member, runtime.GOOS == "windows")
 	})
-	if coreAutoArchiveError != nil {
-		t.Fatal(coreAutoArchiveError)
-	}
 	return coreAutoArchive
 }
 
@@ -66,6 +51,7 @@ type coreAutomaticFixture struct {
 
 func newCoreAutomaticFixture(t *testing.T, current, latest string, hook func(http.ResponseWriter, *http.Request) bool) *coreAutomaticFixture {
 	t.Helper()
+	t.Setenv("MIHOMO_TEST_CORE_VERSION", latest)
 	f := &coreAutomaticFixture{path: filepath.Join(t.TempDir(), "isolated-core"), old: []byte("old core fixture, never executed\n"), commits: make(chan error, 8)}
 	f.version.Store(current)
 	if err := os.WriteFile(f.path, f.old, 0o751); err != nil {

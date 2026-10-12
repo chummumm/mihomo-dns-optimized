@@ -48,13 +48,14 @@ type CoreUpdater struct {
 	installedVersion string
 	pendingRestart   bool
 
-	// Tests can serve a complete release locally without changing global HTTP
-	// routing or executing the installed fixture. This is not a config option.
+	// Tests can serve a complete release locally and isolate filesystem faults
+	// without changing global HTTP routing. These are not config options.
 	releaseURL     string
 	newTicker      func(time.Duration) (<-chan time.Time, func())
 	executable     func() (string, error)
 	currentVersion func() string
 	beforeCommit   func()
+	linkBackup     func(string, string) error
 }
 
 var DefaultCoreUpdater = CoreUpdater{}
@@ -102,25 +103,6 @@ func (u *CoreUpdater) updateTransaction(ctx context.Context, currentExePath stri
 	default:
 		return fmt.Errorf("unsupported mihomo-optimized update channel %q", channel)
 	}
-	currentExePath, err = filepath.EvalSymlinks(currentExePath)
-	if err != nil {
-		return fmt.Errorf("locate current executable: %w", err)
-	}
-	info, err := os.Stat(currentExePath)
-	if err != nil || !info.Mode().IsRegular() {
-		if err == nil {
-			err = fmt.Errorf("not a regular file")
-		}
-		return fmt.Errorf("check current executable: %w", err)
-	}
-	identity, err := snapshotCoreExecutable(ctx, currentExePath)
-	if err != nil {
-		return fmt.Errorf("snapshot current executable: %w", err)
-	}
-	target, err := coreTarget(runtime.GOOS, runtime.GOARCH, coreBuildSettings())
-	if err != nil {
-		return err
-	}
 	baseURL := u.releaseURL
 	if baseURL == "" {
 		baseURL = coreReleaseURL
@@ -158,6 +140,22 @@ func (u *CoreUpdater) updateTransaction(ctx context.Context, currentExePath stri
 		}
 	}
 
+	// A bare daemon can keep running after its on-disk executable is moved or
+	// deleted. Report the release check first; an equal/older release needs no
+	// filesystem transaction and must not fail because that path is unavailable.
+	currentExePath, err = filepath.EvalSymlinks(currentExePath)
+	if err != nil {
+		return fmt.Errorf("locate current executable for replacement: %w", err)
+	}
+	identity, err := snapshotCoreExecutable(ctx, currentExePath)
+	if err != nil {
+		return fmt.Errorf("snapshot current executable: %w", err)
+	}
+	target, err := coreTarget(runtime.GOOS, runtime.GOARCH, coreBuildSettings())
+	if err != nil {
+		return err
+	}
+
 	// Only the initial version lookup uses Latest. All subsequent requests are
 	// pinned to the validated immutable tag, even if Latest changes meanwhile.
 	releaseURL := baseURL + "download/" + latestVersion + "/"
@@ -184,13 +182,29 @@ func (u *CoreUpdater) updateTransaction(ctx context.Context, currentExePath stri
 		return fmt.Errorf("download mihomo-optimized core: %w", err)
 	}
 	updateExePath := filepath.Join(updateDir, exeName)
-	if err = u.unpackContext(ctx, packagePath, updateExePath, exeName, info.Mode().Perm()); err != nil {
+	mode := identity.info.Mode().Perm()
+	if runtime.GOOS != "windows" {
+		// Removing execute bits does not stop an already running Unix daemon.
+		// The new file is owned by this process; retain the original access
+		// policy and ensure that its owner can execute it after replacement.
+		mode |= 0o100
+	}
+	if err = u.unpackContext(ctx, packagePath, updateExePath, exeName, mode); err != nil {
 		return fmt.Errorf("unpack mihomo-optimized core: %w", err)
+	}
+	// Routers often update on a small writable overlay. The verified archive
+	// is no longer needed once extraction completes, even when backing up the
+	// old executable later requires a full copy on this filesystem.
+	if err = os.Remove(packagePath); err != nil {
+		return fmt.Errorf("remove extracted core archive: %w", err)
 	}
 	if runtime.GOOS == "darwin" {
 		if err = exec.CommandContext(ctx, "/usr/bin/codesign", "--force", "--sign", "-", updateExePath).Run(); err != nil {
 			return fmt.Errorf("sign staged executable: %w", err)
 		}
+	}
+	if err = validateStagedCoreContext(ctx, updateExePath, latestVersion); err != nil {
+		return fmt.Errorf("validate staged mihomo-optimized core: %w", err)
 	}
 	if u.beforeCommit != nil {
 		u.beforeCommit()
@@ -235,7 +249,7 @@ func (u *CoreUpdater) updateTransaction(ctx context.Context, currentExePath stri
 			manual.result.Updated = true
 		}
 		// The real handler may exec/exit and never return through our defers.
-		// Remove the verified archive before yielding to process shutdown.
+		// Remove the staging directory before yielding to process shutdown.
 		if cleanupErr := os.RemoveAll(updateDir); cleanupErr != nil {
 			log.Warnln("updater: unable to remove completed staging directory: %s", cleanupErr)
 		}
@@ -420,15 +434,20 @@ func (u *CoreUpdater) installContext(ctx context.Context, currentPath, stagedPat
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if expected == nil {
+		identity, err := snapshotCoreExecutable(ctx, currentPath)
+		if err != nil {
+			return err
+		}
+		expected = &identity
+	}
 	verifyCurrent := func() error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if expected != nil {
-			actual, err := snapshotCoreExecutable(ctx, currentPath)
-			if err != nil || !expected.equal(actual) {
-				return errors.New("current executable changed while preparing update")
-			}
+		actual, err := snapshotCoreExecutable(ctx, currentPath)
+		if err != nil || !expected.equal(actual) {
+			return errors.New("current executable changed while preparing update")
 		}
 		return nil
 	}
@@ -456,41 +475,15 @@ func (u *CoreUpdater) installContext(ctx context.Context, currentPath, stagedPat
 		}
 		return nil
 	}
-	// Unix permits replacing a running executable by rename; no live binary
-	// is truncated, and failed staging or rename leaves it usable.
-	source, err := os.Open(currentPath)
+	// Unix permits replacing a running executable by rename. A hard link keeps
+	// its old inode recoverable without allocating another core-sized file;
+	// filesystems that do not support links use a checked copy instead.
+	backupTemp, err := u.prepareCoreBackupContext(ctx, currentPath, backupDir, *expected)
 	if err != nil {
 		return err
 	}
-	defer source.Close()
-	info, err := source.Stat()
-	if err != nil {
-		return err
-	}
-	backup, err := os.CreateTemp(backupDir, ".mihomo-backup-")
-	if err != nil {
-		return err
-	}
-	backupTemp := backup.Name()
 	defer os.Remove(backupTemp)
-	n, copyErr := io.Copy(backup, io.LimitReader(coreContextReader{ctx, source}, maxCoreFileSize+1))
-	if copyErr == nil && (n == 0 || n > maxCoreFileSize) {
-		copyErr = fmt.Errorf("invalid executable backup size: %d", n)
-	}
-	if copyErr == nil {
-		copyErr = backup.Chmod(info.Mode().Perm())
-	}
-	if copyErr == nil {
-		copyErr = backup.Sync()
-	}
-	closeErr := backup.Close()
-	if copyErr != nil {
-		return copyErr
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	// Copying the backup can take time. Recheck the path and content after it,
+	// Preparing the backup can take time. Recheck the path and content after it,
 	// immediately before either persistent name is replaced.
 	if err = verifyCurrent(); err != nil {
 		return err

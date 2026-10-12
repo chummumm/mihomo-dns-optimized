@@ -40,6 +40,9 @@ type upgradeCheckItem struct {
 	AutoUpdate       *bool  `json:"auto_update,omitempty"`
 	UpdateInterval   int64  `json:"update_interval,omitempty"`
 	IntervalUnit     string `json:"interval_unit,omitempty"`
+	NextCheck        string `json:"next_check,omitempty"`
+	NextCheckInMS    *int64 `json:"next_check_in_ms,omitempty"`
+	AutoUpdateState  string `json:"auto_update_state,omitempty"`
 	Reason           string `json:"reason,omitempty"`
 	Error            string `json:"error,omitempty"`
 }
@@ -103,6 +106,10 @@ func (m *upgradeCheckManager) status() upgradeCheckSnapshot {
 	m.mu.Lock()
 	s := m.snapshotLocked()
 	m.mu.Unlock()
+	return m.refreshPolicies(s)
+}
+
+func (m *upgradeCheckManager) refreshPolicies(s upgradeCheckSnapshot) upgradeCheckSnapshot {
 	current := m.idle()
 	if s.State == "idle" {
 		s.Items = current
@@ -118,11 +125,22 @@ func (m *upgradeCheckManager) status() upgradeCheckSnapshot {
 			item := &s.Items[i]
 			if active, ok := byID[item.ID]; ok {
 				item.AutoUpdate, item.UpdateInterval, item.IntervalUnit = active.AutoUpdate, active.UpdateInterval, active.IntervalUnit
+				item.NextCheck, item.NextCheckInMS, item.AutoUpdateState = active.NextCheck, active.NextCheckInMS, active.AutoUpdateState
 				if item.Kind == "kernel" || item.Kind == "ui" {
 					item.CurrentVersion = active.CurrentVersion
 				}
 			} else {
 				item.AutoUpdate, item.UpdateInterval, item.IntervalUnit = nil, 0, ""
+				item.NextCheck, item.NextCheckInMS, item.AutoUpdateState = "", nil, ""
+			}
+		}
+		seen := make(map[string]bool, len(s.Items))
+		for _, item := range s.Items {
+			seen[item.ID] = true
+		}
+		for _, item := range current {
+			if !seen[item.ID] {
+				s.Items = append(s.Items, item)
 			}
 		}
 	}
@@ -293,7 +311,10 @@ func startUpgradeCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	render.Status(r, http.StatusAccepted)
-	render.JSON(w, r, snapshot)
+	// A joined/replayed task contains old scheduling delays. Refresh just this
+	// accepted snapshot, preserving its request identity even if a newer task
+	// starts concurrently after it completed.
+	render.JSON(w, r, unifiedUpgrades.refreshPolicies(snapshot))
 }
 
 func validUpgradeCheckID(value string) bool {
@@ -329,7 +350,40 @@ func upgradeCheckError(err error) string {
 
 func boolPolicy(value bool) *bool { return &value }
 
+type automaticScheduleSource interface {
+	AutomaticSchedule() (time.Time, string)
+}
+
+func setUpgradeAutomaticSchedule(item *upgradeCheckItem, source automaticScheduleSource) {
+	item.NextCheck, item.NextCheckInMS, item.AutoUpdateState = "", nil, ""
+	if item.AutoUpdate == nil || !*item.AutoUpdate {
+		return
+	}
+	item.AutoUpdateState = "unscheduled"
+	if embedMode && (item.Kind == "kernel" || item.Kind == "geodata") {
+		return
+	}
+	if source == nil || item.Reason == "not_configured" || item.Reason == "local_provider" || item.Reason == "embedded" {
+		return
+	}
+	next, state := source.AutomaticSchedule()
+	if state != "" {
+		item.AutoUpdateState = state
+	}
+	if !next.IsZero() {
+		item.NextCheck = next.UTC().Format(time.RFC3339Nano)
+		delay := time.Until(next).Milliseconds()
+		if delay < 0 {
+			delay = 0
+		}
+		item.NextCheckInMS = &delay
+	}
+}
+
 func upgradeCheckItems(cfg *executor.UpdateConfiguration) []upgradeCheckItem {
+	if cfg != nil && cfg.Context != nil && cfg.Context.Err() != nil {
+		cfg = nil
+	}
 	ui := updater.CurrentUIUpdater()
 	if cfg != nil {
 		ui = cfg.UI
@@ -345,12 +399,18 @@ func upgradeCheckItems(cfg *executor.UpdateConfiguration) []upgradeCheckItem {
 	general := cfg.General
 	items[0].AutoUpdate, items[0].UpdateInterval, items[0].IntervalUnit = boolPolicy(general.CoreAutoUpdate), int64(general.CoreUpdateInterval), "hours"
 	items[1].AutoUpdate, items[1].UpdateInterval, items[1].IntervalUnit = boolPolicy(general.ExternalUIAutoUpdate), int64(general.ExternalUIUpdateInterval), "hours"
+	setUpgradeAutomaticSchedule(&items[0], &updater.DefaultCoreUpdater)
+	setUpgradeAutomaticSchedule(&items[1], ui)
 	geoNames := updater.GeoDatabasesForConfig(cfg.Geo)
 	for _, name := range geoNames {
-		items = append(items, upgradeCheckItem{ID: "geodata:" + name, Kind: "geodata", Name: name, Status: "pending", AutoUpdate: boolPolicy(general.GeoAutoUpdate), UpdateInterval: int64(general.GeoUpdateInterval), IntervalUnit: "hours"})
+		item := upgradeCheckItem{ID: "geodata:" + name, Kind: "geodata", Name: name, Status: "pending", AutoUpdate: boolPolicy(general.GeoAutoUpdate), UpdateInterval: int64(general.GeoUpdateInterval), IntervalUnit: "hours"}
+		setUpgradeAutomaticSchedule(&item, &updater.DefaultGeoUpdater)
+		items = append(items, item)
 	}
 	if len(geoNames) == 0 {
-		items = append(items, upgradeCheckItem{ID: "geodata", Kind: "geodata", Name: "GeoData", Status: "skipped", Reason: "not_configured", AutoUpdate: boolPolicy(general.GeoAutoUpdate), UpdateInterval: int64(general.GeoUpdateInterval), IntervalUnit: "hours"})
+		item := upgradeCheckItem{ID: "geodata", Kind: "geodata", Name: "GeoData", Status: "skipped", Reason: "not_configured", AutoUpdate: boolPolicy(general.GeoAutoUpdate), UpdateInterval: int64(general.GeoUpdateInterval), IntervalUnit: "hours"}
+		setUpgradeAutomaticSchedule(&item, nil)
+		items = append(items, item)
 	}
 	names := make([]string, 0, len(cfg.RuleProviders))
 	for name := range cfg.RuleProviders {
@@ -367,10 +427,18 @@ func upgradeCheckItems(cfg *executor.UpdateConfiguration) []upgradeCheckItem {
 		if provider.VehicleType() != P.HTTP {
 			item.Status, item.Reason = "skipped", "local_provider"
 		}
+		if schedule, ok := provider.(automaticScheduleSource); ok {
+			setUpgradeAutomaticSchedule(&item, schedule)
+		}
 		items = append(items, item)
 	}
 	if len(names) == 0 {
 		items = append(items, upgradeCheckItem{ID: "rule-providers", Kind: "rule-provider", Name: "rule-providers", Status: "skipped", Reason: "not_configured"})
+	}
+	// ApplyConfig cancels this snapshot before replacing the global updater
+	// workers. Do not combine its old YAML policy with a newly applied timer.
+	if cfg.Context != nil && cfg.Context.Err() != nil {
+		return upgradeCheckItems(nil)
 	}
 	return items
 }
@@ -500,6 +568,8 @@ func buildUpgradeCheckPlan() (*upgradeCheckPlan, error) {
 			}
 			if result.Updated && err != nil {
 				log.Errorln("Core file %s is installed but restart failed; this process still runs %s and needs a restart: %s", result.LatestVersion, result.CurrentVersion, err)
+			} else if err != nil {
+				log.Warnln("Core update failed: %s", err)
 			}
 			coreItem = coreUpgradeOutcome(coreItem, result, err)
 			report(coreItem)

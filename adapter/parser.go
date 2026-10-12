@@ -16,6 +16,7 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 	}
 
 	opt := applyProxyOptions(options...)
+	dnsStatsIdentity := proxyDNSStatsIdentity(mapping, opt)
 	basicOption := outbound.BasicOption{
 		DialerForAPI: opt.DialerForAPI,
 		TunnelForAPI: opt.TunnelForAPI,
@@ -245,7 +246,7 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 		}
 	}
 
-	proxy = outbound.NewAutoCloseProxyAdapter(proxy)
+	proxy = outbound.NewAutoCloseProxyAdapterWithDNSStatsIdentity(proxy, dnsStatsIdentity)
 	return NewProxy(proxy), nil
 }
 

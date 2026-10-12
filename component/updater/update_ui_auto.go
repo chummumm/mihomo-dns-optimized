@@ -21,6 +21,7 @@ type uiAutomaticUpdate struct {
 	done     chan struct{}
 	interval time.Duration
 	next     atomic.Pointer[time.Time]
+	phase    atomic.Uint32
 	// A new activation owns initialization itself. An interval-only policy
 	// change may claim one separate empty-directory bootstrap, but an ordinary
 	// reload must never enqueue another one for the same job.
@@ -54,6 +55,13 @@ func (u *UIUpdater) nextAutomaticCheck() string {
 	return ""
 }
 
+func (u *UIUpdater) AutomaticSchedule() (time.Time, string) {
+	if job := u.automatic; job != nil {
+		return automaticSchedule(job.ctx, &job.next, &job.phase)
+	}
+	return time.Time{}, ""
+}
+
 // Called only by SetUIUpdater while uiActivation is held. The returned function
 // starts background work after the immutable updater has been published.
 func (u *UIUpdater) configureAutomaticUpdates(previous *UIUpdater) func() {
@@ -76,6 +84,9 @@ func (u *UIUpdater) configureAutomaticUpdates(previous *UIUpdater) func() {
 	job.initialDownloadClaimed.Store(immediate)
 	next := time.Now().Add(interval)
 	job.next.Store(&next)
+	if immediate {
+		job.phase.Store(automaticWaiting)
+	}
 	u.automatic = job
 	var ticks <-chan time.Time
 	var stop func()
@@ -113,10 +124,14 @@ func (u *UIUpdater) runAutomaticCheck(job *uiAutomaticUpdate, waitForOperation b
 	if job.ctx.Err() != nil {
 		return
 	}
+	job.phase.Store(automaticWaiting)
+	finishedPhase := automaticScheduled
+	defer func() { job.phase.Store(finishedPhase) }()
 	action := func() error {
 		if err := u.readiness.wait(job.ctx); err != nil {
 			return err
 		}
+		job.phase.Store(automaticChecking)
 		return u.automaticUpdate(job.ctx)
 	}
 	var err error
@@ -126,6 +141,7 @@ func (u *UIUpdater) runAutomaticCheck(job *uiAutomaticUpdate, waitForOperation b
 		err = action()
 	}
 	if err != nil && job.ctx.Err() == nil && !errors.Is(err, ErrUIUpdateBusy) {
+		finishedPhase = automaticRetrying
 		log.Warnln("Automatic external UI update failed: %s", err)
 	}
 }

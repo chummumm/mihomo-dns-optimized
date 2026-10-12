@@ -20,6 +20,7 @@ type geoAutomaticUpdate struct {
 	done     chan struct{}
 	interval time.Duration
 	next     atomic.Pointer[time.Time]
+	phase    atomic.Uint32
 }
 
 // GeoUpdater owns the scheduling policy and its one live worker. Resource
@@ -63,6 +64,15 @@ func (u *GeoUpdater) NextCheck() string {
 	return ""
 }
 
+func (u *GeoUpdater) AutomaticSchedule() (time.Time, string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if job := u.automatic; job != nil {
+		return automaticSchedule(job.ctx, &job.next, &job.phase)
+	}
+	return time.Time{}, ""
+}
+
 func (u *GeoUpdater) ConfigureAutoUpdate(enabled bool, intervalHours int) {
 	u.ConfigureAutoUpdateWhenReady(enabled, intervalHours, nil)
 }
@@ -97,6 +107,9 @@ func (u *GeoUpdater) configureLocked(enabled bool, intervalHours int) {
 	job := &geoAutomaticUpdate{ctx: ctx, cancel: cancel, done: make(chan struct{}), interval: interval}
 	next := time.Now().Add(interval)
 	job.next.Store(&next)
+	if activation {
+		job.phase.Store(automaticWaiting)
+	}
 	u.automatic = job
 	var ticks <-chan time.Time
 	var stop func()
@@ -144,6 +157,9 @@ func (u *GeoUpdater) runAutomaticUpdates(job *geoAutomaticUpdate, ticks <-chan t
 }
 
 func (u *GeoUpdater) runAutomaticCheck(job *geoAutomaticUpdate, activation bool) {
+	job.phase.Store(automaticWaiting)
+	finishedPhase := automaticScheduled
+	defer func() { job.phase.Store(finishedPhase) }()
 	action := func() error {
 		if err := u.readiness.wait(job.ctx); err != nil {
 			return err
@@ -154,6 +170,7 @@ func (u *GeoUpdater) runAutomaticCheck(job *geoAutomaticUpdate, activation bool)
 				return err
 			}
 		}
+		job.phase.Store(automaticChecking)
 		if u.check != nil {
 			return u.check(job.ctx)
 		}
@@ -170,6 +187,7 @@ func (u *GeoUpdater) runAutomaticCheck(job *geoAutomaticUpdate, activation bool)
 		err = action()
 	}
 	if err != nil && job.ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, ErrGetDatabaseUpdateSkip) {
+		finishedPhase = automaticRetrying
 		log.Warnln("[GEO] Automatic update failed: %s", err)
 	}
 	// Missing files, transient failures and a canceled old configuration never

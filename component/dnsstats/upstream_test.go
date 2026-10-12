@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -103,5 +104,36 @@ func TestUpstreamExitIdentityAndGlobalCapacity(t *testing.T) {
 	}
 	if attempts != 305 {
 		t.Fatalf("overflow dropped attempts: %d", attempts)
+	}
+}
+
+func TestUpstreamStableExitStillSeparatesHiddenEndpointParameters(t *testing.T) {
+	m := New()
+	ctx := WithManager(context.Background(), m)
+	exit := Outbound{Key: "stable-config-fingerprint", Name: "same-name", Type: "proxy"}
+	for _, endpoint := range []string{
+		"https://first-user:first-secret@dns.example/token-path?key=first-query#first-fragment",
+		"https://first-user:other-secret@dns.example/token-path?key=first-query#first-fragment",
+		"https://first-user:first-secret@dns.example/other-path?key=first-query#first-fragment",
+		"https://first-user:first-secret@dns.example/token-path?key=other-query#first-fragment",
+		"https://first-user:first-secret@dns.example/token-path?key=first-query#other-fragment",
+	} {
+		StartUpstream(ctx, endpoint, exit).Complete(UpstreamSuccess)
+		m.Configure(true)
+		StartUpstream(ctx, endpoint, exit).Complete(UpstreamSuccess)
+	}
+	rows := m.Upstreams().Items
+	if len(rows) != 5 {
+		t.Fatalf("sanitized display address merged distinct hidden endpoints: %+v", rows)
+	}
+	seen := map[string]bool{}
+	for _, row := range rows {
+		if row.Address != "https://dns.example/<redacted>" || row.Attempts != 2 || row.Successes != 2 || seen[row.ID] {
+			t.Fatalf("hidden endpoint identity or reload aggregation changed: %+v", row)
+		}
+		if strings.Contains(row.ID, "secret") || strings.Contains(row.ID, "query") || strings.Contains(row.ID, "fragment") {
+			t.Fatal("opaque endpoint ID exposed a credential")
+		}
+		seen[row.ID] = true
 	}
 }
