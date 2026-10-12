@@ -93,6 +93,10 @@ const clientAtom = atom({
     instance: null as Client | null,
 })
 
+// Controller-owned stores depend on the active client without exposing the
+// connection key (which also contains the controller secret).
+export const currentClientAtom = atom(get => get(clientAtom).instance)
+
 export function useClient () {
     const {
         hostname,

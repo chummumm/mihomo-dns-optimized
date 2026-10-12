@@ -1,9 +1,8 @@
 import { usePreviousDistinct, useSyncedRef } from '@react-hookz/web'
 import { type AxiosError } from 'axios'
-import { produce } from 'immer'
+import { produce, type Draft } from 'immer'
 import { atom, useAtom, useAtomValue, useSetAtom } from 'jotai'
 import { atomWithStorage } from 'jotai/utils'
-import { atomWithImmer } from 'jotai-immer'
 import { ResultAsync } from 'neverthrow'
 import { useCallback, useEffect, useMemo } from 'react'
 import * as R from 'remeda'
@@ -21,7 +20,28 @@ import { type Infer } from '@lib/type'
 import type * as Models from '@models'
 import { LOG_HISTORY_LIMIT, type Log } from '@models/Log'
 
-import { useAPIInfo, useClient } from './request'
+import { currentClientAtom, useAPIInfo, useClient } from './request'
+
+// A controller switch hides old data immediately. Writers retain the client
+// that started their operation, so late requests and callbacks cannot publish
+// into another controller's state. A rejected write also returns false to keep
+// related effects, such as authentication status, tied to the same controller.
+function controllerAtom<T extends object> (initial: T) {
+    const state = atom<{ client: API.Client | null, data: T }>({ client: null, data: initial })
+    return atom(
+        get => {
+            const current = get(state)
+            return current.client === get(currentClientAtom) ? current.data : initial
+        },
+        (get, set, client: API.Client, update: (draft: Draft<T>) => void | Draft<T>) => {
+            if (get(currentClientAtom) !== client) return false
+            const previous = get(state)
+            const data = produce(previous.client === client ? previous.data : initial, update)
+            set(state, { client, data })
+            return true
+        },
+    )
+}
 
 export const identityAtom = atom(true)
 
@@ -48,33 +68,32 @@ export function useI18n () {
     return { lang, locales, setLang, translation }
 }
 
-export const version = atom({
+export const version = controllerAtom({
     version: '',
     premium: false,
 })
 
 export function useVersion () {
-    const [data, set] = useAtom(version)
     const client = useClient()
+    const [data, set] = useAtom(version)
     const setIdentity = useSetAtom(identityAtom)
 
     useSWR([client], async function () {
         const result = await ResultAsync.fromPromise(client.getVersion(), e => e as AxiosError)
-        setIdentity(result.isOk())
-
-        set(
+        const accepted = set(client, () =>
             result.isErr()
                 ? { version: '', premium: false }
                 : { version: result.value.data.version, premium: !!result.value.data.premium },
         )
+        if (accepted) setIdentity(result.isOk())
     })
 
     return data
 }
 
 export function useRuleProviders () {
-    const [{ premium }] = useAtom(version)
     const client = useClient()
+    const { premium } = useAtomValue(version)
 
     const { data, mutate } = useSWR(['/providers/rule', client, premium], async () => {
         if (!premium) {
@@ -106,11 +125,11 @@ export function useConfig () {
     return { data, set: useWarpImmerSetter(setter) }
 }
 
-export const proxyProvider = atom([] as API.Provider[])
+export const proxyProvider = controllerAtom([] as API.Provider[])
 
 export function useProxyProviders () {
-    const [providers, set] = useAtom(proxyProvider)
     const client = useClient()
+    const [providers, set] = useAtom(proxyProvider)
 
     const { data, mutate } = useSWR(['/providers/proxy', client], async () => {
         const proxyProviders = await client.getProxyProviders()
@@ -121,7 +140,7 @@ export function useProxyProviders () {
             .filter(pd => pd.vehicleType !== 'Compatible')
     })
 
-    useEffect(() => { set(data ?? []) }, [data, set])
+    useEffect(() => { set(client, () => data ?? []) }, [client, data, set])
     return { providers, update: mutate }
 }
 
@@ -145,7 +164,7 @@ export function useGeneral () {
     return { general: data ?? {} as Models.Data['general'], update: mutate }
 }
 
-export const proxies = atomWithImmer({
+const initialProxies = {
     proxies: [] as API.Proxy[],
     groups: [] as API.Group[],
     global: {
@@ -155,12 +174,15 @@ export const proxies = atomWithImmer({
         history: [],
         all: [],
     } as API.Group,
-})
+}
+
+export const proxies = controllerAtom(initialProxies)
 
 export function useProxy () {
-    const [allProxy, rawSet] = useAtom(proxies)
-    const set = useWarpImmerSetter(rawSet)
     const client = useClient()
+    const [allProxy, rawSet] = useAtom(proxies)
+    const publish = useCallback((update: WritableDraft<typeof initialProxies>) => { rawSet(client, update) }, [client, rawSet])
+    const set = useWarpImmerSetter(publish)
 
     const { mutate } = useSWR(['/proxies', client], async () => {
         const allProxies = await client.getProxies()
@@ -245,19 +267,18 @@ export function useClashXData () {
     return { data, update: mutate }
 }
 
-export const rules = atomWithImmer([] as API.Rule[])
+export const rules = controllerAtom([] as API.Rule[])
 
 export function useRule () {
-    const [data, rawSet] = useAtom(rules)
-    const set = useWarpImmerSetter(rawSet)
     const client = useClient()
+    const [data, set] = useAtom(rules)
 
-    async function update () {
+    const { mutate } = useSWR(['/rules', client], async () => {
         const resp = await client.getRules()
-        set(resp.data.rules)
-    }
+        set(client, () => resp.data.rules)
+    })
 
-    return { rules: data, update }
+    return { rules: data, update: mutate }
 }
 
 const logsAtom = atom(new StreamReader<Log>({ bufferLength: LOG_HISTORY_LIMIT }))

@@ -1,6 +1,6 @@
 {
     "name": "mihomo-optimized",
-    "version": "0.4.6",
+    "version": "0.4.7",
     "packageManager": "pnpm@8.15.9",
     "description": "mihomo-optimized network dashboard with in-memory DNS insights.",
     "keywords": [
@@ -22,7 +22,7 @@
         "build": "vite build",
         "typecheck": "tsc --noEmit",
         "test:unit": "node --test src/containers/Connections/connections.test.cjs src/lib/probe.test.cjs src/containers/Proxies/resolve.test.cjs scripts/test-topology-renderer.cjs src/containers/Settings/config-editor-model.test.cjs src/containers/DNS/pagination.test.cjs src/containers/DNS/trend.test.cjs src/containers/Settings/update-state.test.cjs",
-        "test:browser": "node scripts/test-connections.cjs && node scripts/test-dns.cjs && node scripts/test-dashboard-features.cjs && node scripts/test-logs.cjs && node scripts/test-config-editor.cjs && node scripts/test-update-check.cjs && node scripts/test-app-shell.cjs",
+        "test:browser": "node scripts/test-connections.cjs && node scripts/test-dns.cjs && node scripts/test-dashboard-features.cjs && node scripts/test-logs.cjs && node scripts/test-config-editor.cjs && node scripts/test-update-check.cjs && node scripts/test-controller-lifecycle.cjs && node scripts/test-app-shell.cjs",
         "lint": "pnpm lint:ts",
         "lint:ts": "eslint --ext=jsx,ts,tsx --fix src",
         "contributors:add": "all-contributors add",

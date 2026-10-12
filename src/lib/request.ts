@@ -132,7 +132,9 @@ export class Client {
     }
 
     async reloadConfig (signal?: AbortSignal, force = false) {
-        return await this.axiosClient.put<void>('configs', {}, { signal, params: force ? { force: true } : undefined })
+        // The core may still finish after a timeout. Callers report an
+        // unconfirmed reload and retain the saved file for an explicit retry.
+        return await this.axiosClient.put<void>('configs', {}, { signal, timeout: 30000, params: force ? { force: true } : undefined })
     }
 
     async getConfigFile (signal?: AbortSignal) {
