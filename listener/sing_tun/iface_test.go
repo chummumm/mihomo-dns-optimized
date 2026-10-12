@@ -1,6 +1,7 @@
 package sing_tun
 
 import (
+	"errors"
 	"net"
 	"net/netip"
 	"reflect"
@@ -67,7 +68,32 @@ func TestInterfacePrefixesRejectIncompleteAddressSnapshots(t *testing.T) {
 			}
 		})
 	}
-	if got, err := readDefaultInterface(net.Interface{Index: -1, Name: "invalid"}); err == nil || got != nil {
-		t.Fatalf("failed interface address read became an empty interface: interface=%v, error=%v", got, err)
+}
+
+func TestReadDefaultInterfacePreservesAddressReadErrors(t *testing.T) {
+	netInterface := net.Interface{Index: 2, Name: "eth0"}
+	readErr := errors.New("injected interface address read failure")
+	for name, addresses := range map[string][]net.Addr{
+		"no addresses":      nil,
+		"partial addresses": {&net.IPNet{IP: net.ParseIP("2001:db8::1"), Mask: net.CIDRMask(64, 128)}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := readDefaultInterfaceWithAddresses(netInterface, func(current *net.Interface) ([]net.Addr, error) {
+				if current.Index != netInterface.Index || current.Name != netInterface.Name {
+					t.Fatalf("read requested for wrong interface: %v", current)
+				}
+				return addresses, readErr
+			})
+			if got != nil || !errors.Is(err, readErr) {
+				t.Fatalf("failed address read published a snapshot or lost its error: interface=%v, error=%v", got, err)
+			}
+		})
+	}
+	// A successful empty read is a real source-loss snapshot, unlike an error.
+	got, err := readDefaultInterfaceWithAddresses(netInterface, func(*net.Interface) ([]net.Addr, error) {
+		return nil, nil
+	})
+	if err != nil || got == nil || got.Index != netInterface.Index || got.Name != netInterface.Name || len(got.Addresses) != 0 {
+		t.Fatalf("successful empty read was not preserved: interface=%v, error=%v", got, err)
 	}
 }

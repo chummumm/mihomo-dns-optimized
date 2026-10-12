@@ -72,7 +72,11 @@ func (f *defaultInterfaceFinder) ByIndex(index int) (*control.Interface, error) 
 // cache cannot report a per-interface address error and historically accepted
 // non-contiguous masks as /0. Neither is a valid source-loss snapshot.
 func readDefaultInterface(netInterface net.Interface) (*control.Interface, error) {
-	addresses, err := anet.InterfaceAddrsByInterface(&netInterface)
+	return readDefaultInterfaceWithAddresses(netInterface, anet.InterfaceAddrsByInterface)
+}
+
+func readDefaultInterfaceWithAddresses(netInterface net.Interface, readAddresses func(*net.Interface) ([]net.Addr, error)) (*control.Interface, error) {
+	addresses, err := readAddresses(&netInterface)
 	if err != nil {
 		return nil, fmt.Errorf("read addresses for interface %s: %w", netInterface.Name, err)
 	}
