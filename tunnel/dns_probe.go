@@ -22,6 +22,7 @@ func (p *DNSRoutingPlan) DialDirectProbe(ctx context.Context, address netip.Addr
 		return nil, errors.New("DNS IP speed checks require a numeric IP and TCP port")
 	}
 	metadata := p.origin.Clone()
+	metadata.InboundDstIP = netip.Addr{}
 	metadata.Host, metadata.SniffHost = "", ""
 	metadata.DstIP, metadata.DstPort = address.Unmap(), port
 	metadata.NetWork = C.TCP

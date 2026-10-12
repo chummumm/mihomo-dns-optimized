@@ -82,9 +82,11 @@ func (s *packetSender) processPacket(pc C.PacketConn, packet C.PacketAdapter) {
 
 		_ = preHandleMetadata(metadata) // error was pre-checked
 		metadata = metadata.Pure()
-		if metadata.Host != "" {
+		if metadata.Host != "" || (metadata.InboundDstIP.IsValid() && metadata.InboundDstIP != metadata.DstIP) {
 			// TODO: ResolveUDP may take a long time to block the Process loop
 			//       but we want keep sequence sending so can't open a new goroutine
+			// DIRECT must also restore a real client IP changed by hosts
+			// mapping, even when Pure has removed the mapped hostname.
 			if err := pc.ResolveUDP(s.ctx, metadata); err != nil {
 				log.Warnln("[UDP] Resolve Ip error: %s", err)
 				return

@@ -143,18 +143,15 @@ jobs:
           cache: true
       - name: Install package inspection and network test tools
         run: sudo apt-get update && sudo apt-get install -y rpm cpio zstd fakeroot iproute2 nftables
-      - name: Select the checked build matrix
+      - name: Select compile checks or the complete release matrix
         id: matrix
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BUILD_REF: ${{ inputs.ref }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           matrix_args=()
-          if [[ "$EVENT_NAME" == pull_request && -z "$BUILD_REF" ]]; then
-            matrix_args=(--profile pr --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA")
+          if [[ "$EVENT_NAME" == pull_request ]]; then
+            matrix_args=(--profile pr)
           fi
           build_matrix_json=$(python3 scripts/release-build.py matrix "${matrix_args[@]}")
           printf 'matrix=%s\n' "$build_matrix_json" >> "$GITHUB_OUTPUT"
@@ -184,8 +181,41 @@ jobs:
           sudo -n env MIHOMO_CONFIG_FILE_PERMISSION_REQUIRED=1 TMPDIR=/tmp \
             "$permission_test_binary" -test.run '^TestConfigFileUnprivilegedPermissions$' -test.v -test.timeout 2m
 
+  pr-compile:
+    name: Compile check (${{ matrix.target }})
+    if: github.event_name == 'pull_request'
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ needs.check.outputs.commit }}
+          persist-credentials: false
+      - name: Set up upstream-compatible Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version: "1.26"
+          go-download-base-url: https://github.com/MetaCubeX/go/releases/download/build
+          cache: true
+      - name: Install pinned Android NDK
+        if: matrix.android
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?Android SDK is missing}}"
+          "$sdk/cmdline-tools/latest/bin/sdkmanager" --install 'ndk;29.0.14206865'
+          printf 'ANDROID_NDK_HOME=%s/ndk/29.0.14206865\n' "$sdk" >> "$GITHUB_ENV"
+      - name: Compile and inspect the core without release artifacts
+        env:
+          TARGET: ${{ matrix.target }}
+        run: python3 scripts/release-build.py compile-check "$TARGET"
+
   build:
-    name: ${{ matrix.target }}
+    name: Release (${{ matrix.target }})
+    if: github.event_name != 'pull_request'
     needs: check
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -327,11 +357,15 @@ jobs:
             {
               printf 'mihomo-optimized `%s`\n\n' "$BUILD_VERSION"
               printf 'Source commit: `%s`\n\n' "$BUILD_SHA"
+              printf 'Core 1.0.11 returns multiple near-fast DIRECT DNS addresses instead of always one, with SmartDNS-compatible selection thresholds and max-reply-ip-num (default 8). Compatible complete CNAME chains may contribute addresses; distinct chains and protected DNSSEC replies remain isolated. First-ping can answer one address early and cache a multi-address result after completion.\n\n'
+              printf 'New SmartDNS answer settings: rr-ttl, rr-ttl-reply-max, force-AAAA-SOA and force-qtype-SOA. Fixed TTL takes precedence over min/max; reply TTL limits do not shorten internal cache lifetimes. Qtype filters accept numbers, ranges, directive strings and YAML lists, and return local NOERROR/NODATA with SOA.\n\n'
+              printf 'Configuration names are strictly case-sensitive: force-no-CNAME, force-AAAA-SOA, force-qtype-SOA and dualstack-ip-allow-force-AAAA. Lowercase aliases are no longer accepted and produce a configuration error. Update old keys explicitly; the core does not rewrite user configuration.\n\n'
+              printf 'DIRECT and Compatible preserve the real IP selected by the client across hosts mapping and sniffing. Domain-only and FakeIP destinations still resolve; when DIRECT DNS optimization is active, ordered TCP attempts with bounded fallback and ordered UDP selection take priority over redundant address racing or random selection. Proxy-group URL tests remain enabled.\n\n'
+              printf 'Pull requests now run required tests plus seven compile-only representative checks, with no release archives, installers or uploaded release artifacts, including platform and workflow changes. After merge, main builds the 37-target release matrix once; publication verifies and reuses artifacts from that same run.\n\n'
               printf 'Core 1.0.10 keeps DNS upstream statistics continuous across ordinary reloads using stable configured outbound identities. Different node configurations, providers, effective interfaces and marks remain separate; DNS cache and transport isolation are unchanged.\n\n'
               printf 'Bare-core updates now compare versions before filesystem preparation, ensure owner execution permission on staged Unix cores, and require a bounded native version/platform probe before replacement or shutdown. Extracted archives are removed early and Unix backups use verified hard links with a checked copy fallback to reduce storage use. Devices already blocked by an older updater may need one manual installation of 1.0.10.\n\n'
               printf 'With dashboard 0.4.8, all four automatic update classes (core, dashboard, GeoData and rule providers) show their real next check or retry time using the browser clock and time zone. Resource groups show the nearest schedule when collapsed and individual schedules when expanded. Read-only schedule refresh does not initiate updates.\n\n'
               printf 'Core 1.0.9 tolerates disappearing per-interface sysctl entries during TUN recreation, including wrapped and joined ENOENT from IPv4/IPv6 forwarding, RA, rp_filter and restoration. Permission, read-only, I/O and required global/default setting failures remain errors; mixed error trees are not discarded. Existing blackholes, interface identity checks and event-driven recovery remain in place. A successful synchronization after a fault now logs the applied TCP/UDP backend availability per address family, distinguishing ready, protected and disabled without repeating on healthy events.\n\n'
-              printf 'Core 1.0.8 reduces ordinary pull-request packaging to seven representative targets: Linux amd64/arm64/386, Windows amd64, macOS arm64, FreeBSD amd64 and Android arm64-v8. Toolchain, dependency, platform-specific, build-constraint and packaging/workflow changes retain all 37 targets; uncertain PR diffs also fall back to the full matrix. Existing functional, race, network-namespace, non-root systemd and native updater tests remain required. Main, tag, manual and upstream-sync builds still produce the complete release matrix once, and publication verifies and uploads artifacts from that same run.\n\n'
               printf 'Core 1.0.7 adds TCP REDIRECT through redir-port and protocol-specific local.bypass-ports.udp/tcp (defaults [123]/[]). local.bypass-users now defaults to [mihomo]; explicit [] disables UID bypass. The old bypass-udp-ports remains a parse-only alias, and mixing both keys is rejected. REDIRECT validates real IPv4/IPv6 listeners and guards existing conntrack sessions across port/backend changes and restarts. HTTP/SOCKS/mixed remain explicit proxy protocols.\n\n'
               printf 'Native DEB/RPM/Arch packages now run the service as mihomo, create a non-login system account only when absent, and assign /etc/mihomo recursively plus /usr/bin/mihomo to that user and its existing primary group. Account attributes are preserved when the user already exists. Packages do not start/restart services. Upgrade the native package once, daemon-reload and restart to migrate the service user and resource ownership; core self-update replaces only the executable.\n\n'
               printf 'Repeated positive RA lifetimes, unchanged link/address state and irrelevant main-table ULA routes no longer drive repeated reconciliation. Ordinary events coalesce for 50 ms with a 250 ms bound, while protection/observation failures remain urgent. Native TUN address additions, ULA churn and same-prefix IPv6 privacy rotation refresh caches without resetting every DNS pool; actual interface, IPv4 source and public IPv6 prefix loss still invalidate transports. CI requires real local/gateway IPv4/IPv6 REDIRECT sessions and non-root systemd lifecycle checks.\n\n'

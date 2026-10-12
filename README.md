@@ -39,7 +39,7 @@ UDP、TCP 和 DoT 上游在实际出口固定时共享连接，多个查询通�
 
 新增的 DNS 面板数据由本机控制器提供，查询记录、趋势和上游统计只保存在进程内存中，不写数据库或日志文件，也不发送遥测。无需维护第二份分流规则；观测不会改变 DNS 回答和出口选择。优化范围、缓存安全边界及测试方式见 [DNS 性能说明](docs/dns-performance.md)。
 
-正式版本采用 **`mihomo-optimized-vX.Y.Z`**，当前为 `mihomo-optimized-v1.0.10`。tag、发行标题、`version.txt` 和运行内核版本一致；`PROJECT_VERSION` 记录独立项目版本，上游 mihomo 的版本与提交另存于 `UPSTREAM_VERSION` / `UPSTREAM_COMMIT`。源码哈希保留在 BUILDINFO 中。**旧版 `v1.19.32-optimized-N` 及更早内核首次切换到新系列，需要手动安装一次**；新系列随后可通过 YAML 启用内核后台检查和更新，详见[更新说明](docs/releases.md#内核自动更新)。
+正式版本采用 **`mihomo-optimized-vX.Y.Z`**，当前为 `mihomo-optimized-v1.0.11`。tag、发行标题、`version.txt` 和运行内核版本一致；`PROJECT_VERSION` 记录独立项目版本，上游 mihomo 的版本与提交另存于 `UPSTREAM_VERSION` / `UPSTREAM_COMMIT`。源码哈希保留在 BUILDINFO 中。**旧版 `v1.19.32-optimized-N` 及更早内核首次切换到新系列，需要手动安装一次**；新系列随后可通过 YAML 启用内核后台检查和更新，详见[更新说明](docs/releases.md#内核自动更新)。
 
 ## DNS 状态与原版面板
 
@@ -274,9 +274,10 @@ dns:
   response-mode: first-ping
   speed-check-timeout: 1000
   speed-check-concurrency: 16
+  max-reply-ip-num: 8  # 优选回答的地址数量上限，不保证凑满。
   dualstack-ip-selection: true
   dualstack-ip-selection-threshold: 10
-  dualstack-ip-allow-force-aaaa: false
+  dualstack-ip-allow-force-AAAA: false
 
   # 缓存和预取；以下 TTL 均为秒。
   prefetch-domain: true
@@ -285,7 +286,11 @@ dns:
   serve-expired-reply-ttl: 1
 
   # 可选回答调整；此处保留默认关闭。需要时可将 CNAME 项设为 true。
-  force-no-cname: false
+  force-no-CNAME: false
+  force-AAAA-SOA: false
+  force-qtype-SOA: []
+  rr-ttl: 0            # 0 不固定；非零时优先于 rr-ttl-min/max。
+  rr-ttl-reply-max: 0  # 0 不限制客户端 TTL，不影响内部缓存寿命。
   rr-ttl-min: 0  # 0 不设下限，例如 60；零 TTL 和保护场景仍保留。
   rr-ttl-max: 0  # 0 不设上限，例如 86400；非零时不得小于 rr-ttl-min。
 
@@ -324,7 +329,7 @@ dns:
   nameserver: [https://cloudflare-dns.com/dns-query]
 ```
 
-处理顺序沿用 **hosts → FakeIP → 真实 DNS 解析**。应该返回虚拟地址的查询直接合成，使用 `fake-ip-ttl`，不会为了 DNS 分流先查询真实 IP，也不会参与真实答案缓存、IP 测速或预取。`fake-ip-filter` 要求真实解析的域名，以及 TXT / MX 等未由 FakeIP 本地处理的记录，继续按已有规则选 DNS 上游和出口。
+处理顺序沿用 **hosts → FakeIP → 真实 DNS 解析**。显式启用的 `force-AAAA-SOA` / `force-qtype-SOA` 按[查询类型过滤](docs/dns-proxy.md#查询类型过滤)规定的优先级生效。应该返回虚拟地址的查询直接合成，使用 `fake-ip-ttl`，不会为了 DNS 分流先查询真实 IP，也不会参与真实答案缓存、IP 测速或预取。`fake-ip-filter` 要求真实解析的域名，以及 TXT / MX 等未由 FakeIP 本地处理的记录，继续按已有规则选 DNS 上游和出口。
 
 FakeIP 的 IPv6 与 HTTPS / SVCB 处理也保持原行为：应使用虚拟地址的 AAAA 查询在 IPv6 未启用或没有 FakeIPv6 地址池时返回空答案；未被过滤的 HTTPS / SVCB 返回空答案。FakeIP 已合成的 DNS 回答不执行 DNS 阶段的 REJECT，后续访问虚拟地址时仍恢复域名并按业务规则拒绝连接；要求真实解析的查询仍可在 DNS 阶段拒绝。具体组合见[FakeIP 优先级说明](docs/dns-proxy.md#fakeip-与真实查询的优先级)。
 
@@ -335,13 +340,19 @@ FakeIP 的 IPv6 与 HTTPS / SVCB 处理也保持原行为：应使用虚拟地�
 - 仅内置 DNS 已选 DIRECT / Compatible、所选上游集合全部支持自动传输的 A / AAAA 查询参与；代理路径不参与。原生 DoH / DoT / DoQ 及自定义端口同样按实际出口判定。
 - 显式 DNS 出口等传输例外不做本地测速；有效缓存命中直接返回，不为这次命中重复探测。
 - TCP 测握手耗时，ping 测 ICMP 往返。探测继承所选直连出口的接口 / mark，不重新匹配规则；ping 是否可用取决于平台与权限。
-- 保留候选所属回答及 CNAME 链，不拼接不同服务器的回答；DNSSEC 等保护场景不改写。全部探测失败但已有有效回答时返回原回答。
+- 按实测 RTT 排序并保留接近最快的地址，默认最多 8 个；允许合并完整 CNAME 路径一致的上游答案，不混合不同路径。重复地址去重并取保守 TTL；DNSSEC 等保护场景不改写。全部探测失败时保留有效上游顺序，并遵守优选回答数量上限。
 
 测速不代表下载带宽，也不保证所有域名都更快。预取和过期缓存刷新属于新的查询，满足条件时可以重新优选。
 
 开启测速后，可用 `response-mode` 选择首次回答的时机。默认 `first-ping` 在候选 IP 首次探测成功后回答；`fastest-ip` 在本轮预算内充分比较候选；`fastest-response` 在首个通过当前策略检查的 DNS 回答到达时回答，不等待 IP 探测。提前回答后，剩余比较仅在有后台名额时继续，沿用本轮期限，结果可以更新缓存。缓存命中直接回答，代理路径和关闭测速的配置保持原解析行为。具体边界见[响应模式](docs/dns-proxy.md#响应模式)。
 
 可选双栈优选复用这次已选直连出口和同一个超时预算。默认保留 IPv4；当 AAAA 查询同时取得两族可测速的回答，且 IPv4 比 IPv6 快至少所设阈值时，返回零 TTL 的 NOERROR / NODATA。代理查询不另查另一族、不探测；测速失败或受 DNSSEC 保护时保留原回答。该临时优选结论不缓存，避免被过期缓存长期延续。
+
+## DIRECT 保留客户端选择的 IP
+
+从 `1.0.11` 起，客户端已指定真实目标 IPv4 / IPv6 时，DIRECT / Compatible 连接该 IP，不再因为 redir-host、hosts 映射、嗅探域名或单独配置了 `direct-nameserver` 而重新解析、更换地址。域名仍参与域名规则，IP 规则复用客户端真实 IP；其他代理出口保留既有域名连接行为。UDP 会话后续数据沿用已建立的目标映射。
+
+只提供域名的 SOCKS / HTTP 请求，以及 FakeIP 恢复后的域名，仍需要得到真实地址。实际 DIRECT DNS 优选已启用时，TCP 优先尝试排序后的首选地址，失败立即回退、迟迟未建立时按 300 毫秒间隔启动下一个候选；UDP 使用所选地址族的首个优选地址。这个选择优先于 `tcp-concurrent` 的全候选竞速，不关闭代理组的 `url-test` 或节点健康检查。内部 DNS 上游和测速探针各自使用自己的目标 IP。
 
 ## 可选 DNS 设置
 
@@ -360,9 +371,10 @@ FakeIP 的 IPv6 与 HTTPS / SVCB 处理也保持原行为：应使用虚拟地�
 | `response-mode` | `first-ping` | 开启测速时的首次回答策略；可选 `first-ping`、`fastest-ip`、`fastest-response` |
 | `speed-check-timeout` | 0 → 1000 | 毫秒；显式范围 1–5000，只限制本轮可选优选等待；无有效答复时，已发出的 DNS 继续使用正常解析期限 |
 | `speed-check-concurrency` | 0 → 16 | 最大 256；只限制活动 IP 探测，满额立即跳过新探测，不排队，不限制 DNS 上游请求；每轮最多 256 个候选 IP |
+| `max-reply-ip-num` | 8 | DIRECT 优选回答的地址数量上限；显式整数 1–2147483647；不会扩大 256 候选探测上限 |
 | `dualstack-ip-selection` | `false` | 开启 DIRECT 双栈优选；仍需启用测速 |
 | `dualstack-ip-selection-threshold` | 10 | 毫秒；0–1000，另一族至少快多少才过滤当前族 |
-| `dualstack-ip-allow-force-aaaa` | `false` | 是否允许反向过滤 A、只保留更快的 IPv6；默认保留 IPv4 |
+| `dualstack-ip-allow-force-AAAA` | `false` | 是否允许反向过滤 A、只保留更快的 IPv6；默认保留 IPv4 |
 
 关闭测速可用 `speed-check-mode: [none]`；双栈优选还要求全局 `ipv6` 和 `dns.ipv6` 同时开启，任一 IPv6 开关关闭时不会进行双栈筛选。只想停止双栈优选可设 `dualstack-ip-selection: false`，保留原单族测速。
 
@@ -383,13 +395,19 @@ FakeIP 的 IPv6 与 HTTPS / SVCB 处理也保持原行为：应使用虚拟地�
 
 | 回答调整字段 | 默认值 | 行为 |
 | --- | --- | --- |
-| `force-no-cname` | `false` | 将完整、无歧义的未签名 A / AAAA CNAME 链压平到查询名；不会补造 IP 或重新分流 CNAME |
+| `force-no-CNAME` | `false` | 将完整、无歧义的未签名 A / AAAA CNAME 链压平到查询名；不会补造 IP 或重新分流 CNAME |
+| `rr-ttl` | 0 | 秒；非零时使用固定 TTL，优先于 min/max，零 TTL 仍保持零 |
 | `rr-ttl-min` | 0 | 秒；0 不设下限，保留零 TTL 的不可缓存回答 |
 | `rr-ttl-max` | 0 | 秒；0 不设上限，限制正常回答及其缓存寿命 |
+| `rr-ttl-reply-max` | 0 | 秒；仅限制送给客户端的 TTL，不缩短内部缓存寿命 |
+| `force-AAAA-SOA` | `false` | AAAA 查询本地返回 NOERROR/NODATA 与 SOA；先于 hosts / FakeIP |
+| `force-qtype-SOA` | `[]` | 按数字 qtype 或范围返回 SOA；支持标量、行内列表和块列表，详见[类型过滤](docs/dns-proxy.md#查询类型过滤) |
 
 回答调整在写缓存前完成；过期回答仍使用 `serve-expired-reply-ttl`，不会被 TTL 下限延长。CNAME 类型查询、不完整 / 歧义链、DNSSEC 等保护场景保留原回答。节点和解析器 bootstrap 不继承这些业务回答调整。
 
-`rr-ttl-min` / `rr-ttl-max` 接受 `0`–`4294967295` 秒；非零上限不能小于下限。例如把完整示例中的两项改为 `60` 和 `86400`，将适用正常回答的 TTL 约束在一分钟至一天，原本不可缓存的零 TTL 答案仍不被延长。`force-no-cname: true` 单独启用 CNAME 压平；不需要时保持 `false`，TTL 约束仍可独立使用。
+四个 `rr-ttl*` 字段接受 `0`–`4294967295` 秒；`rr-ttl` 未固定时，非零 `rr-ttl-max` 不能小于 `rr-ttl-min`。例如把完整示例中的两项改为 `60` 和 `86400`，将适用正常回答的 TTL 约束在一分钟至一天，原本不可缓存的零 TTL 答案仍不被延长。`force-no-CNAME: true` 单独启用 CNAME 压平；不需要时保持 `false`，TTL 约束仍可独立使用。
+
+**大小写要求：** `force-no-CNAME`、`force-AAAA-SOA`、`force-qtype-SOA`、`dualstack-ip-allow-force-AAAA` 与 SmartDNS 一致；从 `1.0.11` 起不接受小写别名，大小写错误会明确报错。已有配置需使用正式键名。
 
 ### 共享 DNS 连接与单个上游例外
 
@@ -443,9 +461,11 @@ dns:
 
 ## 云编译、更新与验证
 
-[构建工作流](https://github.com/chummumm/mihomo-optimized/actions/workflows/build.yml)保留规定 Go 测试、race、同步保护、安装包、真实路由 / 防火墙、systemd 生命周期及 Windows / macOS 更新器检查；Linux amd64 产物运行本地模拟服务的实际二进制端到端测试。从 `1.0.8` 起，普通 PR 构建 7 个代表目标，涉及工具链、依赖、平台专属代码或构建配置的 PR 自动使用完整 37 目标；无法可靠判断变动范围也使用完整矩阵。`main`、tag、手动、上游同步以及显式指定 ref 的构建均保留完整 37 目标，所有必需归档和安装包齐全、摘要一致后才发布。其他目标为交叉编译，不等同于在各设备实际执行。
+[构建工作流](https://github.com/chummumm/mihomo-optimized/actions/workflows/build.yml)保留功能测试、race、同步保护、真实网络 / 防火墙、systemd 生命周期和 Windows / macOS 原生更新器检查。从 `1.0.11` 起，所有 PR 只做 7 个代表平台的 `Compile check`，不生成或上传正式归档、安装包；修改工作流、平台代码或依赖也不会再次扩大成 37 个发布构建。
 
-`main` 的源码、依赖或构建配置变更通过验证后自动发布带源提交标识和 SHA-256 的下载包；PR 只生成 Actions artifact。Release 直接校验并发布同一次运行的构建产物。纯文档更新跳过自动构建和发布，代表目标、自动全量条件与显式发布入口见[发行文档](docs/releases.md)。当前 `main` 对应构建才能更新 Latest，旧构建重跑不会覆盖新版本入口。
+合并到 `main` 后，完整 37 目标的 `Release` 构建生成正式产物一次，发布任务直接校验并使用同一次运行的产物。PR 的测试程序和代表目标仍需编译；消除的是合并前后重复生成全套发布包。tag、手动和上游同步等独立发布入口也执行完整矩阵。其他目标的交叉编译不等同于在所有设备实际运行。
+
+源码、依赖或构建配置变更通过全部验证，且 69 个附件的版本、源码提交、摘要及数量一致后才发布；纯文档更新跳过自动构建和发布。当前 `main` 对应构建才能更新 Latest，旧构建重跑不会覆盖新入口。细节见[发行文档](docs/releases.md)。
 
 [稳定版同步](https://github.com/chummumm/mihomo-optimized/actions/workflows/sync-upstream.yml)计划每日北京时间 04:23 检查上游正式 release，定时任务可能延迟。先合并、测试和编译，通过后普通推送；冲突、验证失败或远端分支并发变化时停止，不强推覆盖本项目修改。基线见 [UPSTREAM_VERSION](UPSTREAM_VERSION) / [UPSTREAM_COMMIT](UPSTREAM_COMMIT)。
 

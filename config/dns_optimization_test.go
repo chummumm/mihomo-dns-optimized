@@ -18,6 +18,7 @@ func TestDNSOptimizationDefaultsAndExplicitValues(t *testing.T) {
   response-mode: fastest-ip
   speed-check-timeout: 800
   speed-check-concurrency: 8
+  max-reply-ip-num: 4
   prefetch-domain: true
   serve-expired: false
   serve-expired-ttl: 604800
@@ -37,6 +38,9 @@ func TestDNSOptimizationDefaultsAndExplicitValues(t *testing.T) {
 				t.Fatal("cache options were not wired")
 			}
 			if test.explicit {
+				if got.SpeedCheck.MaxReplyIPNum != 4 {
+					t.Fatalf("explicit maximum reply count lost: %d", got.SpeedCheck.MaxReplyIPNum)
+				}
 				if got.SpeedCheck.ResponseMode != dns.ResponseModeFastestIP {
 					t.Fatalf("explicit response mode lost: %q", got.SpeedCheck.ResponseMode)
 				}
@@ -48,6 +52,9 @@ func TestDNSOptimizationDefaultsAndExplicitValues(t *testing.T) {
 			}
 			if !test.explicit && got.SpeedCheck.ResponseMode != dns.ResponseModeFirstPing {
 				t.Fatalf("unexpected default response mode: %q", got.SpeedCheck.ResponseMode)
+			}
+			if !test.explicit && got.SpeedCheck.MaxReplyIPNum != 8 {
+				t.Fatalf("maximum reply count does not match SmartDNS default: %d", got.SpeedCheck.MaxReplyIPNum)
 			}
 		})
 	}
@@ -63,6 +70,9 @@ func TestDNSOptimizationRejectsInvalidConfiguration(t *testing.T) {
 		{"speed-check-timeout: 5001", "speed-check-timeout"},
 		{"speed-check-concurrency: 257", "speed-check-concurrency"},
 		{"speed-check-concurrency: -1", "speed-check-concurrency"},
+		{"max-reply-ip-num: 0", "max-reply-ip-num"},
+		{"max-reply-ip-num: -1", "max-reply-ip-num"},
+		{"max-reply-ip-num: 2147483648", "max-reply-ip-num"},
 		{"response-mode: first-response", "response-mode"},
 		{"response-mode: FIRST-PING", "response-mode"},
 		{"serve-expired-ttl: -1", "serve-expired-ttl"},
@@ -96,6 +106,21 @@ func TestDNSOptimizationResponseModesWithoutProbes(t *testing.T) {
 			}
 			if got.SpeedCheck.ResponseMode != mode || len(got.SpeedCheck.Mode) != 1 || got.SpeedCheck.Mode[0] != "none" {
 				t.Fatalf("response mode changed the explicit no-probe setting: %+v", got.SpeedCheck)
+			}
+		})
+	}
+}
+
+func TestDNSOptimizationMaxReplyIPNumSmartDNSRange(t *testing.T) {
+	for _, count := range []string{"1", "8", "16", "32", "2147483647"} {
+		t.Run(count, func(t *testing.T) {
+			raw, err := UnmarshalRawConfig([]byte("dns:\n  max-reply-ip-num: " + count + "\n  speed-check-mode: [none]\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := parseDNS(raw, nil)
+			if err != nil || raw.DNS.MaxReplyIPNum == nil || int64(got.SpeedCheck.MaxReplyIPNum) != *raw.DNS.MaxReplyIPNum {
+				t.Fatalf("valid SmartDNS reply limit was rejected or truncated: %+v, %v", got.SpeedCheck, err)
 			}
 		})
 	}

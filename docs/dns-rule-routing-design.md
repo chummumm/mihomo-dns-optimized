@@ -72,11 +72,11 @@ FakeIP 直接合成 A / AAAA 时使用 fake-ip-ttl，不进入真实答案缓存
 
 模式支持 TCP 指定端口与 ICMP，按配置顺序尝试。探测使用已选直连适配器的接口 / mark；数字 IP 避免递归解析，TCP 强制实际握手，不把 TFO 的延迟建连当成低延迟。总预算包含上游回答收集与探测；缺省 1000 ms，允许 1–5000 ms，0 表示缺省。并发缺省 16、最大 256，每轮去重候选最多 256。
 
-保留候选所属回答和 CNAME 链，仅收窄同一未签名地址 RRset，不拼接多个回答。DO / CD 查询及 AD / RRSIG / SIG / TSIG 等保护回答不改写。全部探测失败而已有有效回答时返回原回答；没有有效回答时报告真实解析失败。测速不保证应用吞吐提升。
+选择最快地址所属的完整 CNAME 路径，汇集相同路径多个上游的近最快终点地址，按 RTT 排序并去重；`max-reply-ip-num` 默认 8，限制优选回答数量。不同链不混合，重复地址及链 TTL 取保守值并从最早贡献来源接收时间老化。DO / CD 查询及 AD / RRSIG / SIG / TSIG 等保护回答不改写。全部探测失败时保留有效上游顺序并执行数量上限；没有有效回答时报告真实解析失败。测速不保证应用吞吐提升。
 
 ### 双栈比较
 
-`dualstack-ip-selection` 默认 false，仅在上述 DIRECT 测速已启用时生效；阈值默认 10 ms，范围 0–1000 ms，可显式设 0。`dualstack-ip-allow-force-aaaa` 默认 false，此时仅 AAAA 查询辅助查询 A；显式开启后，A 也可辅助查询 AAAA。
+`dualstack-ip-selection` 默认 false，仅在上述 DIRECT 测速已启用时生效；阈值默认 10 ms，范围 0–1000 ms，可显式设 0。`dualstack-ip-allow-force-AAAA` 默认 false，此时仅 AAAA 查询辅助查询 A；显式开启后，A 也可辅助查询 AAAA。
 
 辅助查询使用同一冻结叶子、上游池、总超时和探测并发限额，不递归调用 resolver、不重新选组、不单独写另一族缓存。必须两族都有有效未签名地址和成功测速，且另一族至少快到阈值，才返回原查询类型的 NOERROR / NODATA。某族出错、无地址、受签名保护或无成功测量时，保留原有效回答。代理不做辅助查询。
 
@@ -84,11 +84,15 @@ FakeIP 直接合成 A / AAAA 时使用 fake-ip-ttl，不进入真实答案缓存
 
 ## 6. CNAME 和 TTL 回答策略
 
-`force-no-cname` 默认 false，`rr-ttl-min` / `rr-ttl-max` 默认 0（不设该边界）。只压平同一回答中完整、无歧义的未签名 IN A / AAAA 链，将现有终点地址归属到查询名，TTL 取调整后链中最小值；不补造地址或发起新的 CNAME 解析。显式 CNAME 查询、DNAME、断链、循环、冲突和不相关 Answer 记录不压平。
+`force-no-CNAME` 默认 false；四个 `rr-ttl*` 字段默认 0。`rr-ttl` 非零时固定 TTL 并优先于 min/max；`rr-ttl-reply-max` 仅在答复输出时限制客户端 TTL，不改变内部缓存寿命。只压平同一回答中完整、无歧义的未签名 IN A / AAAA 链，将现有终点地址归属到查询名，TTL 取调整后链中最小值；不补造地址或发起新的 CNAME 解析。显式 CNAME 查询、DNAME、断链、循环、冲突和不相关 Answer 记录不压平。
 
 DO / CD 查询、AD / RRSIG / SIG / TSIG 保护、截断或不匹配回答跳过整个回答调整。OPT 的 TTL 字段是标志位，不作为寿命修改；TTL 最大值也限制 SOA MINIMUM，零 TTL 始终为零。只在新回答写缓存前调整一次，不对缓存命中或过期回答重复套用最小 TTL，不继承到节点 / 解析器 bootstrap。普通代理转发的 DNS 不经过此回答调整。
 
 这组设置独立于 DIRECT 测速：启用后也可作用于代理、显式上游或非 Rule 模式的内置业务回答。无自动路由计划时仍将完整查询内容加入缓存 / singleflight 键，避免受保护查询复用此前已改写的普通回答；不验证 DNSSEC 签名。
+
+`force-AAAA-SOA`、`force-qtype-SOA` 默认关闭，显式启用时返回本地 NOERROR/NODATA 与 SOA，基础解析器不继承。AAAA 强制策略在 hosts 前，qtype 策略在静态 hosts 后、FakeIP 前；真实 resolver 内仍先处理路由拒绝，再在缓存前处理本地类型策略。以上带记录类型的字段及 `dualstack-ip-allow-force-AAAA` 严格采用 SmartDNS 大小写，不接受小写别名。
+
+真实客户端目标 IP 在入站时保留；DIRECT 使用该地址，域名型与 FakeIP 请求才解析。域名解析获得多个优选地址时，DIRECT 使用有序 TCP 尝试和 UDP 首选地址，保留有界回退；节点 URL 测试不受影响。内部 DNS 的元数据转换清除业务固定 IP，避免上游或探针连到客户端目标。
 
 ## 7. 缓存和后台任务
 

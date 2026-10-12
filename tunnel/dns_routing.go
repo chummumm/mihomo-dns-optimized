@@ -35,6 +35,7 @@ func dnsRoutingMetadata(qname string, origin *C.Metadata) *C.Metadata {
 	metadata.Host = qname
 	metadata.SniffHost = qname
 	metadata.DstIP = netip.Addr{}
+	metadata.InboundDstIP = netip.Addr{}
 	metadata.DstGeoIP = nil
 	metadata.DstIPASN = ""
 	metadata.RawDstAddr = nil
@@ -82,6 +83,7 @@ func PrepareDNSRouting(ctx context.Context, qname string, origin *C.Metadata) (*
 	}
 	route.qname = qname
 	copyOrigin := origin.Clone()
+	copyOrigin.InboundDstIP = netip.Addr{}
 	copyOrigin.Process, copyOrigin.ProcessPath, copyOrigin.Uid = metadata.Process, metadata.ProcessPath, metadata.Uid
 	return &DNSRoutingPlan{route: route, origin: copyOrigin, epoch: DNSRoutingEpoch(), inbound: icontext.DNSRoutingInbound(ctx)}, nil
 }
@@ -115,6 +117,7 @@ func (p *DNSRoutingPlan) Exchange(ctx context.Context, wire []byte, destination 
 		return nil, errors.New("DNS routing plan requires a resolver destination")
 	}
 	metadata := p.origin.Clone()
+	metadata.InboundDstIP = netip.Addr{}
 	metadata.NetWork = destination.NetWork
 	metadata.Host, metadata.DstIP, metadata.DstPort = destination.Host, destination.DstIP, destination.DstPort
 	return exchangeDNSProxy(ctx, wire, metadata, func(*C.Metadata) (dnsProxyRoute, error) {

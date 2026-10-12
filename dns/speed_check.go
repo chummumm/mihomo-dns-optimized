@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/netip"
 	"strconv"
@@ -31,15 +32,21 @@ const (
 	maxSpeedCheckCandidates      = 256
 )
 
+// DefaultMaxReplyIPNum matches SmartDNS's default upper bound for optimized
+// address answers. It does not require padding a reply with slower addresses.
+const DefaultMaxReplyIPNum = 8
+
 // SpeedCheckConfig controls optional DIRECT destination-IP selection. A zero
 // value disables it. Timeout bounds optional selection work; an upstream which
 // has not answered yet retains the normal DNS deadline after that budget ends.
 // Concurrency limits active IP probes across queries sharing a checker.
+// MaxReplyIPNum bounds the retained fast addresses, with zero selecting eight.
 type SpeedCheckConfig struct {
-	Mode         []string
-	Timeout      time.Duration
-	Concurrency  int
-	ResponseMode string
+	Mode          []string
+	Timeout       time.Duration
+	Concurrency   int
+	ResponseMode  string
+	MaxReplyIPNum int
 }
 
 type speedCheckMode struct {
@@ -49,14 +56,15 @@ type speedCheckMode struct {
 type speedCheckProbe func(context.Context, netip.Addr, speedCheckMode) (time.Duration, error)
 
 type directSpeedChecker struct {
-	modes        []speedCheckMode
-	responseMode string
-	timeout      time.Duration
-	concurrency  int
-	slots        chan struct{}
-	probe        speedCheckProbe
-	candidates   *dnsCandidateCache
-	pool         *dnsProbePool
+	modes         []speedCheckMode
+	responseMode  string
+	maxReplyIPNum int
+	timeout       time.Duration
+	concurrency   int
+	slots         chan struct{}
+	probe         speedCheckProbe
+	candidates    *dnsCandidateCache
+	pool          *dnsProbePool
 }
 
 // ValidateSpeedCheckConfig also validates disabled configurations, so a typo
@@ -75,6 +83,9 @@ func newDirectSpeedChecker(config SpeedCheckConfig) (*directSpeedChecker, error)
 	}
 	if config.Concurrency < 0 || config.Concurrency > maxSpeedCheckConcurrency {
 		return nil, fmt.Errorf("dns.speed-check-concurrency must be between 1 and %d (or 0 for default)", maxSpeedCheckConcurrency)
+	}
+	if config.MaxReplyIPNum < 0 || int64(config.MaxReplyIPNum) > math.MaxInt32 {
+		return nil, fmt.Errorf("dns.max-reply-ip-num must be between 1 and %d (or 0 for default)", int64(math.MaxInt32))
 	}
 	var modes []speedCheckMode
 	seen := make(map[string]bool)
@@ -112,10 +123,14 @@ func newDirectSpeedChecker(config SpeedCheckConfig) (*directSpeedChecker, error)
 	if config.Concurrency == 0 {
 		config.Concurrency = defaultSpeedCheckConcurrency
 	}
+	if config.MaxReplyIPNum == 0 {
+		config.MaxReplyIPNum = DefaultMaxReplyIPNum
+	}
 	return &directSpeedChecker{
 		modes: modes, timeout: config.Timeout, concurrency: config.Concurrency,
-		responseMode: normalizeResponseMode(config.ResponseMode),
-		slots:        make(chan struct{}, config.Concurrency), probe: probeDirectIP,
+		responseMode:  normalizeResponseMode(config.ResponseMode),
+		maxReplyIPNum: config.MaxReplyIPNum,
+		slots:         make(chan struct{}, config.Concurrency), probe: probeDirectIP,
 		pool:       newDNSProbePool(config.Concurrency, config.Timeout),
 		candidates: newDNSCandidateCache(),
 	}, nil
@@ -152,9 +167,9 @@ func speedCheckDeadline(ctx context.Context, timeout time.Duration) time.Time {
 }
 
 // Exchange must only be called with an upstream pool selected for DIRECT. An
-// existing non-DIRECT routing plan is also rejected defensively. Different
-// upstream CNAME chains and RRsets are never merged: the winning IP selects one
-// intact response, whose unsigned terminal address RRset may then be narrowed.
+// existing non-DIRECT routing plan is also rejected defensively. The winning
+// IP selects one CNAME chain. Only compatible unsigned terminal address RRsets
+// may contribute other measured fast addresses; incompatible chains stay apart.
 func (s *directSpeedChecker) Exchange(ctx context.Context, clients []dnsClient, query *D.Msg) (*D.Msg, bool, error) {
 	var probe speedCheckProbe
 	if s != nil {
@@ -235,20 +250,25 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 	var firstError error
 	policyRejected := false
 	var best *speedCheckResult
+	var responses []*D.Msg
+	measurements := make(map[netip.Addr]time.Duration)
 	probeSkipped := false
 	seen := make(map[netip.Addr]bool)
 	remaining, pending := len(clients), 0
 	finish := func() (*D.Msg, bool, error) {
 		if best != nil {
-			answer := speedCheckAnswer(best.candidate, query.Question[0].Qtype)
-			inheritDNSAnswerLifetime(ctx, answer, best.candidate.response)
+			answer := speedCheckAnswer(ctx, *best, query.Question[0], responses, measurements, s.maxReplyIPNum)
 			return answer, true, nil
 		}
 		if firstAddressResponse != nil {
-			return firstAddressResponse, true, nil
+			answer := speedCheckLimitAnswer(firstAddressResponse, query.Question[0], s.maxReplyIPNum)
+			inheritDNSAnswerLifetime(ctx, answer, firstAddressResponse)
+			return answer, true, nil
 		}
 		if firstResponse != nil {
-			return firstResponse, true, nil
+			answer := speedCheckLimitAnswer(firstResponse, query.Question[0], s.maxReplyIPNum)
+			inheritDNSAnswerLifetime(ctx, answer, firstResponse)
+			return answer, true, nil
 		}
 		if firstError != nil {
 			return nil, true, fmt.Errorf("all DNS requests failed: %w", firstError)
@@ -265,8 +285,11 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 		if measurements, ok := ctx.Value(dnsProbeMeasurementsKey{}).(*dualStackMeasurements); ok {
 			measurements.observe(result.candidate.ip, result.rtt, result.err)
 		}
-		if result.err == nil && result.rtt >= 0 && (best == nil || result.rtt < best.rtt) {
-			best = &result
+		if result.err == nil && result.rtt >= 0 {
+			measurements[result.candidate.ip] = result.rtt
+			if best == nil || result.rtt < best.rtt || (result.rtt == best.rtt && result.candidate.ip.Less(best.candidate.ip)) {
+				best = &result
+			}
 		}
 	}
 	for remaining > 0 || pending > 0 {
@@ -330,11 +353,16 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 			}
 			if !earlyOffered && mode == ResponseModeFastestResponse {
 				earlyOffered = true
-				if !deliverDNSEarlyResponse(ctx, result.message) {
-					return result.message, true, nil
+				answer := speedCheckLimitAnswer(result.message, query.Question[0], s.maxReplyIPNum)
+				inheritDNSAnswerLifetime(ctx, answer, result.message)
+				if !deliverDNSEarlyResponse(ctx, answer) {
+					return answer, true, nil
 				}
 			}
 			candidates := speedCheckCandidates(result.message, query.Question[0])
+			if len(candidates) != 0 {
+				responses = append(responses, result.message)
+			}
 			if firstAddressResponse == nil && len(candidates) != 0 {
 				firstAddressResponse = result.message
 			}
@@ -405,28 +433,11 @@ func speedCheckResponseMatches(query, response *D.Msg) bool {
 }
 
 func speedCheckCandidates(message *D.Msg, question D.Question) []speedCheckCandidate {
-	if message.Rcode != D.RcodeSuccess || message.Truncated {
+	chain, valid := speedCheckResponseChain(message, question)
+	if !valid {
 		return nil
 	}
-	cnames := make(map[string]string)
-	for _, rr := range message.Answer {
-		if cname, ok := rr.(*D.CNAME); ok && cname.Hdr.Class == D.ClassINET {
-			owner, target := strings.ToLower(cname.Hdr.Name), strings.ToLower(cname.Target)
-			if old, exists := cnames[owner]; exists && old != target {
-				return nil
-			}
-			cnames[owner] = target
-		}
-	}
-	owner := strings.ToLower(question.Name)
-	visited := make(map[string]bool)
-	for cnames[owner] != "" {
-		if visited[owner] {
-			return nil
-		}
-		visited[owner] = true
-		owner = cnames[owner]
-	}
+	owner := chain.owner
 	var result []speedCheckCandidate
 	for _, rr := range message.Answer {
 		if rr.Header().Class != D.ClassINET || rr.Header().Rrtype != question.Qtype || !strings.EqualFold(rr.Header().Name, owner) {
@@ -452,25 +463,6 @@ func speedCheckAddress(rr D.RR) (netip.Addr, bool) {
 	}
 	ip, ok := netip.AddrFromSlice(address)
 	return ip.Unmap(), ok
-}
-
-func speedCheckAnswer(candidate speedCheckCandidate, qtype uint16) *D.Msg {
-	message := candidate.response.Copy()
-	// Do not rewrite authenticated/signed RRsets, including TSIG and SIG(0).
-	if speedCheckProtected(message) {
-		return message
-	}
-	answer := message.Answer[:0]
-	for _, rr := range message.Answer {
-		if rr.Header().Class == D.ClassINET && rr.Header().Rrtype == qtype && strings.EqualFold(rr.Header().Name, candidate.owner) {
-			if ip, ok := speedCheckAddress(rr); ok && ip != candidate.ip {
-				continue
-			}
-		}
-		answer = append(answer, rr)
-	}
-	message.Answer = answer
-	return message
 }
 
 func speedCheckProtected(message *D.Msg) bool {

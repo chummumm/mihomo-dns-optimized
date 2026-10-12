@@ -16,10 +16,17 @@ func parseDNSOptimizations(raw RawDNS) (dns.SpeedCheckConfig, *dns.CacheOptions,
 		return speed, nil, fmt.Errorf("dns.speed-check-timeout must be 0 (default) or 1..5000 milliseconds")
 	}
 	speed = dns.SpeedCheckConfig{
-		Mode:         append([]string(nil), raw.SpeedCheckMode...),
-		ResponseMode: raw.ResponseMode,
-		Timeout:      time.Duration(raw.SpeedCheckTimeout) * time.Millisecond,
-		Concurrency:  raw.SpeedCheckConcurrency,
+		Mode:          append([]string(nil), raw.SpeedCheckMode...),
+		ResponseMode:  raw.ResponseMode,
+		Timeout:       time.Duration(raw.SpeedCheckTimeout) * time.Millisecond,
+		Concurrency:   raw.SpeedCheckConcurrency,
+		MaxReplyIPNum: dns.DefaultMaxReplyIPNum,
+	}
+	if raw.MaxReplyIPNum != nil {
+		if *raw.MaxReplyIPNum < 1 || *raw.MaxReplyIPNum > math.MaxInt32 {
+			return speed, nil, fmt.Errorf("dns.max-reply-ip-num must be between 1 and %d", int64(math.MaxInt32))
+		}
+		speed.MaxReplyIPNum = int(*raw.MaxReplyIPNum)
 	}
 	if speed.ResponseMode == "" {
 		speed.ResponseMode = dns.ResponseModeFirstPing

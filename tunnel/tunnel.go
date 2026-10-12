@@ -284,6 +284,9 @@ func fixMetadata(metadata *C.Metadata) {
 		metadata.DstIP = ip.Unmap()
 		metadata.Host = ""
 	}
+	if metadata.DstIP.IsValid() && !resolver.IsFakeIP(metadata.DstIP) {
+		metadata.InboundDstIP = metadata.DstIP
+	}
 }
 
 func needLookupIP(metadata *C.Metadata) bool {
@@ -327,6 +330,15 @@ func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err erro
 		}
 		return
 	}
+	if metadata.InboundDstIP.IsValid() {
+		// IP rules can inspect the client's original address without DNS.
+		// Restore the pre-match destination afterwards: only DIRECT opts into
+		// the fixed IP; other outbounds keep their sniff/hostname behavior.
+		ip, geoIP, asn := metadata.DstIP, metadata.DstGeoIP, metadata.DstIPASN
+		defer func() {
+			metadata.DstIP, metadata.DstGeoIP, metadata.DstIPASN = ip, geoIP, asn
+		}()
+	}
 	helper := newRuleMatchHelper(metadata, true)
 	switch Mode() {
 	case Direct:
@@ -358,7 +370,12 @@ func newRuleMatchHelperWithProcessSnapshot(metadata *C.Metadata, allowResolveIP,
 		attemptProcessLookup = !processSnapshot && (processMetadata.Type != C.INNER || (!allowResolveIP && processMetadata.InName == "DNS" && processMetadata.SourceValid()))
 	)
 
-	if node, ok := resolver.DefaultHosts.Search(metadata.Host, false); allowResolveIP && ok {
+	if allowResolveIP && metadata.InboundDstIP.IsValid() {
+		// Sniffing may replace the hostname but must not trigger another DNS
+		// lookup just to evaluate IP rules for a real client destination.
+		metadata.DstIP = metadata.InboundDstIP
+		resolved = true
+	} else if node, ok := resolver.DefaultHosts.Search(metadata.Host, false); allowResolveIP && ok {
 		metadata.DstIP, _ = node.RandIP()
 		resolved = true
 	}

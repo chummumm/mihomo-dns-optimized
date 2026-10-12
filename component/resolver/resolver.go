@@ -55,6 +55,14 @@ type Resolver interface {
 	ResetConnection()
 }
 
+// PreferIPOrder reports whether a resolver currently supplies a preferred
+// address order. It is optional so system and third-party resolvers retain
+// their existing connection selection behavior.
+func PreferIPOrder(r Resolver) bool {
+	ordered, ok := r.(interface{ PreferIPOrder() bool })
+	return ok && ordered.PreferIPOrder()
+}
+
 // LookupIPv4WithResolver same as LookupIPv4, but with a resolver
 func LookupIPv4WithResolver(ctx context.Context, host string, r Resolver) ([]netip.Addr, error) {
 	if node, ok := DefaultHosts.Search(host, false); ok {

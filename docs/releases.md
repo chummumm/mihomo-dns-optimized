@@ -1,6 +1,30 @@
 # 预编译文件、安装包与内核更新
 
-项目使用独立版本 **`mihomo-optimized-vX.Y.Z`**，首版为 `mihomo-optimized-v1.0.0`。`main` 的源码、依赖或构建配置变更在全部测试和完整编译成功后生成固定提交的 GitHub Release。Latest 仅在该构建仍对应当前 `main` 时更新；PR 只生成 Actions artifacts。纯文档变更不消耗版本号，也不触发自动发布。
+项目使用独立版本 **`mihomo-optimized-vX.Y.Z`**，首版为 `mihomo-optimized-v1.0.0`。`main` 的源码、依赖或构建配置变更在全部测试和完整编译成功后生成固定提交的 GitHub Release。Latest 仅在该构建仍对应当前 `main` 时更新；PR 只做合并前检查，不生成正式发布包。纯文档变更不消耗版本号，也不触发自动发布。
+
+## 1.0.11：SmartDNS 多地址与配置对齐、DIRECT 固定目标、发布构建去重
+
+DIRECT DNS 优选不再固定缩为一个 IPv4 / IPv6。按 SmartDNS 当前源码的接近最快条件筛选，并将完整 CNAME 路径一致的多个上游答案合并、去重、按 RTT 排序；默认最多返回 8 个，新增 `max-reply-ip-num` 可设置上限。不同 CNAME 路径、受保护的 DNSSEC 数据不混合；重复地址和链采用保守 TTL，已有缓存隔离和 256 候选探测上限继续生效。`first-ping` 的首次答复可能只有一个，后台完成及缓存可以含多个；`fastest-ip` 返回本轮比较出的多个合格地址。数量设置只作用于 DIRECT 优选路径，不保证每次凑满。
+
+新增 `rr-ttl`、`rr-ttl-reply-max`、`force-AAAA-SOA`、`force-qtype-SOA`。固定 `rr-ttl` 优先于 min/max；回复上限只降低客户端 TTL，不缩短内部缓存。类型过滤返回本地 NOERROR/NODATA 与 SOA；qtype 支持数字、范围、逗号 / 空格分隔、YAML 行内 / 块列表，以及清空或清除指定项。业务 bootstrap 不继承这些选项。详细语义、优先级和例子见 [DNS 回答设置](dns-proxy.md#cname-与-ttl-调整)与 [SmartDNS 对照](smartdns-migration.md)。
+
+**配置名称变更：严格采用 SmartDNS 大小写，不保留小写别名。** 正式名称为 `force-no-CNAME`、`force-AAAA-SOA`、`force-qtype-SOA`、`dualstack-ip-allow-force-AAAA`。旧配置中的小写或其他大小写变体会明确报配置错误，需改成正式名称；程序不会静默忽略，也不会自动重写用户配置。升级前可用 `mihomo -t` 校验目标版本配置。
+
+DIRECT / Compatible 尊重客户端已指定的真实目标 IP，包括后来被 redir-host、hosts 或嗅探改写的情况；不再按域名重新解析、随机换址。域名仍用于域名规则，IP 规则复用原真实 IP，其他代理保留既有域名连接语义。域名型 SOCKS / HTTP 及 FakeIP 恢复出的域名仍需真实解析；此时启用 DNS 优选的 DIRECT 优先使用排序结果，TCP 保留有界回退，UDP 保持所选地址及 NAT 映射。内部 DNS 上游与测速探针各自使用正确的目标。代理组 `url-test` / 节点健康检查继续运行。
+
+本轮只发布内核；面板继续使用已发布的 `0.4.8`。`1.0.10` 的统计连续性、裸内核更新保护和四类浏览器本地更新时间全部保留。
+
+### PR 与合并后不再重复生成全套发布包
+
+| 阶段 | 构建检查 | 正式归档 / 安装包 |
+| --- | --- | --- |
+| 所有 PR，包括工作流、平台、依赖变更 | 功能 / race / 网络 / systemd / 原生更新器检查，加 7 个代表目标的 `Compile check` | 不生成、不上传 |
+| 合并到 `main` | 全部门禁，加 37 个目标的 `Release` 构建 | 生成一次 |
+| 同次运行的发布任务 | 核对版本、源码提交、69 附件及摘要 | 直接使用上一步产物，不重新编译 |
+
+7 个代表目标为 Linux amd64 / arm64 / 386、Windows amd64、macOS arm64、FreeBSD amd64、Android arm64-v8。纯编译检查使用相同平台工具链，校验二进制构建信息后清理临时文件；Linux amd64 还运行实际二进制 DNS 回归。PR 测试和这些代表目标仍需要编译；取消的是此前高风险 PR 的完整 37 目标发布打包和合并后再次打包的重复。
+
+独立 tag、手动、上游同步或显式 ref 的发布入口仍使用完整矩阵。不能可靠复用不同提交的 PR 包来冒充最终源码。较少见平台的错误可能在合并后的完整矩阵中发现，但任一必需目标或验证失败都会阻止发布。
 
 ## 1.0.10：连续的 DNS 上游统计、裸内核更新保护与四类更新时间
 
@@ -27,25 +51,9 @@ SHA256、固定发行标签、架构 / 浮点 ABI 选择及既有重启事务继
 
 观察或核对故障后的首次完整应用成功会输出一次 INFO 级别的 `Network synchronization restored` 日志，并列出 TCP / UDP 各地址族实际提交的 `ready`、`protected` 或 `disabled` 状态。核对恢复时，部分后端仍可能处于保护中；`ready` 也不代表 WAN 连通性探测通过。重复 RA 和后续健康核对不会重复输出这条日志，详见[系统事件驱动](transparent-proxy-plan.md#系统事件驱动)。
 
-## 1.0.8：减少 PR 的重复全量构建
+## 1.0.8 的历史矩阵策略
 
-从 `mihomo-optimized-v1.0.8` 起，普通 PR 使用 7 个代表目标，合并后的正式构建仍使用完整 37 目标矩阵。矩阵选择只减少 PR 的跨平台编译和打包任务：现有功能测试、race 检查、真实网络命名空间中的路由 / 防火墙与防泄漏测试、systemd 生命周期测试，以及 Windows / macOS 更新器测试全部保留。
-
-| 触发场景 | 构建矩阵 | 产物用途 |
-| --- | --- | --- |
-| 普通 PR | 7 个代表目标 | Actions artifacts，用于合并前验证 |
-| 涉及平台兼容或构建风险的 PR，或无法可靠取得差异 | 完整 37 个目标 | Actions artifacts，用于合并前验证 |
-| `main`、tag、手动、上游同步或显式指定 ref 的构建 | 完整 37 个目标 | 按发布条件使用本次运行的正式产物 |
-
-代表目标固定为 `linux-amd64`、`linux-arm64`、`linux-386`、`windows-amd64`、`darwin-arm64`、`freebsd-amd64`、`android-arm64-v8`，覆盖主要操作系统、Linux 64 / 32 位与 Android CGO 构建。选择器基于 PR 的真实 base 与 head 执行 `base...head` 差异比较，不用临时合并提交代替变更范围。以下变动自动扩大到完整矩阵：
-
-- Go 工具链 / 依赖文件（`go.mod`、`go.sum`、`go.work*`）、`UPSTREAM*`，以及 `packaging/`、`scripts/`、工作流或 `vendor/`。
-- 平台或架构专属代码，C / C++ / 汇编，以及涉及 Go build constraints、`runtime.GOOS` / `runtime.GOARCH` 的变动。
-- base / head 缺失、Git 差异读取失败或无法可靠判断的情况。
-
-少见架构问题仍可能在合并后的完整矩阵中才发现；正式发布必须等全部测试和全部 37 个目标通过。Release 任务继续下载**同一次 workflow 运行**的产物并校验完整 69 个附件，不重新编译，也不跨运行复用 PR 包；版本、源码提交和摘要的检查保持不变。
-
-一次普通 PR 加合并后的矩阵任务由 `37 + 37 = 74` 个降为 `7 + 37 = 44` 个，减少 30 个，约 41%。这是矩阵任务数量，不是总 CI 运行分钟或完成时间的保证；测试程序本身仍需要编译。高风险 PR 仍为 74 个任务，本次修改了工作流和发布脚本，因此本次 PR 也会完整构建。
+`1.0.8` 曾把普通 PR 降为 7 个正式打包目标，但涉及平台、依赖、工作流或无法可靠判断差异时仍扩为 37 个，合并后还会完整构建。该策略已由上面的 `1.0.11` 检查 / 发布分离方案替代，所有 PR 均不再生成正式发布包。
 
 ## 1.0.6：Linux 透明代理与路由托管
 
@@ -162,14 +170,15 @@ sudo systemctl enable --now mihomo
 
 构建脚本检查每个 native 包的架构、版本、配置保护、文件清单/权限、账号工具依赖及唯一预期安装钩子，以及其二进制与对应归档完全一致。钩子行为测试覆盖新账号、已有用户 / 主组复用、重复升级和失败传播；账号及 chown 命令被限定到测试夹具。回归还在隔离 dpkg 根目录执行旧包到新包的真实迁移，验证本地修改的配置保留与文件归属。Linux amd64 产物实际执行 `-v`、`-t` 和本地模拟上游的 DNS 端到端回归；不会安装或启动测试宿主机已有的 mihomo 服务。stop 回归以现有非 root 测试账号创建使用隔离网络命名空间的临时 systemd 单元，使用该账号持有的临时资源，并在结束时撤销。
 
-开发者可用以下命令查看矩阵。省略 profile 时始终返回完整 37 目标；PR profile 根据指定提交的差异自动返回 7 或 37 目标，不能用于缩减正式发布的必需产物集合：
+开发者可用以下命令查看矩阵。默认返回完整 37 目标；PR profile 固定返回 7 个纯编译检查目标且不打包，不能用于缩减正式发布的必需产物集合：
 
 ```sh
 python3 scripts/release-build.py matrix
-python3 scripts/release-build.py matrix --profile pr --base <base-sha> --head <head-sha>
+python3 scripts/release-build.py matrix --profile pr
+python3 scripts/release-build.py compile-check linux-amd64
 ```
 
-运行 `bash scripts/ci-check.sh build <target> <绝对输出目录> mihomo-optimized-v1.0.9 <ISO时间>` 可构建单个目标；版本参数须与当前 `PROJECT_VERSION` 一致，`amd64` / `arm64` 是 Linux 别名。依赖 `dpkg-deb`、`rpm`/`rpmbuild`/`rpm2cpio`、`cpio`、`zstd`、`fakeroot`、Python 3.12 和 MetaCubeX Go；Android 还需矩阵指定的固定 NDK。
+运行 `bash scripts/ci-check.sh build <target> <绝对输出目录> mihomo-optimized-v1.0.11 <ISO时间>` 可构建单个目标；版本参数须与当前 `PROJECT_VERSION` 一致，`amd64` / `arm64` 是 Linux 别名。依赖 `dpkg-deb`、`rpm`/`rpmbuild`/`rpm2cpio`、`cpio`、`zstd`、`fakeroot`、Python 3.12 和 MetaCubeX Go；Android 还需矩阵指定的固定 NDK。
 
 ## 内核自动更新
 

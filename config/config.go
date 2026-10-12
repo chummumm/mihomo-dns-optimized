@@ -264,16 +264,21 @@ type RawDNS struct {
 	ResponseMode                  string                              `yaml:"response-mode" json:"response-mode"`
 	SpeedCheckTimeout             int64                               `yaml:"speed-check-timeout" json:"speed-check-timeout"`
 	SpeedCheckConcurrency         int                                 `yaml:"speed-check-concurrency" json:"speed-check-concurrency"`
+	MaxReplyIPNum                 *int64                              `yaml:"max-reply-ip-num" json:"max-reply-ip-num"`
 	PrefetchDomain                bool                                `yaml:"prefetch-domain" json:"prefetch-domain"`
 	ServeExpired                  *bool                               `yaml:"serve-expired" json:"serve-expired"`
 	ServeExpiredTTL               int64                               `yaml:"serve-expired-ttl" json:"serve-expired-ttl"`
 	ServeExpiredReplyTTL          *int64                              `yaml:"serve-expired-reply-ttl" json:"serve-expired-reply-ttl"`
-	ForceNoCNAME                  bool                                `yaml:"force-no-cname" json:"force-no-cname"`
+	ForceNoCNAME                  bool                                `yaml:"force-no-CNAME" json:"force-no-CNAME"`
+	ForceAAAASOA                  bool                                `yaml:"force-AAAA-SOA" json:"force-AAAA-SOA"`
+	ForceQtypeSOA                 RawDNSQtypes                        `yaml:"force-qtype-SOA" json:"force-qtype-SOA"`
+	RRTTL                         int64                               `yaml:"rr-ttl" json:"rr-ttl"`
 	RRTTLMin                      int64                               `yaml:"rr-ttl-min" json:"rr-ttl-min"`
 	RRTTLMax                      int64                               `yaml:"rr-ttl-max" json:"rr-ttl-max"`
+	RRTTLReplyMax                 int64                               `yaml:"rr-ttl-reply-max" json:"rr-ttl-reply-max"`
 	DualStackIPSelection          bool                                `yaml:"dualstack-ip-selection" json:"dualstack-ip-selection"`
 	DualStackIPSelectionThreshold *int64                              `yaml:"dualstack-ip-selection-threshold" json:"dualstack-ip-selection-threshold"`
-	DualStackIPAllowForceAAAA     bool                                `yaml:"dualstack-ip-allow-force-aaaa" json:"dualstack-ip-allow-force-aaaa"`
+	DualStackIPAllowForceAAAA     bool                                `yaml:"dualstack-ip-allow-force-AAAA" json:"dualstack-ip-allow-force-AAAA"`
 	NameServerPolicy              *orderedmap.OrderedMap[string, any] `yaml:"nameserver-policy" json:"nameserver-policy"`
 	ProxyServerNameserver         []string                            `yaml:"proxy-server-nameserver" json:"proxy-server-nameserver"`
 	ProxyServerNameserverPolicy   *orderedmap.OrderedMap[string, any] `yaml:"proxy-server-nameserver-policy" json:"proxy-server-nameserver-policy"`

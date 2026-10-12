@@ -67,6 +67,7 @@ func (r *Resolver) exchangeBatch(ctx context.Context, clients []dnsClient, query
 	// IPv6 here is the effective global-and-DNS setting supplied by the
 	// executor. A family that the DNS service cannot deliver must never hide
 	// the other family's valid answer, even for programmatically built config.
-	dualStack.Enabled = dualStack.Enabled && r.ipv6
+	dualStack.Enabled = dualStack.Enabled && r.ipv6 &&
+		!r.answerPolicy.forcesQtype(D.TypeA) && !r.answerPolicy.forcesQtype(D.TypeAAAA)
 	return r.speedChecker.ExchangeDualStackWithProbe(ctx, clients, query, probe, dualStack)
 }

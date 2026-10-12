@@ -44,10 +44,15 @@ dns:
   response-mode: first-ping
   speed-check-timeout: 1000       # 毫秒；0采用1000，最大5000
   speed-check-concurrency: 16    # 0采用16，最大256
+  max-reply-ip-num: 8            # 优选地址上限；不保证凑满
   dualstack-ip-selection: true
   dualstack-ip-selection-threshold: 10  # 毫秒；允许0–1000
-  dualstack-ip-allow-force-aaaa: false   # 默认保留IPv4
-  force-no-cname: true          # 仅压平完整、未受保护的A/AAAA回答链
+  dualstack-ip-allow-force-AAAA: false   # 默认保留IPv4
+  force-no-CNAME: true          # 仅压平完整、未受保护的A/AAAA回答链
+  force-AAAA-SOA: false
+  force-qtype-SOA: []            # 例如 [65]，或块列表/"65 128-256"
+  rr-ttl: 0                     # 非零时固定TTL，优先于min/max
+  rr-ttl-reply-max: 0            # 仅限制客户端TTL，不缩短内部缓存
   rr-ttl-min: 0                 # 不抬高原TTL
   rr-ttl-max: 3600              # 正常回答与缓存的TTL上限，秒
   prefetch-domain: true

@@ -11,11 +11,12 @@
 | 默认上游、独立 Global 上游组 | `direct-nameserver` 与 `nameserver`；先按 QNAME 匹配业务规则，再按实际出口类型选池 |
 | `server-https` / `server-tls` / QUIC 上游 | 原生 `https://` / `tls://` / `quic://`；继承本次已冻结出口，保留 TLS 证书校验 |
 | `speed-check-mode tcp:443,tcp:80,ping` | `speed-check-mode: [tcp:443, tcp:80, ping]`，仅实际 DIRECT / Compatible 进行 IP 探测 |
-| `response-mode fastest-ip` | 本项目开启测速后在预算内收集候选，选择成功探测耗时最小的 IP；不另增加同义 `response-mode` 字段 |
+| `response-mode fastest-ip` | `response-mode: fastest-ip`；也支持 `first-ping`、`fastest-response`，开启测速后按所选时机回答 |
+| `max-reply-ip-num 8` | `max-reply-ip-num: 8`；默认 8，仅作用于 DIRECT 优选路径，显式范围 1–2147483647 |
 | Global `-no-speed-check` | 代理 DNS 路径始终不做本地 IP 测速 |
 | `dualstack-ip-selection yes` | `dualstack-ip-selection: true`，仍需启用测速，仅作用于自动 DIRECT 查询 |
 | `dualstack-ip-selection-threshold 10` | 同名字段，毫秒，默认 10，允许 0–1000 |
-| `dualstack-ip-allow-force-AAAA no` | `dualstack-ip-allow-force-aaaa: false`，默认保留 IPv4 |
+| `dualstack-ip-allow-force-AAAA no` | `dualstack-ip-allow-force-AAAA: false`，默认保留 IPv4 |
 | Global `-no-dualstack-selection` | 代理路径不做双栈探测，也不为了本地优选额外查询另一族 |
 | `prefetch-domain yes` | `prefetch-domain: true`；采用本项目有界、带真实来源的热点预取机制 |
 | `serve-expired yes` | `serve-expired: true` |
@@ -23,17 +24,21 @@
 | `serve-expired-reply-ttl 0` | 同名字段，可显式设为 0；不延长原缓存过期点 |
 | `cache-size 384000` | `cache-max-size: 384000`；该容量用于各 resolver 的缓存，非预分配相同数量的记录 |
 | `cache-persist no` | 使用内存 DNS 缓存；无需新增持久化开关 |
+| `rr-ttl 300` | `rr-ttl: 300`；固定正常回答 TTL，优先于 min/max，默认 0 不固定 |
 | `rr-ttl-min 0` / `rr-ttl-max 3600` | 同名字段；0 表示不限制对应边界，单位秒 |
-| `force-no-CNAME yes` | `force-no-cname: true`；压平完整、无歧义、未签名的 A / AAAA 回答链 |
+| `rr-ttl-reply-max 60` | `rr-ttl-reply-max: 60`；只限制客户端收到的 TTL，内部缓存寿命保留 |
+| `force-AAAA-SOA yes` | `force-AAAA-SOA: true`；AAAA 返回本地 NOERROR/NODATA 与 SOA |
+| `force-qtype-SOA 65 128-256` | `force-qtype-SOA: [65, "128-256"]`；同样支持标量、块列表和清除语法 |
+| `force-no-CNAME yes` | `force-no-CNAME: true`；压平完整、无歧义、未签名的 A / AAAA 回答链 |
 | `resolv-file /etc/resolv.conf` | 建议显式配置 `default-nameserver` 与 `proxy-server-nameserver`，避免把系统 DNS 再指回本机监听而循环 |
 
-`force-no-cname`、`dualstack-ip-allow-force-aaaa` 使用全小写的 Mihomo YAML 字段名。SmartDNS 的空格参数、`yes/no` 和混合大小写字段不能整段直接粘贴进 YAML。
+`1.0.11` 起，`force-no-CNAME`、`force-AAAA-SOA`、`force-qtype-SOA`、`dualstack-ip-allow-force-AAAA` 严格采用 SmartDNS 大小写，不接受小写别名；旧写法会明确报配置错误。仍需按 YAML 语法书写键和值，例如 SmartDNS 的 `yes/no` 改为 `true/false`，数字列表使用合法 YAML。
 
 ### 测速与双栈的边界
 
-`fastest-ip` 迁移的是在候选中优选最快可达 IP 的目标。本项目的可选优选预算默认 1000 毫秒；到期仍无合格 DNS 答复时，已有 DNS 查询继续使用正常解析期限，不重发整批上游。候选数与活动探测数有上限，探测满额立即跳过，不等待名额。候选来自一份已通过原版过滤的完整回答，不拼接不同上游的 CNAME 链。全部探测失败而已有有效回答时返回原回答。两者的具体等待策略并不完全相同。
+`fastest-ip` 迁移的是在候选中优选最快可达 IP 的目标。本项目的可选优选预算默认 1000 毫秒；到期仍无合格 DNS 答复时，已有 DNS 查询继续使用正常解析期限，不重发整批上游。候选数与活动探测数有上限，探测满额立即跳过，不等待名额。候选可来自多个已通过原版过滤的完整回答；只合并完整 CNAME 路径一致的终点地址，重复地址和链 TTL 取保守值。按 RTT 排序，保留接近最快的地址并限制数量；全部探测失败时保留上游顺序和有效回答，并执行数量上限。筛选阈值采用 SmartDNS 当前源码的 0.1 ms 精度与近最快条件；初次 first-ping 可能只有一个地址，后台完成或缓存命中才返回多个。两者的资源预算与保护边界并不完全相同。
 
-双栈查询共用同一次选路、同一解析器池、一个总超时预算和共享探测并发上限。默认只在 AAAA 查询中辅助查询 A，只有两族均有可用且成功测速的结果、IPv4 快至少设定阈值时，才对 AAAA 返回 NOERROR / NODATA。开启 `dualstack-ip-allow-force-aaaa` 后才允许反向过滤 A。
+双栈查询共用同一次选路、同一解析器池、一个总超时预算和共享探测并发上限。默认只在 AAAA 查询中辅助查询 A，只有两族均有可用且成功测速的结果、IPv4 快至少设定阈值时，才对 AAAA 返回 NOERROR / NODATA。开启 `dualstack-ip-allow-force-AAAA` 后才允许反向过滤 A。
 
 这种临时过滤回答带零 TTL，不写入缓存，避免短暂的网络差异被 `serve-expired` 延续数天。辅助查询不单独填充另一族缓存。DNSSEC、某族查询失败、某族没有地址或测速全部失败时，不以失败冒充“更慢”去过滤原有效回答。此实现不复制 SmartDNS 的所有跨族缓存协同机制。
 
@@ -41,11 +46,13 @@
 
 ### 回答改写与 TTL 的边界
 
-TTL 调整在写缓存前完成；零 TTL 仍保持不可缓存。过期回答使用 `serve-expired-reply-ttl`，不会重新套用 TTL 下限。节点域名和解析器 bootstrap 不继承业务回答调整。
+`rr-ttl` 非零时优先于 min/max，在写缓存前应用一次；零 TTL 仍保持不可缓存。`rr-ttl-reply-max` 在输出答复时另行限制客户端 TTL，内部缓存不受此上限影响。过期回答使用 `serve-expired-reply-ttl`，不会重新套用 TTL 下限。节点域名和解析器 bootstrap 不继承业务回答调整。
 
 去 CNAME 仅在同一回答中已经存在完整 A / AAAA 链时，把终点地址改写到查询名，并采用整条链的最短 TTL；不会补造地址或为隐藏 CNAME 重新解析。CNAME 类型查询、DNAME、断链、循环、歧义链及额外不相关的 Answer 记录保留原形。
 
 DO / CD 查询以及 AD、RRSIG、SIG、TSIG 等受保护回答不进行地址优选、CNAME 压平或 TTL 改写。这是明确的保守边界，不宣称对所有回复实现无条件的 `force-no-CNAME`。本功能传递 DNSSEC 数据，不验证 DNSSEC 签名。
+
+类型过滤、YAML 列表与清除语法、hosts / FakeIP 优先级见[查询类型过滤](dns-proxy.md#查询类型过滤)。DIRECT 已有客户端真实 IP 时直接连接该 IP；只有域名或 FakeIP 才需要解析，避免客户端已选地址被内核重新替换。
 
 ### 缓存与预取的边界
 
@@ -93,4 +100,4 @@ SmartDNS 的两个监听、SOCKS 回送端口和进程用户不需要照搬。�
 
 新安装包只包含通用起始配置，不包含个人节点或屏蔽清单。安装位置、配置保留及手动启停说明见[安装包文档](releases.md)。改用原生 DNS 前先执行 `mihomo -t`，确认标准 53 端口由计划中的服务监听，并让客户端使用该地址。
 
-原 SmartDNS 参数语义参考其[官方配置表](https://pymumu.github.io/smartdns/en/configuration/)、[测速模式](https://pymumu.github.io/smartdns/en/config/check-speed-mode/)和[双栈说明](https://pymumu.github.io/smartdns/en/config/dualstack/)。实际实现与限制以本项目文档和测试为准。
+原 SmartDNS 参数语义参考其[官方配置表](https://pymumu.github.io/smartdns/en/configuration/)、[测速模式](https://pymumu.github.io/smartdns/en/config/check-speed-mode/)和[双栈说明](https://pymumu.github.io/smartdns/en/config/dualstack/)。本次配置及多地址行为还核对了官方源码提交 [`dfc9ef4`](https://github.com/pymumu/smartdns/tree/dfc9ef4bd947891178924c06070fbccc3ea370ba)，包括 `dns_server/context.c`、`dns_server/rules.c`、`dns_conf/qtype_soa.c` 及默认值定义；示例注释中的返回数量 1–16 不是当前源码上限。实际实现与限制以本项目文档和测试为准。

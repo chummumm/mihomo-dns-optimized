@@ -23,7 +23,7 @@ dns:
 
 ## FakeIP 与真实查询的优先级
 
-配置 `dns-rule-routing: true` 与 `dns.enhanced-mode: fake-ip` 时，沿用 **hosts → FakeIP → 真实 resolver** 的顺序。两个开关均保持生效，无需增加第三个兼容开关；FakeIP 不会被强制改成 redir-host，也不会全局关闭真实查询的 DNS 分流。可直接使用 [README 中的组合示例](../README.md#fakeip-与-dns-分流同时使用)。
+配置 `dns-rule-routing: true` 与 `dns.enhanced-mode: fake-ip` 时，沿用 **hosts → FakeIP → 真实 resolver** 的顺序。显式启用的 `force-AAAA-SOA` / `force-qtype-SOA` 按[查询类型过滤](dns-proxy.md#查询类型过滤)规定的优先级生效。两个开关均保持生效，无需增加第三个兼容开关；FakeIP 不会被强制改成 redir-host，也不会全局关闭真实查询的 DNS 分流。可直接使用 [README 中的组合示例](../README.md#fakeip-与-dns-分流同时使用)。
 
 | 查询情况 | 行为 |
 | --- | --- |
@@ -202,11 +202,12 @@ dns:
   response-mode: first-ping
   speed-check-timeout: 1000
   speed-check-concurrency: 16
+  max-reply-ip-num: 8
 ```
 
 每个候选按模式顺序尝试可用测法，比较成功探测的耗时。多个查询共用有界工作池；同实际直连出口及套接字策略下的相同 IP 探测可合并，成功结果短期复用。每个等待者独立接收结果，包括双栈优选所需的 RTT。TCP 测的是握手，ping 测的是 ICMP 往返，不是下载带宽。TCP / ICMP 使用本次直连出口的接口和 mark；TCP 探测禁用延迟到首次写入才建连的 TFO 行为。ICMP 需要平台与权限支持，失败可由后续测法或原回答兜底。
 
-从多个回答收集候选时，不拼接不同服务器的 CNAME 链；选出候选后使用其所属完整回答，只收窄对应的未签名地址记录。DNSSEC DO / CD 查询、AD 或签名回答等保护场景不改写。没有成功探测但已有有效 DNS 回答时，返回原回答；这不是因测速失败而把正常域名判为不可达。
+从多个上游收集成功测速的候选，选择最快地址所属的完整 CNAME 路径，并合并路径完全一致的回答中合格的终点地址；不同或歧义 CNAME 路径不混合。最快地址排在首位，其余合格地址按 RTT、IP 稳定排序，去重后由 `max-reply-ip-num` 限制数量。相同 IP 和对应 CNAME 的 TTL 取保守值，合并结果沿用最早贡献来源的接收时间，TTL 策略只应用一次；较晚记录可能保守地多扣除部分收集时间，不会延长旧答案寿命。获胜答案的其他区段保留。DNSSEC DO / CD 查询、AD 或签名回答等保护场景不改写。全部探测失败时保留有效上游顺序并执行数量上限，不因测速失败把域名判为不存在。
 
 | 设置 | 默认值与单位 |
 | --- | --- |
@@ -214,7 +215,20 @@ dns:
 | `response-mode` | `first-ping`；可选 `first-ping`、`fastest-ip`、`fastest-response`，见下表 |
 | `speed-check-timeout` | 毫秒；0 采用 1000，显式范围 1–5000；限制可选优选等待，不缩短正常 DNS 解析期限 |
 | `speed-check-concurrency` | 0 采用 16，最大 256；只限制活动 IP 探测，满额立即跳过新探测，不排队，不限制 DNS 上游并发 |
-| 候选地址上限 | 每轮最多 256 个去重候选，非可配置项 |
+| `max-reply-ip-num` | 默认 8；显式整数 1–2147483647，表示 DIRECT 优选回答中的最大地址数，不保证凑满 |
+| 候选地址上限 | 每轮最多 256 个去重候选，非可配置项；调大返回数量不会扩大此上限 |
+
+### 多地址返回
+
+`1.0.11` 对照 SmartDNS 源码的接近最快地址筛选：只有候选同时比最快地址慢至少 5 ms、自身 RTT 至少 10 ms、且高于最快 RTT 的 1.1 倍加 0.5 ms，才因速度差被排除。使用与其相同的 0.1 ms 精度比较。最大返回数是上限：只有一条合格地址、上游未提供更多地址或 CNAME 路径不同，都可能少于设置值。
+
+`first-ping` 的首次答复仍可能只有一个地址，后台比较完成后的回答和缓存可以有多个；`fastest-ip` 在本轮比较结束时返回多个合格地址；`fastest-response` 的首次答复保留上游顺序并限制数量，后台再形成排序结果。关闭测速、非 DIRECT 路径及受保护的 DNSSEC 回答保留原行为；此数量设置属于 DIRECT 优选路径。
+
+### DIRECT 使用目标地址
+
+客户端已经指定真实 IPv4 / IPv6 时，DIRECT / Compatible 使用该 IP，域名只参与规则匹配，不因为 hosts、redir-host、嗅探结果或 `direct-nameserver` 重新选址。IP 规则使用原真实 IP，匹配后恢复其他出口原有的域名连接语义。UDP 目标映射记住本次选择，后续数据不重复解析同一目标。
+
+域名型 SOCKS / HTTP 请求和 FakeIP 恢复出的域名仍需真实解析。DIRECT 优选已启用时，TCP 先尝试对应地址族中排名第一的 IP；失败马上尝试后续地址，300 ms 未建立则启动下一个候选，连接成功后取消其他尝试。IPv4 / IPv6 偏好仍生效。UDP 没有 TCP 握手，用相应地址族中的首个优选 IP。该路径优先于 `tcp-concurrent` 的全候选并发连接，代理组 `url-test`、节点健康检查和其他出口行为保留。
 
 ### 响应模式
 
@@ -240,9 +254,9 @@ dns:
 | --- | --- |
 | `dualstack-ip-selection` | `false`；开启 A / AAAA 族间比较 |
 | `dualstack-ip-selection-threshold` | 毫秒；默认 10，范围 0–1000，可显式设 0 |
-| `dualstack-ip-allow-force-aaaa` | `false`；默认保留 IPv4，仅显式开启后才允许优先 IPv6 而过滤 A |
+| `dualstack-ip-allow-force-AAAA` | `false`；默认保留 IPv4，仅显式开启后才允许优先 IPv6 而过滤 A |
 
-默认在 AAAA 查询中辅助查询同域名的 A。两族复用已经冻结的出口、同一上游池、一个优选等待期限和共享探测并发上限；正常 DNS 查询保留自己的解析期限，不重新选组，也不通过主 resolver 递归查询。只有两族均有有效地址和成功测速结果，且 IPv4 比 IPv6 快至少指定阈值，才对原 AAAA 返回 NOERROR / NODATA。开启 `dualstack-ip-allow-force-aaaa` 才允许对 A 做对称处理。全局 IPv6 或 `dns.ipv6` 关闭时，跨族优选不生效，不会用无法交付给客户端的 AAAA 抑制 A；已有配置仍可正常加载。
+默认在 AAAA 查询中辅助查询同域名的 A。两族复用已经冻结的出口、同一上游池、一个优选等待期限和共享探测并发上限；正常 DNS 查询保留自己的解析期限，不重新选组，也不通过主 resolver 递归查询。只有两族均有有效地址和成功测速结果，且 IPv4 比 IPv6 快至少指定阈值，才对原 AAAA 返回 NOERROR / NODATA。开启 `dualstack-ip-allow-force-AAAA` 才允许对 A 做对称处理。全局 IPv6 或 `dns.ipv6` 关闭时，跨族优选不生效，不会用无法交付给客户端的 AAAA 抑制 A。
 
 代理路径不发这种辅助查询。DNSSEC 保护、某族解析错误、没有地址或某族探测全部失败时，不把失败当成较慢而过滤原有效回答。辅助结果不单独写入另一族缓存。
 
@@ -252,17 +266,52 @@ dns:
 
 ## CNAME 与 TTL 调整
 
+字段名严格使用 SmartDNS 大小写：`force-no-CNAME`、`force-AAAA-SOA`、`force-qtype-SOA`、`dualstack-ip-allow-force-AAAA`。`1.0.11` 不再接受小写或其他大小写别名；配置加载会指出错误键名和正确写法。
+
 | 设置 | 默认值与行为 |
 | --- | --- |
-| `force-no-cname` | `false`；压平完整、无歧义的未签名 A / AAAA CNAME 链 |
+| `force-no-CNAME` | `false`；压平完整、无歧义的未签名 A / AAAA CNAME 链 |
+| `rr-ttl` | 秒；默认 0；非零时固定正常回答 TTL，优先于 min/max，零 TTL 保持零 |
 | `rr-ttl-min` | 秒；0 不设下限，零 TTL 始终保持零 |
-| `rr-ttl-max` | 秒；0 不设上限；非零时须不小于配置的最小值 |
+| `rr-ttl-max` | 秒；0 不设上限；未使用固定 `rr-ttl` 时，非零上限须不小于最小值 |
+| `rr-ttl-reply-max` | 秒；默认 0；仅限制返回客户端的 TTL，不缩短内部缓存寿命 |
 
 去 CNAME 只使用同一回答里已存在的终点地址，将记录归属名改成查询名，并采用该回答链的最短 TTL；不补造 IP、不重新查询 CNAME 目标，也不因此改变出口。显式 CNAME 查询、DNAME、断链、循环、歧义链及额外不相关的 Answer 记录保留原形。
 
-DO / CD 查询以及 AD、RRSIG、SIG、TSIG 等受保护回答不做这类改写，截断和不匹配回答也跳过。TTL 调整不改 EDNS OPT 的标志位，最大值同时限制 SOA 的负缓存寿命。调整在写缓存前完成一次；缓存命中和过期回答不再次套用最小 TTL。节点和解析器自身的基础解析不继承这些业务设置。
+DO / CD 查询以及 AD、RRSIG、SIG、TSIG 等受保护回答不做这类改写，截断和不匹配回答也跳过。TTL 调整不改 EDNS OPT 的标志位，最大值同时限制 SOA 的负缓存寿命。固定 TTL 与 min/max 在写缓存前完成一次；缓存命中和过期回答不再次套用固定或最小 TTL。`rr-ttl-reply-max` 在缓存存储或读取、TTL 老化之后才作用于答复副本，不改变缓存的过期点。例如内部缓存 TTL 为 300、回复上限为 60，客户端最多缓存 60 秒，内核仍可复用该答案至内部 TTL 到期。节点和解析器自身的基础解析不继承这些业务设置。
 
 这些是独立的可选回答设置，不要求实际出口为 DIRECT；只有测速和双栈比较限于 DIRECT。即使在显式上游或非 Rule 模式下启用回答调整，缓存仍区分 DO / CD、EDNS 等查询差异，避免把已改写结果交给受保护的请求。本功能不验证 DNSSEC 签名。
+
+### 查询类型过滤
+
+| 设置 | 默认值与行为 |
+| --- | --- |
+| `force-AAAA-SOA` | `false`；开启后 AAAA 查询返回本地 NOERROR/NODATA，优先于 hosts 与 FakeIP |
+| `force-qtype-SOA` | `[]`；指定 0–65535 的数字查询类型或闭区间；静态 hosts 优先，过滤在 FakeIP 和真实解析前执行 |
+
+```yaml
+dns:
+  force-no-CNAME: true
+  force-AAAA-SOA: false
+  force-qtype-SOA: [65, "128-256"]
+  rr-ttl: 300
+  rr-ttl-reply-max: 60
+```
+
+列表也可以按行书写：
+
+```yaml
+dns:
+  force-qtype-SOA:
+    - 65
+    - "128-256"
+```
+
+还可使用 SmartDNS 式标量 `force-qtype-SOA: "65 128-256"`，空格和逗号均可分隔。列表的每一项按顺序执行：`"-"` 清空已选择的类型，`"-,28,65"` 清除指定类型；例如 `["28,65", "-,28"]` 最终只过滤 65。数字 28 表示 AAAA，65 表示 HTTPS RR；过滤 HTTPS RR 不会直接禁止网站的 HTTPS/TCP 连接。
+
+过滤返回 NOERROR 与空 Answer，Authority 带 30 秒 SOA；`rr-ttl-reply-max` 可进一步降低回复 TTL。这是本地策略答案，不记为上游成功或错误，也不进入可过期续用的远程缓存。内核内部真实解析在路由 REJECT / DROP 之后、查缓存之前检查类型过滤；监听器的 hosts / FakeIP 仍使用明确的本地优先级，不为了本地答案额外选组。SmartDNS 没有 FakeIP 原语，本项目将 qtype 过滤放在 FakeIP 前，避免显式过滤被虚拟地址合成绕过。
+
+任意地址族被强制 SOA 时，不再为了双栈优选辅助查询该族，也不会用被屏蔽的族压制仍可用的另一族。基础解析器和代理节点 bootstrap 不继承这些业务过滤。带交易签名等保护数据的请求保留保护边界。
 
 ## 缓存、预取与过期回答
 

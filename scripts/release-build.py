@@ -23,18 +23,8 @@ PACKAGE = "mihomo-optimized"
 LEGACY_PACKAGE = "mihomo-dns-optimized"
 NDK_VERSION = "29.0.14206865"
 GO_ENV = ("GOOS", "GOARCH", "GOAMD64", "GO386", "GOARM", "GOMIPS", "GOMIPS64", "CGO_ENABLED", "CC", "CXX")
-PR_TARGETS = ("linux-amd64", "linux-arm64", "linux-386", "windows-amd64",
-              "darwin-arm64", "freebsd-amd64", "android-arm64-v8")
-PLATFORM_NAMES = frozenset("""
-    aix android darwin dragonfly freebsd hurd illumos ios js linux nacl netbsd
-    openbsd plan9 solaris wasip1 windows zos unix bsd posix win32 win64
-    386 amd64 amd64p32 arm arm64 arm64be armbe loong64 loongarch64 mips mipsle
-    mips64 mips64le mips64p32 mips64p32le ppc ppc64 ppc64le riscv riscv64 s390
-    s390x sparc sparc64 wasm x86 aarch64 armv5 armv6 armv7
-    arch platform platforms cgo netlink syscall syscalls
-""".split())
-NATIVE_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx",
-                          ".m", ".mm", ".s", ".asm", ".inc", ".syso"}
+PR_COMPILE_TARGETS = ("linux-amd64", "linux-arm64", "linux-386", "windows-amd64",
+                      "darwin-arm64", "freebsd-amd64", "android-arm64-v8")
 PAYLOAD = {
     "usr/bin/mihomo": 0o755,
     "etc/mihomo/config.yaml": 0o644,
@@ -69,106 +59,20 @@ def target(name):
     return next(row for row in targets() if row["id"] == name)
 
 
-def matrix_path_risk(path):
-    name = path.rsplit("/", 1)[-1]
-    lower = name.lower()
-    if path.startswith(("packaging/", "scripts/", ".github/workflows/", "vendor/")):
-        return "build, package or dependency path"
-    if name in {"go.mod", "go.sum"} or name.startswith(("go.work", "UPSTREAM")):
-        return "dependency or upstream version"
-    if lower in {"makefile", "gnumakefile"} or lower.startswith(("dockerfile", ".goreleaser")):
-        return "build definition"
-    version_parts = set(re.split(r"[._-]+", lower))
-    if (lower in {".go-version", ".tool-versions", ".mise.toml", "mise.toml"} or
-            "toolchain" in lower or
-            version_parts.intersection({"go", "golang", "ndk"}) and
-            version_parts.intersection({"version", "versions"})):
-        return "toolchain version"
-    if Path(path).suffix.lower() in NATIVE_SOURCE_SUFFIXES:
-        return "native source or assembly"
-    if path.endswith(".go") and PLATFORM_NAMES.intersection(re.split(r"[/_.-]+", path.lower())):
-        return "platform or architecture Go source"
-    return None
-
-
-def pr_matrix_risk(base, head):
-    """Return why a PR needs every target; unknown observations also require all.
-
-    Inspect committed objects at the unique merge base and PR head, never the
-    checked-out merge or working tree. Raw NUL-delimited records preserve all
-    path bytes, file types and both blobs; disabling renames retains deletions.
-    """
-    try:
-        if not all(isinstance(ref, str) and re.fullmatch(r"[0-9a-f]{40}", ref)
-                   for ref in (base, head)):
-            raise ValueError("base and head must be full commit SHAs")
-        ancestors = run("git", "merge-base", "--all", base, head, timeout=15).splitlines()
-        if len(ancestors) != 1 or not re.fullmatch(r"[0-9a-f]{40}", ancestors[0]):
-            raise ValueError("PR does not have one known merge base")
-        # This is base...head, with the merge base checked for ambiguity first.
-        changes = run("git", "diff", "--raw", "-z", "--no-renames", "--no-abbrev",
-                      "--no-ext-diff", "--no-textconv", "--no-color",
-                      ancestors[0], head, "--", binary=True, timeout=15)
-        if not changes:
-            return None
-        records = changes.split(b"\0")
-        if records.pop() != b"" or len(records) % 2:
-            raise ValueError("incomplete NUL-delimited git diff")
-        header_pattern = rb":([0-7]{6}) ([0-7]{6}) ([0-9a-f]{40}) ([0-9a-f]{40}) ([ADMT])"
-        for header, raw_path in zip(records[::2], records[1::2]):
-            entry = re.fullmatch(header_pattern, header)
-            if entry is None or not raw_path:
-                raise ValueError("unrecognized raw git diff entry")
-            path = raw_path.decode("utf-8")
-            old_mode, new_mode, old_blob, new_blob, status = entry.groups()
-            if status == b"T" or any(mode not in {b"000000", b"100644", b"100755"}
-                                     for mode in (old_mode, new_mode)):
-                return f"non-regular file or type change: {path!r}"
-            risk = matrix_path_risk(path)
-            if risk:
-                return f"{risk}: {path!r}"
-            if not path.endswith(".go"):
-                continue
-            for blob in dict.fromkeys((old_blob, new_blob)):
-                if blob == b"0" * 40:
-                    continue
-                content = run("git", "cat-file", "blob", blob.decode("ascii"),
-                              binary=True, timeout=15).decode("utf-8-sig")
-                if re.search(r"(?m)^[ \t]*//[ \t]*(?:go:build|\+build)(?=\s|$)", content):
-                    return f"Go build constraint in old or new source: {path!r}"
-                if re.search(r"\b(?:GOOS|GOARCH)\b", content):
-                    return f"runtime platform selection in old or new source: {path!r}"
-                if '"C"' in content or '`C`' in content:
-                    # Comments may separate import tokens or contain a closing
-                    # parenthesis. Strip comments without altering quoted literals.
-                    code = re.sub(r'''("(?:\\.|[^"\\])*"|`[^`]*`|'(?:\\.|[^'\\])*')|//[^\n]*|/\*.*?\*/''',
-                                  lambda match: match[1] or ' ', content, flags=re.DOTALL)
-                    if re.search(r'\bimport\s*(?:["`]C["`]|\([^)]*["`]C["`])', code):
-                        return f"cgo import in old or new source: {path!r}"
-        return None
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
-        # A shallow checkout, missing fork object or unreadable blob must never
-        # silently turn an uncertain change into a reduced release build.
-        return f"cannot inspect PR diff: {error}"
-
-
-def release_matrix(profile="full", base=None, head=None):
+def release_matrix(profile="full"):
+    """Keep PR compilation bounded; only the full profile produces release files."""
     if profile not in {"full", "pr"}:
         raise ValueError("unknown matrix profile")
     rows = targets()
-    reason = "full profile requested"
-    selected = "full"
     if profile == "pr":
-        reason = pr_matrix_risk(base, head)
         by_name = {row["id"]: row for row in rows}
-        if reason is None and not set(PR_TARGETS).issubset(by_name):
-            reason = "representative targets are missing from the release matrix"
-        if reason is None:
-            rows = [by_name[name] for name in PR_TARGETS]
-            selected, reason = "pr", "ordinary base...head changes"
-    print(f"release matrix: profile={selected}; targets={len(rows)}; {reason}", file=sys.stderr)
+        if not set(PR_COMPILE_TARGETS).issubset(by_name):
+            raise ValueError("required PR compile targets are missing from the release matrix")
+        rows = [by_name[name] for name in PR_COMPILE_TARGETS]
+    purpose = "compile checks only; no release artifacts" if profile == "pr" else "complete release artifacts"
+    print(f"release matrix: profile={profile}; targets={len(rows)}; {purpose}", file=sys.stderr)
     return {"include": [{"target": row["id"], "android": row["goos"] == "android",
-                         "packages": bool(row["packages"])} for row in rows]}
+                         "packages": profile == "full" and bool(row["packages"])} for row in rows]}
 
 
 def epoch(build_time):
@@ -519,16 +423,7 @@ cp -a {shlex.quote(str(stage))}/. %{{buildroot}}/
     return built
 
 
-def build(row, output, version, build_time):
-    project_numbers(version)
-    output = Path(output)
-    if not output.is_absolute():
-        raise ValueError("output directory must be absolute")
-    output.mkdir(parents=True, exist_ok=True)
-    basename(row, version)
-    timestamp = epoch(build_time)
-    commit = run("git", "rev-parse", "HEAD").strip()
-    upstream = (ROOT / "UPSTREAM_VERSION").read_text().strip()
+def build_environment(row):
     env = dict(os.environ)
     for name in GO_ENV:
         env.pop(name, None)
@@ -543,22 +438,65 @@ def build(row, output, version, build_time):
         if not compiler.is_file():
             raise ValueError("Android NDK compiler is missing")
         env.update(CGO_ENABLED="1", CC=str(compiler))
+    return env
+
+
+def compile_binary(binary, env, ldflags=None):
+    command = ["go", "build", "-tags", "with_gvisor", "-trimpath"]
+    if ldflags:
+        command.extend(["-ldflags", ldflags])
+    command.extend(["-o", str(binary), "."])
+    subprocess.run(command, env=env, cwd=ROOT, check=True)
+    info = run("go", "version", "-m", str(binary))
+    for key in ("GOOS", "GOARCH", "CGO_ENABLED"):
+        if f"\t{key}={env[key]}" not in info:
+            raise ValueError(f"binary build information does not confirm {key}")
+    if "\t-tags=with_gvisor" not in info:
+        raise ValueError("binary is missing the intended gVisor build tag")
+
+
+def check_native_core(binary, row, temp):
+    if row["id"] != "linux-amd64":
+        return
+    if run("go", "env", "GOHOSTOS").strip() != "linux" or run("go", "env", "GOHOSTARCH").strip() != "amd64":
+        return
+    subprocess.run([str(binary), "-v"], check=True)
+    subprocess.run([str(binary), "-t", "-d", temp, "-f", str(ROOT / "packaging/config.yaml")], check=True)
+    subprocess.run(["python3", "scripts/test-dns-proxy.py", str(binary)], cwd=ROOT, check=True)
+    subprocess.run(["python3", "scripts/test-dns-perf.py", str(binary), "--expect-shared"], cwd=ROOT, check=True)
+    subprocess.run(["python3", "scripts/test-dns-observability.py", str(binary)], cwd=ROOT, check=True)
+
+
+def compile_check(row):
+    """Validate the full core for a representative platform, then discard it.
+
+    PR jobs have no release version, output directory or packaging path. Final
+    release archives and installers are built once, from the merged commit.
+    """
+    env = build_environment(row)
+    with tempfile.TemporaryDirectory(prefix=f"mihomo-check-{row['id']}-") as temp:
+        binary = Path(temp) / ("mihomo.exe" if row["goos"] == "windows" else "mihomo")
+        compile_binary(binary, env)
+        check_native_core(binary, row, temp)
+    print(f"PASS compile check {row['id']}: no release artifacts", flush=True)
+
+
+def build(row, output, version, build_time):
+    project_numbers(version)
+    output = Path(output)
+    if not output.is_absolute():
+        raise ValueError("output directory must be absolute")
+    output.mkdir(parents=True, exist_ok=True)
+    basename(row, version)
+    timestamp = epoch(build_time)
+    commit = run("git", "rev-parse", "HEAD").strip()
+    upstream = (ROOT / "UPSTREAM_VERSION").read_text().strip()
+    env = build_environment(row)
     with tempfile.TemporaryDirectory(prefix=f"mihomo-{row['id']}-") as temp:
         binary = Path(temp) / ("mihomo.exe" if row["goos"] == "windows" else "mihomo")
         flags = f"-s -w -buildid= -X github.com/metacubex/mihomo/constant.Version={version} -X github.com/metacubex/mihomo/constant.BuildTime={build_time}"
-        subprocess.run(["go", "build", "-tags", "with_gvisor", "-trimpath", "-ldflags", flags, "-o", str(binary), "."], env=env, cwd=ROOT, check=True)
-        info = run("go", "version", "-m", str(binary))
-        for key in ("GOOS", "GOARCH", "CGO_ENABLED"):
-            if f"\t{key}={env[key]}" not in info:
-                raise ValueError(f"binary build information does not confirm {key}")
-        if "\t-tags=with_gvisor" not in info:
-            raise ValueError("binary is missing the intended gVisor build tag")
-        if row["id"] == "linux-amd64" and run("go", "env", "GOHOSTOS").strip() == "linux" and run("go", "env", "GOHOSTARCH").strip() == "amd64":
-            subprocess.run([str(binary), "-v"], check=True)
-            subprocess.run([str(binary), "-t", "-d", temp, "-f", str(ROOT / "packaging/config.yaml")], check=True)
-            subprocess.run(["python3", "scripts/test-dns-proxy.py", str(binary)], cwd=ROOT, check=True)
-            subprocess.run(["python3", "scripts/test-dns-perf.py", str(binary), "--expect-shared"], cwd=ROOT, check=True)
-            subprocess.run(["python3", "scripts/test-dns-observability.py", str(binary)], cwd=ROOT, check=True)
+        compile_binary(binary, env, flags)
+        check_native_core(binary, row, temp)
         built = [write_archive(binary, row, version, output, timestamp)]
         built.extend(package_binary(binary, row, version, output, build_time, commit, upstream))
         assets = []
@@ -632,8 +570,8 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     matrix = sub.add_parser("matrix")
     matrix.add_argument("--profile", choices=("full", "pr"), default="full")
-    matrix.add_argument("--base", help="pull request event base commit SHA")
-    matrix.add_argument("--head", help="pull request event head commit SHA")
+    checker = sub.add_parser("compile-check")
+    checker.add_argument("target")
     builder = sub.add_parser("build")
     builder.add_argument("target")
     builder.add_argument("output")
@@ -648,7 +586,9 @@ def main():
     published.add_argument("metadata")
     args = parser.parse_args()
     if args.command == "matrix":
-        print(json.dumps(release_matrix(args.profile, args.base, args.head), separators=(",", ":")))
+        print(json.dumps(release_matrix(args.profile), separators=(",", ":")))
+    elif args.command == "compile-check":
+        compile_check(target(args.target))
     elif args.command == "build":
         build(target(args.target), args.output, args.version, args.build_time)
     elif args.command == "collect":
