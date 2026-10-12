@@ -139,6 +139,7 @@ type Status struct {
 
 type Filter struct {
 	Cursor                        uint64 // exclusive upper ID bound; zero starts at the newest record
+	Anchor                        uint64 // inclusive history bound; zero follows the newest retained record
 	Limit                         int
 	QName, Client, Outcome, QType string
 }
@@ -151,6 +152,11 @@ type Page struct {
 	Evicted    uint64   `json:"evicted"`
 	Scope      string   `json:"scope"`
 	InstanceID string   `json:"instance_id"`
+	// Total and PageCursors describe all retained matches at or below AnchorID,
+	// independently of Cursor. They are collected with Items under the same lock.
+	Total       int      `json:"total"`
+	PageCursors []string `json:"page_cursors"`
+	AnchorID    string   `json:"anchor_id"`
 }
 
 type Source struct{ Client, Protocol, Name string }

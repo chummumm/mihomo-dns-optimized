@@ -78,8 +78,9 @@ func (g *updateOperationGate) WaitIdle(ctx context.Context) error {
 	}
 }
 
-// runWhenAvailable is reserved for activation checks and initial UI installs.
-// Ordinary periodic and manual operations retain their nonblocking TryLock.
+// runWhenAvailable is used by activation checks, initial UI installs and
+// coordinated manual tasks. Standalone periodic/compatibility operations keep
+// their nonblocking TryLock so they never build a background update queue.
 // Only contention on this gate is retryable; other action results return as-is.
 func (g *updateOperationGate) runWhenAvailable(ctx context.Context, busyErr error, action func() error) error {
 	waitCtx := ctx

@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/netip"
@@ -94,6 +95,7 @@ func ParseWithBytes(buf []byte) (*config.Config, error) {
 func ApplyConfig(cfg *config.Config, force bool) {
 	mux.Lock()
 	defer mux.Unlock()
+	invalidateUpdateConfiguration()
 	log.SetLevel(cfg.General.LogLevel)
 	finishUpdates := updateUpdater(cfg)
 
@@ -116,7 +118,10 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	updateRules(cfg.Rules, cfg.SubRules, cfg.RuleProviders)
 	updateSniffer(cfg.Sniffer)
 	updateHosts(cfg.Hosts)
-	updateGeneral(cfg.General, true)
+	_ = geodata.WithInitializationContext(context.Background(), nil, func() error {
+		updateGeneral(cfg.General, true)
+		return nil
+	})
 	// Do not change this in temporaryUpdateGeneral while merely parsing a
 	// candidate config: the DNS routing flag and resolver policy change together.
 	tunnel.SetDNSRuleRouting(cfg.General.DNSRuleRouting)
@@ -140,6 +145,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	tunnel.OnRunning()
 	updater.SetGeoAutoUpdate(cfg.General.GeoAutoUpdate)
 	updater.SetGeoUpdateInterval(cfg.General.GeoUpdateInterval)
+	publishUpdateConfiguration(cfg)
 	finishUpdates()
 }
 
@@ -649,6 +655,7 @@ func Shutdown() {
 }
 
 func shutdownLocked() {
+	invalidateUpdateConfiguration()
 	updater.StopAutomaticUpdates()
 	listener.Cleanup()
 	tproxy.CleanupTProxyIPTables()

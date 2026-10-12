@@ -37,6 +37,7 @@ const (
 var (
 	ErrUIUpdateBusy           = errors.New("a UI check or update is already running")
 	ErrUIConfigurationChanged = errors.New("dashboard update configuration changed")
+	ErrUIVersionUnavailable   = errors.New("the dashboard version cannot be compared")
 )
 
 type UIUpdateStatus struct {
@@ -384,10 +385,10 @@ func uiDownloadError(err error) error {
 	// net/url errors can contain credentials or signed query parameters. Never
 	// surface them through the public status endpoint or the core log.
 	if errors.Is(err, context.DeadlineExceeded) {
-		return errors.New("dashboard download timed out")
+		return fmt.Errorf("dashboard download timed out: %w", context.DeadlineExceeded)
 	}
 	if errors.Is(err, context.Canceled) {
-		return errors.New("dashboard download canceled")
+		return fmt.Errorf("dashboard download canceled: %w", context.Canceled)
 	}
 	return errors.New("unable to download the configured dashboard")
 }
@@ -672,6 +673,10 @@ func (u *UIUpdater) downloadUIContext(ctx context.Context, onlyNewer bool) error
 }
 
 func (u *UIUpdater) installUIContext(ctx context.Context, onlyNewer, onlyEmpty bool) (err error) {
+	return u.installUICheckContext(ctx, onlyNewer, onlyEmpty, nil)
+}
+
+func (u *UIUpdater) installUICheckContext(ctx context.Context, onlyNewer, onlyEmpty bool, result *UIUpdateResult) (err error) {
 	state, key := u.state(), u.key()
 	if !state.operation.TryLock() {
 		return ErrUIUpdateBusy
@@ -702,6 +707,12 @@ func (u *UIUpdater) installUIContext(ctx context.Context, onlyNewer, onlyEmpty b
 	snapshot := previous
 	usable := state.key == key && state.err == nil && !state.checked.IsZero() && time.Since(state.checked) < uiCheckTTL && snapshot.root != ""
 	state.mu.Unlock()
+	if result != nil {
+		// The unified button promises a real remote check, even when a previous
+		// status request populated the short-lived archive cache.
+		usable = false
+		result.CurrentVersion = readUIBuildInfo(target).Version
+	}
 	if !usable {
 		// A cached 304 may have no staged bytes after expiry. Fetch a complete
 		// archive and validate that snapshot before installing it.
@@ -745,10 +756,24 @@ func (u *UIUpdater) installUIContext(ctx context.Context, onlyNewer, onlyEmpty b
 		return err
 	}
 	snapshot.currentDigest = currentDigest
+	allowInitial := false
+	if result != nil {
+		result.LatestVersion = snapshot.info.Version
+		entries, readErr := os.ReadDir(target)
+		allowInitial = os.IsNotExist(readErr) || readErr == nil && len(entries) == 0
+		if _, valid := parseUIVersion(snapshot.info.Version); !valid {
+			return ErrUIVersionUnavailable
+		}
+		if !allowInitial {
+			if _, valid := compareUIVersions(snapshot.info.Version, readUIBuildInfo(target).Version); !valid {
+				return ErrUIVersionUnavailable
+			}
+		}
+	}
 	// The current version can change after the automatic check (for example,
 	// a manual installation wins the operation gate). Compare again while
 	// holding that gate, including when a fresh archive had to be downloaded.
-	if onlyNewer && !u.updateAvailable(snapshot) {
+	if onlyNewer && !allowInitial && !u.updateAvailable(snapshot) {
 		return nil
 	}
 	if currentDigest == snapshot.digest {
@@ -787,6 +812,14 @@ func (u *UIUpdater) installUIContext(ctx context.Context, onlyNewer, onlyEmpty b
 			err = ctx.Err()
 		}
 		canInstall := !onlyNewer || u.updateAvailable(snapshot)
+		if err == nil && allowInitial {
+			var entries []os.DirEntry
+			entries, err = os.ReadDir(target)
+			if os.IsNotExist(err) {
+				err = nil
+			}
+			canInstall = len(entries) == 0 || u.updateAvailable(snapshot)
+		}
 		if err == nil && onlyEmpty {
 			var entries []os.DirEntry
 			entries, err = os.ReadDir(target)
@@ -801,5 +834,8 @@ func (u *UIUpdater) installUIContext(ctx context.Context, onlyNewer, onlyEmpty b
 		}
 	}
 	uiActivation.Unlock()
+	if result != nil {
+		result.Updated = installed
+	}
 	return err
 }

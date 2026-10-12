@@ -115,16 +115,20 @@ API 的 `accounted_bytes` 是记录、索引和固定结构的保守记账，`me
 | --- | --- |
 | `GET /dns/observability` | API 版本、开关、实例、容量、保留范围和记账预算 |
 | `GET /dns/observability/stats` | 累计、最近 24 小时、分钟趋势和保留记录 Top 10 |
-| `GET /dns/observability/queries` | 查询明细，参数为 `limit`、`cursor`、`qname`、`client`、`outcome`、`qtype` |
+| `GET /dns/observability/queries` | 查询明细，参数为 `limit`、`cursor`、`anchor`、`qname`、`client`、`outcome`、`qtype` |
 | `GET /dns/observability/upstreams` | 有界的实际上游交换统计 |
 
 `cursor` 和记录 `id` 使用十进制字符串，避免浏览器整数精度问题。游标是排他的历史边界：新记录到达不会把下一页重复推移。查询窗口仍在后台淘汰，翻到过期范围会如实为空。
+
+从内核 `1.0.4` 起，每次查询还在同一读锁内返回 `total`、`anchor_id` 和 `page_cursors`。`total` 是当前筛选、历史上界以内仍保留的匹配数，不是全局 `retained`；`anchor_id` 是包含在范围内的查询 ID 上界。`page_cursors` 首项为空字符串，其余项为各页排他游标。首页请求 `?limit=50`（可附筛选）；第 N 页请求同时传 `anchor=<anchor_id>` 和 `cursor=<page_cursors[N-1]>`。字段使用十进制字符串表示 ID，保留 uint64 精度。零匹配返回 `total: 0` 和 `page_cursors: [""]`。
+
+实时首页刷新不带 `anchor`，历史页始终带上界，不把新到记录混入旧页。TTL 或容量淘汰会减少匹配总数；面板发现当前页超出真实末页时自动跳回末页。前端无需扫描完整日志来计数，只保留当前页及最多约 82 个页边界（4096 条、每页 50 条）。旧接口缺少分页元数据时，仍可首页、上一页和下一页，精确总数与直接跳页明确显示不可用。
 
 新版面板连接不支持此 API 的旧内核时，显示“不支持 DNS 观测”，停止重复轮询；普通连接、节点等页面继续使用原接口。API 不发起主动 DNS 查询，原有 `/dns/query` 的行为独立保留。
 
 ## 更新和验证
 
-内核使用本仓库正式 Releases，面板来源固定为 `clash-dashboard-dist`，目录固定为 HomeDir 下的 `ui`。两者分别由 YAML 顶层的 `core-auto-update` / `core-update-interval` 和 `external-ui-auto-update` / `external-ui-update-interval` 控制。面板没有手动检查、安装或自动更新控件；后台面板更新不清空 DNS 数据，内核升级成功后自动重启并重建内存状态。完整说明见[面板及内核维护说明](dashboard-management.md)。
+内核使用本仓库正式 Releases，面板来源固定为 `clash-dashboard-dist`，目录固定为 HomeDir 下的 `ui`。两者分别由 YAML 顶层的 `core-auto-update` / `core-update-interval` 和 `external-ui-auto-update` / `external-ui-update-interval` 控制。面板 `0.4.6` 提供统一“检查并更新”入口，由内核处理已配置的规则集、GeoData、面板和内核；自动更新策略仍只放在 YAML。后台面板更新不清空 DNS 数据，内核升级成功后自动重启并重建内存状态。完整说明见[面板及内核维护说明](dashboard-management.md)。
 
 ```bash
 bash scripts/ci-check.sh test

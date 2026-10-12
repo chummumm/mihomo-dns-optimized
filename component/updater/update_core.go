@@ -72,7 +72,11 @@ func (u *CoreUpdater) UpdateContext(ctx context.Context, currentExePath string, 
 }
 
 func (u *CoreUpdater) updateContext(ctx context.Context, currentExePath string, channel string, force bool, automatic *coreAutomaticUpdate) (err error) {
-	if !u.mu.TryLock() {
+	return u.updateTransaction(ctx, currentExePath, channel, force, automatic, nil)
+}
+
+func (u *CoreUpdater) updateTransaction(ctx context.Context, currentExePath string, channel string, force bool, automatic *coreAutomaticUpdate, manual *coreManualUpdate) (err error) {
+	if manual == nil && !u.mu.TryLock() {
 		return ErrCoreUpdateBusy
 	}
 	operationHeld := true
@@ -131,8 +135,17 @@ func (u *CoreUpdater) updateContext(ctx context.Context, currentExePath string, 
 		return err
 	}
 	currentVersion := u.effectiveVersion()
+	if manual != nil {
+		manual.result.CurrentVersion, manual.result.LatestVersion = currentVersion, latestVersion
+		if manual.observe != nil {
+			manual.observe(manual.result)
+		}
+		if _, parseErr := parseReleaseVersion(currentVersion); parseErr != nil {
+			return ErrCoreVersionUnavailable
+		}
+	}
 	log.Infoln("current version %s, latest mihomo-optimized version %s", currentVersion, latestVersion)
-	if automatic != nil && !u.isNewerVersion(latestVersion) {
+	if (automatic != nil || manual != nil) && !u.isNewerVersion(latestVersion) {
 		return nil
 	}
 	if !force {
@@ -183,7 +196,7 @@ func (u *CoreUpdater) updateContext(ctx context.Context, currentExePath string, 
 		u.beforeCommit()
 	}
 	commit := func() error {
-		if automatic != nil {
+		if automatic != nil || manual != nil {
 			// A manual installation may have won the gate while this prepared
 			// auto job waited for configuration reload to finish.
 			if !u.mu.TryLock() {
@@ -207,6 +220,9 @@ func (u *CoreUpdater) updateContext(ctx context.Context, currentExePath string, 
 				return ErrCoreConfigurationChanged
 			}
 		}
+		if manual != nil && (u.pendingRestart || !u.isNewerVersion(latestVersion)) {
+			return ErrCoreConfigurationChanged
+		}
 		currentIdentity, err := snapshotCoreExecutable(ctx, currentExePath)
 		if err != nil || !identity.equal(currentIdentity) {
 			return fmt.Errorf("current executable changed while preparing update")
@@ -215,6 +231,9 @@ func (u *CoreUpdater) updateContext(ctx context.Context, currentExePath string, 
 			return fmt.Errorf("install mihomo-optimized core: %w", err)
 		}
 		u.installedVersion, u.pendingRestart = latestVersion, true
+		if manual != nil {
+			manual.result.Updated = true
+		}
 		// The real handler may exec/exit and never return through our defers.
 		// Remove the verified archive before yielding to process shutdown.
 		if cleanupErr := os.RemoveAll(updateDir); cleanupErr != nil {
@@ -229,6 +248,14 @@ func (u *CoreUpdater) updateContext(ctx context.Context, currentExePath string, 
 		u.mu.Unlock()
 		operationHeld = false
 		return automatic.restart(currentExePath, commit)
+	}
+	if manual != nil {
+		// The unified task reserves this operation gate before updating other
+		// resources. Release it only when the prepared core is ready to enter
+		// the same short configuration/restart transaction as auto updates.
+		u.mu.Unlock()
+		operationHeld = false
+		return manual.restart(currentExePath, commit)
 	}
 	return commit()
 }

@@ -63,6 +63,14 @@ func dnsObservabilityQueries(w http.ResponseWriter, r *http.Request) {
 		}
 		filter.Cursor = cursor
 	}
+	if value := query.Get("anchor"); value != "" {
+		anchor, err := strconv.ParseUint(value, 10, 64)
+		if err != nil || anchor == 0 {
+			bad("anchor must be a positive query ID")
+			return
+		}
+		filter.Anchor = anchor
+	}
 	if len(filter.QName) > 254 || len(filter.Client) > 64 || len(filter.QType) > 16 {
 		bad("query filter is too long")
 		return

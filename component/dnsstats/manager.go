@@ -316,7 +316,14 @@ func (m *Manager) Queries(filter Filter) Page {
 	if m.count < capacity {
 		capacity = m.count
 	}
-	page := Page{Items: []Record{}, Retained: m.count, Evicted: m.evicted, Scope: "retained", InstanceID: m.instance}
+	anchor := m.newest
+	if filter.Anchor != 0 && filter.Anchor < anchor {
+		anchor = filter.Anchor
+	}
+	page := Page{Items: []Record{}, Retained: m.count, Evicted: m.evicted, Scope: "retained", InstanceID: m.instance, PageCursors: []string{""}}
+	if anchor != 0 {
+		page.AnchorID = sequence(anchor)
+	}
 	if m.count == 0 {
 		return page
 	}
@@ -344,27 +351,35 @@ func (m *Manager) Queries(filter Filter) Page {
 			}
 		}
 	}
-	if indexKind == 0 && filter.Cursor != 0 {
-		if filter.Cursor-1 < id {
-			id = filter.Cursor - 1
-		}
+	if indexKind == 0 && anchor < id {
+		id = anchor
 	}
 	page.Items = make([]Record, 0, capacity)
+	previousMatch := ""
 	for id >= m.oldest && id != 0 {
 		e := &m.entries[(id-1)%uint64(m.capacity)]
 		if e.id != id {
 			break
 		}
 		r := e.record
-		match := (filter.Cursor == 0 || id < filter.Cursor) && (filter.QName == "" || r.QName == filter.QName) && (filter.Client == "" || r.Client == filter.Client) && (filter.Outcome == "" || r.Outcome == filter.Outcome) && (filter.QType == "" || r.QType == filter.QType)
+		match := id <= anchor && (filter.QName == "" || r.QName == filter.QName) && (filter.Client == "" || r.Client == filter.Client) && (filter.Outcome == "" || r.Outcome == filter.Outcome) && (filter.QType == "" || r.QType == filter.QType)
 		if match {
-			if len(page.Items) == filter.Limit {
-				page.HasMore = true
-				page.NextCursor = page.Items[len(page.Items)-1].ID
-				break
+			// Only the current page copies answer summaries. The complete index is
+			// bounded by the retained ring and contains one ID per page boundary.
+			if page.Total > 0 && page.Total%filter.Limit == 0 {
+				page.PageCursors = append(page.PageCursors, previousMatch)
 			}
-			r.Answers = append([]Answer{}, r.Answers...)
-			page.Items = append(page.Items, r)
+			page.Total++
+			previousMatch = r.ID
+			if filter.Cursor == 0 || id < filter.Cursor {
+				if len(page.Items) == filter.Limit {
+					page.HasMore = true
+					page.NextCursor = page.Items[len(page.Items)-1].ID
+				} else {
+					r.Answers = append([]Answer{}, r.Answers...)
+					page.Items = append(page.Items, r)
+				}
+			}
 		}
 		switch indexKind {
 		case 1:

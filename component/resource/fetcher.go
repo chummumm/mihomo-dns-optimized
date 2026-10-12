@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/component/slowdown"
 	P "github.com/metacubex/mihomo/constant/provider"
@@ -15,26 +16,36 @@ import (
 
 	"github.com/metacubex/fswatch"
 	"github.com/samber/lo"
+	"golang.org/x/sync/semaphore"
 )
 
 type Parser[V any] func([]byte) (V, error)
+type ContextParser[V any] func(context.Context, func(func() error) error, []byte) (V, error)
 type BundleFile func() (fs.File, error)
 
+type fetcherUpdateContext struct {
+	ctx    context.Context
+	commit func(func() error) error
+}
+
 type Fetcher[V any] struct {
-	ctx          context.Context
-	ctxCancel    context.CancelFunc
-	resourceType string
-	name         string
-	vehicle      P.Vehicle
-	bundleFile   BundleFile
-	updatedAt    time.Time
-	hash         utils.HashType
-	parser       Parser[V]
-	interval     time.Duration
-	onUpdate     func(V)
-	watcher      *fswatch.Watcher
-	loadBufMutex sync.Mutex
-	backoff      slowdown.Backoff
+	ctx           context.Context
+	ctxCancel     context.CancelFunc
+	resourceType  string
+	name          string
+	vehicle       P.Vehicle
+	bundleFile    BundleFile
+	updatedAt     atomic.TypedValue[time.Time]
+	hash          utils.HashType
+	parser        Parser[V]
+	parserContext ContextParser[V]
+	interval      time.Duration
+	onUpdate      func(V)
+	watcher       *fswatch.Watcher
+	loadBufMutex  sync.Mutex
+	operation     *semaphore.Weighted
+	updateContext atomic.TypedValue[*fetcherUpdateContext]
+	backoff       slowdown.Backoff
 }
 
 func (f *Fetcher[V]) Name() string {
@@ -50,7 +61,26 @@ func (f *Fetcher[V]) VehicleType() P.VehicleType {
 }
 
 func (f *Fetcher[V]) UpdatedAt() time.Time {
-	return f.updatedAt
+	return f.updatedAt.Load()
+}
+
+// UpdateInterval is the interval configured for this provider. A manual update
+// does not enable or otherwise change its automatic update policy.
+func (f *Fetcher[V]) UpdateInterval() time.Duration {
+	return f.interval
+}
+
+func (f *Fetcher[V]) SetContextParser(parser ContextParser[V]) {
+	f.loadBufMutex.Lock()
+	defer f.loadBufMutex.Unlock()
+	f.parserContext = parser
+}
+
+// BindUpdateContext applies the configuration lifetime to automatic refreshes
+// as well as explicit controller requests. A replaced provider cannot publish
+// into a cache path later reused by a new configuration.
+func (f *Fetcher[V]) BindUpdateContext(ctx context.Context, commit func(func() error) error) {
+	f.updateContext.Store(&fetcherUpdateContext{ctx: ctx, commit: commit})
 }
 
 func (f *Fetcher[V]) Initial() (V, error) {
@@ -59,7 +89,7 @@ func (f *Fetcher[V]) Initial() (V, error) {
 		buf, err := os.ReadFile(f.vehicle.Path())
 		modTime := stat.ModTime()
 		contents, _, err := f.loadBuf(buf, utils.MakeHash(buf), false)
-		f.updatedAt = modTime // reset updatedAt to file's modTime
+		f.updatedAt.Store(modTime) // reset updatedAt to file's modTime
 
 		if err == nil {
 			err = f.startPullLoop(time.Since(modTime) > f.interval)
@@ -81,7 +111,7 @@ func (f *Fetcher[V]) Initial() (V, error) {
 				modTime = stat.ModTime()
 			}
 			contents, _, err := f.loadBuf(buf, utils.MakeHash(buf), true)
-			f.updatedAt = modTime // reset updatedAt to file's modTime
+			f.updatedAt.Store(modTime) // reset updatedAt to file's modTime
 
 			if err == nil {
 				log.Infoln("[Provider] %s extract successful from bundle file", f.Name())
@@ -114,53 +144,145 @@ func (f *Fetcher[V]) Initial() (V, error) {
 }
 
 func (f *Fetcher[V]) Update() (V, bool, error) {
-	buf, hash, err := f.vehicle.Read(f.ctx, f.hash)
+	return f.UpdateContext(f.ctx)
+}
+
+// UpdateContext shares the same serialized read/parse/apply operation with
+// scheduled updates. Cancelling a caller or closing the provider prevents a
+// response from being applied after that operation is no longer wanted.
+func (f *Fetcher[V]) UpdateContext(ctx context.Context) (V, bool, error) {
+	return f.UpdateContextWithCommit(ctx, nil)
+}
+
+// UpdateContextWithCommit lets the configuration owner reject a stale provider
+// at the final application boundary without holding its lock during network IO.
+func (f *Fetcher[V]) UpdateContextWithCommit(ctx context.Context, commit func(func() error) error) (V, bool, error) {
+	if err := f.ctx.Err(); err != nil {
+		return lo.Empty[V](), false, err
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(f.ctx, cancel)
+	defer stop()
+	defer cancel()
+	if binding := f.updateContext.Load(); binding != nil {
+		if err := binding.ctx.Err(); err != nil {
+			return lo.Empty[V](), false, err
+		}
+		stop := context.AfterFunc(binding.ctx, cancel)
+		defer stop()
+		if commit == nil {
+			commit = binding.commit
+		}
+	}
+	if err := f.operation.Acquire(ctx, 1); err != nil {
+		return lo.Empty[V](), false, err
+	}
+	defer f.operation.Release(1)
+	if err := ctx.Err(); err != nil {
+		return lo.Empty[V](), false, err
+	}
+	f.loadBufMutex.Lock()
+	oldHash := f.hash
+	f.loadBufMutex.Unlock()
+	buf, hash, err := f.vehicle.Read(ctx, oldHash)
 	if err != nil {
 		f.backoff.AddAttempt() // add a failed attempt to backoff
 		return lo.Empty[V](), false, err
 	}
-	return f.loadBuf(buf, hash, f.vehicle.Type() != P.File)
+	if err := ctx.Err(); err != nil {
+		return lo.Empty[V](), false, err
+	}
+	return f.loadBufWithCommit(ctx, buf, hash, f.vehicle.Type() != P.File, commit)
 }
 
 func (f *Fetcher[V]) SideUpdate(buf []byte) (V, bool, error) {
+	if err := f.operation.Acquire(f.ctx, 1); err != nil {
+		return lo.Empty[V](), false, err
+	}
+	defer f.operation.Release(1)
 	return f.loadBuf(buf, utils.MakeHash(buf), true)
 }
 
 func (f *Fetcher[V]) loadBuf(buf []byte, hash utils.HashType, updateFile bool) (V, bool, error) {
+	return f.loadBufWithCommit(f.ctx, buf, hash, updateFile, nil)
+}
+
+func (f *Fetcher[V]) loadBufWithCommit(ctx context.Context, buf []byte, hash utils.HashType, updateFile bool, commit func(func() error) error) (V, bool, error) {
 	f.loadBufMutex.Lock()
 	defer f.loadBufMutex.Unlock()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if binding := f.updateContext.Load(); binding != nil {
+		if err := binding.ctx.Err(); err != nil {
+			return lo.Empty[V](), false, err
+		}
+		stop := context.AfterFunc(binding.ctx, cancel)
+		defer stop()
+		if commit == nil {
+			commit = binding.commit
+		}
+	}
 
+	apply := func(fn func() error) error {
+		checkAndApply := func() error {
+			if err := f.ctx.Err(); err != nil {
+				return err
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return fn()
+		}
+		if commit != nil {
+			return commit(checkAndApply)
+		}
+		return checkAndApply()
+	}
 	now := time.Now()
 	if f.hash.Equal(hash) {
-		if updateFile {
-			_ = os.Chtimes(f.vehicle.Path(), now, now)
-		}
-		f.updatedAt = now
-		f.backoff.Reset() // no error, reset backoff
-		return lo.Empty[V](), true, nil
+		err := apply(func() error {
+			if updateFile {
+				_ = os.Chtimes(f.vehicle.Path(), now, now)
+			}
+			f.updatedAt.Store(now)
+			f.backoff.Reset() // no error, reset backoff
+			return nil
+		})
+		return lo.Empty[V](), true, err
 	}
 
 	if buf == nil { // f.hash has been changed between f.vehicle.Read but should not happen (cause by concurrent)
 		return lo.Empty[V](), true, nil
 	}
 
-	contents, err := f.parser(buf)
+	var contents V
+	var err error
+	if f.parserContext != nil {
+		contents, err = f.parserContext(ctx, commit, buf)
+	} else {
+		contents, err = f.parser(buf)
+	}
 	if err != nil {
 		f.backoff.AddAttempt() // add a failed attempt to backoff
 		return lo.Empty[V](), false, err
 	}
-	f.backoff.Reset() // no error, reset backoff
-
-	if updateFile {
-		if err = f.vehicle.Write(buf); err != nil {
-			return lo.Empty[V](), false, err
+	err = apply(func() error {
+		if updateFile {
+			if err := f.vehicle.Write(buf); err != nil {
+				return err
+			}
 		}
-	}
-	f.updatedAt = now
-	f.hash = hash
+		f.updatedAt.Store(now)
+		f.hash = hash
+		f.backoff.Reset() // applied successfully, reset backoff
 
-	if f.onUpdate != nil {
-		f.onUpdate(contents)
+		if f.onUpdate != nil {
+			f.onUpdate(contents)
+		}
+		return nil
+	})
+	if err != nil {
+		return lo.Empty[V](), false, err
 	}
 
 	return contents, false, nil
@@ -175,7 +297,7 @@ func (f *Fetcher[V]) Close() error {
 }
 
 func (f *Fetcher[V]) pullLoop(forceUpdate bool) {
-	initialInterval := f.interval - time.Since(f.updatedAt)
+	initialInterval := f.interval - time.Since(f.UpdatedAt())
 	if initialInterval > f.interval {
 		initialInterval = f.interval
 	}
@@ -264,6 +386,7 @@ func NewFetcher[V any](name string, interval time.Duration, vehicle P.Vehicle, b
 		parser:     parser,
 		onUpdate:   onUpdate,
 		interval:   interval,
+		operation:  semaphore.NewWeighted(1),
 		backoff: slowdown.Backoff{
 			Factor: 2,
 			Jitter: false,
