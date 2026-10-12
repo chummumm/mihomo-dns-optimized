@@ -107,18 +107,18 @@ func validateRoutePolicy(policy routePolicy) error {
 	return nil
 }
 
-func validateRouteManifest(manifest routeManifest) error {
-	if len(manifest.Policies) > 128 || len(manifest.Routes) > 256 || len(manifest.Rules) > 256 || len(manifest.Sysctls) > 4096 {
+func validateRouteState(state routeState) error {
+	if len(state.Policies) > 128 || len(state.Routes) > 256 || len(state.Rules) > 256 || len(state.Sysctls) > 4096 {
 		return errors.New("transparent proxy ownership exceeds limits")
 	}
-	for _, policy := range manifest.Policies {
+	for _, policy := range state.Policies {
 		if err := validateRoutePolicy(policy); err != nil {
 			return err
 		}
 	}
-	for _, route := range manifest.Routes {
+	for _, route := range state.Routes {
 		valid := false
-		for _, policy := range manifest.Policies {
+		for _, policy := range state.Policies {
 			if route.Backend != policy.Backend || route.Family != routeFamily(policy.IPv6) || route.Table != policy.Table {
 				continue
 			}
@@ -138,9 +138,9 @@ func validateRouteManifest(manifest routeManifest) error {
 			return errors.New("ownership contains an invalid managed route")
 		}
 	}
-	for _, rule := range manifest.Rules {
+	for _, rule := range state.Rules {
 		valid := false
-		for _, policy := range manifest.Policies {
+		for _, policy := range state.Policies {
 			guard, lookup := policyRules(policy)
 			if sameRule(rule, guard) || sameRule(rule, lookup) {
 				valid = true
@@ -151,7 +151,7 @@ func validateRouteManifest(manifest routeManifest) error {
 			return errors.New("ownership contains an invalid managed rule")
 		}
 	}
-	for _, setting := range manifest.Sysctls {
+	for _, setting := range state.Sysctls {
 		if err := validateOwnedSysctl(setting); err != nil {
 			return err
 		}
@@ -319,11 +319,11 @@ func decodeObservedRule(data []byte) (observedRule, error) {
 }
 
 func (s *linuxRouteSystem) ownsRoute(route observedRoute) bool {
-	return route.Protocol == linuxOwnerProtocol && route.Default && route.Plain && slices.ContainsFunc(s.manifest.Routes, func(owned ownedRoute) bool { return sameRoute(route.ownedRoute, owned) })
+	return route.Protocol == linuxOwnerProtocol && route.Default && route.Plain && slices.ContainsFunc(s.state.Routes, func(owned ownedRoute) bool { return sameRoute(route.ownedRoute, owned) })
 }
 
 func (s *linuxRouteSystem) ownsRule(rule observedRule) bool {
-	return rule.Protocol == linuxOwnerProtocol && rule.MarkSet && rule.Mask == ^uint32(0) && rule.Plain && slices.ContainsFunc(s.manifest.Rules, func(owned ownedRule) bool { return sameRule(rule.ownedRule, owned) })
+	return rule.Protocol == linuxOwnerProtocol && rule.MarkSet && rule.Mask == ^uint32(0) && rule.Plain && slices.ContainsFunc(s.state.Rules, func(owned ownedRule) bool { return sameRule(rule.ownedRule, owned) })
 }
 
 func (s *linuxRouteSystem) checkRouteConflicts(observation routeObservation, policies []routePolicy) error {
@@ -409,13 +409,13 @@ func (s *linuxRouteSystem) ensureRoutesLocked(ctx context.Context, policies []ro
 			}
 		}
 	}
-	if err := s.updateManifest(func(manifest *routeManifest) {
+	if err := s.updateState(func(state *routeState) {
 		for _, policy := range policies {
-			index := slices.IndexFunc(manifest.Policies, func(old routePolicy) bool { return samePolicy(old, policy) })
+			index := slices.IndexFunc(state.Policies, func(old routePolicy) bool { return samePolicy(old, policy) })
 			if index < 0 {
-				manifest.Policies = append(manifest.Policies, policy)
+				state.Policies = append(state.Policies, policy)
 			} else {
-				manifest.Policies[index] = policy
+				state.Policies[index] = policy
 			}
 		}
 	}); err != nil {
@@ -444,7 +444,7 @@ func (s *linuxRouteSystem) ensureRoutesLocked(ctx context.Context, policies []ro
 			return err
 		}
 		wanted := activeRoute(policy, loopback)
-		for _, old := range slices.Clone(s.manifest.Routes) {
+		for _, old := range slices.Clone(s.state.Routes) {
 			if old.Family != wanted.Family || old.Table != wanted.Table || old.Type == unix.RTN_BLACKHOLE {
 				continue
 			}
@@ -546,23 +546,23 @@ func (s *linuxRouteSystem) ensureRule(ctx context.Context, observation *routeObs
 }
 
 func (s *linuxRouteSystem) rememberRoute(route ownedRoute) error {
-	return s.updateManifest(func(manifest *routeManifest) {
-		index := slices.IndexFunc(manifest.Routes, func(old ownedRoute) bool { return sameRoute(old, route) })
+	return s.updateState(func(state *routeState) {
+		index := slices.IndexFunc(state.Routes, func(old ownedRoute) bool { return sameRoute(old, route) })
 		if index < 0 {
-			manifest.Routes = append(manifest.Routes, route)
+			state.Routes = append(state.Routes, route)
 		} else {
-			manifest.Routes[index] = route
+			state.Routes[index] = route
 		}
 	})
 }
 
 func (s *linuxRouteSystem) rememberRule(rule ownedRule) error {
-	return s.updateManifest(func(manifest *routeManifest) {
-		index := slices.IndexFunc(manifest.Rules, func(old ownedRule) bool { return sameRule(old, rule) })
+	return s.updateState(func(state *routeState) {
+		index := slices.IndexFunc(state.Rules, func(old ownedRule) bool { return sameRule(old, rule) })
 		if index < 0 {
-			manifest.Rules = append(manifest.Rules, rule)
+			state.Rules = append(state.Rules, rule)
 		} else {
-			manifest.Rules[index] = rule
+			state.Rules[index] = rule
 		}
 	})
 }
@@ -611,8 +611,8 @@ func (s *linuxRouteSystem) removeRoute(ctx context.Context, observation *routeOb
 		observation.changed = true
 	}
 	observation.Routes = slices.DeleteFunc(observation.Routes, func(actual observedRoute) bool { return sameRoute(actual.ownedRoute, route) })
-	return s.updateManifest(func(manifest *routeManifest) {
-		manifest.Routes = slices.DeleteFunc(manifest.Routes, func(old ownedRoute) bool { return sameRoute(old, route) })
+	return s.updateState(func(state *routeState) {
+		state.Routes = slices.DeleteFunc(state.Routes, func(old ownedRoute) bool { return sameRoute(old, route) })
 	})
 }
 
@@ -631,8 +631,8 @@ func (s *linuxRouteSystem) removeRule(ctx context.Context, observation *routeObs
 		observation.changed = true
 	}
 	observation.Rules = slices.DeleteFunc(observation.Rules, func(actual observedRule) bool { return sameRule(actual.ownedRule, rule) })
-	return s.updateManifest(func(manifest *routeManifest) {
-		manifest.Rules = slices.DeleteFunc(manifest.Rules, func(old ownedRule) bool { return sameRule(old, rule) })
+	return s.updateState(func(state *routeState) {
+		state.Rules = slices.DeleteFunc(state.Rules, func(old ownedRule) bool { return sameRule(old, rule) })
 	})
 }
 
@@ -642,7 +642,7 @@ func (s *linuxRouteSystem) QuiesceTUN(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var policies []routePolicy
-	for _, policy := range s.manifest.Policies {
+	for _, policy := range s.state.Policies {
 		if policy.Backend == ModeTUN {
 			policy.Ready = false
 			policies = append(policies, policy)
@@ -706,35 +706,35 @@ func (s *linuxRouteSystem) pruneRoutesLocked(ctx context.Context, policies []rou
 		return false
 	}
 	// Keep terminal guards through all other cleanup, including failure paths.
-	for _, route := range slices.Clone(s.manifest.Routes) {
+	for _, route := range slices.Clone(s.state.Routes) {
 		if route.Type != unix.RTN_BLACKHOLE && !keepRoute(route) {
 			if err := s.removeRoute(ctx, &observation, route); err != nil {
 				return err
 			}
 		}
 	}
-	for _, rule := range slices.Clone(s.manifest.Rules) {
+	for _, rule := range slices.Clone(s.state.Rules) {
 		if rule.Action != unix.FR_ACT_BLACKHOLE && !keepRule(rule) {
 			if err := s.removeRule(ctx, &observation, rule); err != nil {
 				return err
 			}
 		}
 	}
-	for _, route := range slices.Clone(s.manifest.Routes) {
+	for _, route := range slices.Clone(s.state.Routes) {
 		if !keepRoute(route) {
 			if err := s.removeRoute(ctx, &observation, route); err != nil {
 				return err
 			}
 		}
 	}
-	for _, rule := range slices.Clone(s.manifest.Rules) {
+	for _, rule := range slices.Clone(s.state.Rules) {
 		if !keepRule(rule) {
 			if err := s.removeRule(ctx, &observation, rule); err != nil {
 				return err
 			}
 		}
 	}
-	return s.updateManifest(func(manifest *routeManifest) { manifest.Policies = slices.Clone(policies) })
+	return s.updateState(func(state *routeState) { state.Policies = slices.Clone(policies) })
 }
 
 func (s *linuxRouteSystem) CloseRoutes(ctx context.Context) error {

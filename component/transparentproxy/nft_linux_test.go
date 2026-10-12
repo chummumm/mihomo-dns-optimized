@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/netip"
-	"strings"
 	"testing"
 
 	"github.com/metacubex/nftables"
@@ -184,7 +183,7 @@ func TestNFTProtocolModesAndAddressFamilies(t *testing.T) {
 			t.Run(string(tcp)+"-"+string(udp), func(t *testing.T) {
 				state := nftTestState()
 				state.TCP, state.UDP = tcp, udp
-				program, err := buildNFTRuleset("test-owner", state)
+				program, err := buildNFTRuleset(state)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -245,12 +244,12 @@ func TestNFTCaptureOrderingAndReadiness(t *testing.T) {
 		{name: "fake-before-ntp", hook: "output", address: "198.18.0.2", protocol: unix.IPPROTO_UDP, changePacket: func(p *nftTestPacket) { p.port = 123 }, mark: 0x162},
 		{name: "off-includes-fake", hook: "output", address: "198.18.0.2", protocol: unix.IPPROTO_UDP, changeState: func(s *firewallState) { s.UDP = ModeOff }},
 		{name: "ipv6-disabled", hook: "output", address: "fdfe:dcba:9876::2", protocol: unix.IPPROTO_UDP, changeState: func(s *firewallState) { s.IPv6 = false }},
-		{name: "tun4-unready", hook: "output", address: "8.8.8.8", protocol: unix.IPPROTO_UDP, changeState: func(s *firewallState) { s.Tun4 = false }, drop: true},
+		{name: "tun4-unready", hook: "output", address: "8.8.8.8", protocol: unix.IPPROTO_UDP, changeState: func(s *firewallState) { s.Tun4 = false }, mark: 0x162, drop: true},
 		{name: "tun4-unready-keeps-v6", hook: "output", address: "2001:4860:4860::8888", protocol: unix.IPPROTO_UDP, changeState: func(s *firewallState) { s.Tun4 = false }, mark: 0x162},
 		{name: "tun-unready-bypass", hook: "output", address: "10.1.2.3", protocol: unix.IPPROTO_UDP, changeState: func(s *firewallState) { s.Tun4 = false }},
-		{name: "tproxy-tcp-unready", hook: "prerouting", address: "8.8.8.8", protocol: unix.IPPROTO_TCP, changeState: func(s *firewallState) { s.TProxyTCP4 = false }, drop: true},
+		{name: "tproxy-tcp-unready", hook: "prerouting", address: "8.8.8.8", protocol: unix.IPPROTO_TCP, changeState: func(s *firewallState) { s.TProxyTCP4 = false }, mark: 1, drop: true},
 		{name: "tproxy-udp-still-ready", hook: "prerouting", address: "8.8.8.8", protocol: unix.IPPROTO_UDP, changeState: func(s *firewallState) { s.TProxyTCP4 = false; s.UDP = ModeTProxy }, mark: 1, tproxy: true},
-		{name: "missing-tproxy-socket-drops", hook: "prerouting", address: "8.8.8.8", protocol: unix.IPPROTO_TCP, changePacket: func(p *nftTestPacket) { p.missingListener = true }, drop: true},
+		{name: "missing-tproxy-socket-drops", hook: "prerouting", address: "8.8.8.8", protocol: unix.IPPROTO_TCP, changePacket: func(p *nftTestPacket) { p.missingListener = true }, mark: 1, drop: true},
 		{name: "lo-return-with-gateway-off", hook: "prerouting", address: "10.1.2.3", protocol: unix.IPPROTO_TCP, changeState: func(s *firewallState) { s.Gateway = nil }, changePacket: func(p *nftTestPacket) { p.input = "lo"; p.mark = 1 }, mark: 1, tproxy: true},
 		{name: "lo-return-unready", hook: "prerouting", address: "10.1.2.3", protocol: unix.IPPROTO_TCP, changeState: func(s *firewallState) { s.Gateway = nil; s.TProxyTCP4 = false }, changePacket: func(p *nftTestPacket) { p.input = "lo"; p.mark = 1 }, mark: 1, drop: true},
 		{name: "transparent-existing-socket", hook: "prerouting", address: "10.1.2.3", protocol: unix.IPPROTO_TCP, changePacket: func(p *nftTestPacket) { p.transparent = true }, mark: 1},
@@ -262,7 +261,7 @@ func TestNFTCaptureOrderingAndReadiness(t *testing.T) {
 			if test.changeState != nil {
 				test.changeState(&state)
 			}
-			program, err := buildNFTRuleset("test-owner", state)
+			program, err := buildNFTRuleset(state)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -280,7 +279,7 @@ func TestNFTCaptureOrderingAndReadiness(t *testing.T) {
 
 func nftSnapshotFromProgram(t *testing.T, program *nftRuleset) *nftSnapshot {
 	t.Helper()
-	snapshot := &nftSnapshot{generation: 1, table: program.table, chains: make(map[string]*nftChainState), sets: make(map[string]*nftSetState)}
+	snapshot := &nftSnapshot{generation: 1, table: program.table, comment: nftModule, chains: make(map[string]*nftChainState), sets: make(map[string]*nftSetState)}
 	for _, set := range program.sets {
 		flags := uint32(0)
 		if set.set.Interval {
@@ -314,7 +313,7 @@ func nftSnapshotFromProgram(t *testing.T, program *nftRuleset) *nftSnapshot {
 
 func TestNFTReconcilePreservesOwnershipAndConverges(t *testing.T) {
 	state := nftTestState()
-	program, err := buildNFTRuleset("stable-owner", state)
+	program, err := buildNFTRuleset(state)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +325,7 @@ func TestNFTReconcilePreservesOwnershipAndConverges(t *testing.T) {
 
 	state.Gateway = []string{"eth0", "eth0"}
 	state.Bypass = append(state.Bypass, netip.MustParsePrefix("10.1.0.0/16"))
-	reordered, err := buildNFTRuleset("stable-owner", state)
+	reordered, err := buildNFTRuleset(state)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +334,7 @@ func TestNFTReconcilePreservesOwnershipAndConverges(t *testing.T) {
 		t.Fatalf("equivalent normalized input rewrites rules: %+v %v", plan, err)
 	}
 	state.Bypass = append(state.Bypass, netip.MustParsePrefix("2001:db8:1234::/56"))
-	changed, err := buildNFTRuleset("stable-owner", state)
+	changed, err := buildNFTRuleset(state)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,10 +370,13 @@ func TestNFTReconcilePreservesOwnershipAndConverges(t *testing.T) {
 		t.Fatal("removed foreign rule inside managed chain")
 	}
 	actual = nftSnapshotFromProgram(t, program)
-	delete(actual.sets, "owner")
+	delete(actual.sets, "fake4")
 	plan, err = planNFTChanges(actual, program)
-	if err != nil || len(plan.createSets) != 1 || plan.createSets[0].set.Name != "owner" {
-		t.Fatalf("intact owned objects could not recover marker: %+v %v", plan, err)
+	if err != nil || len(plan.createSets) != 1 || plan.createSets[0].set.Name != "fake4" {
+		t.Fatalf("could not restore a deleted working set: %+v %v", plan, err)
+	}
+	if actual.sets["owner"] != nil {
+		t.Fatal("working firewall includes a recovery-record set")
 	}
 }
 
@@ -463,7 +465,7 @@ func TestNFTKernelLookupDefaultFlagsConverge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	program, err := buildNFTRuleset("stable-owner", nftTestState())
+	program, err := buildNFTRuleset(nftTestState())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -544,7 +546,7 @@ func TestNFTLookupNormalizationPreservesSignificantAttributes(t *testing.T) {
 
 func TestNFTApplyFailureAndCloseDoNotDeleteForeignObjects(t *testing.T) {
 	state := nftTestState()
-	program, err := buildNFTRuleset("stable-owner", state)
+	program, err := buildNFTRuleset(state)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -556,7 +558,7 @@ func TestNFTApplyFailureAndCloseDoNotDeleteForeignObjects(t *testing.T) {
 		mutations = append(mutations, messages...)
 		return unix.EPERM
 	}
-	f := &nftFirewall{owner: "stable-owner", read: func(context.Context, string) (*nftSnapshot, error) { return actual, nil }, write: write}
+	f := &nftFirewall{read: func(context.Context) (*nftSnapshot, error) { return actual, nil }, write: write}
 	if err := f.Apply(context.Background(), state); err != nil || len(mutations) != 0 {
 		t.Fatalf("unchanged Apply sent transaction: %v", err)
 	}
@@ -569,22 +571,32 @@ func TestNFTApplyFailureAndCloseDoNotDeleteForeignObjects(t *testing.T) {
 		t.Fatalf("close failure hidden: %v", err)
 	}
 	for _, message := range mutations {
-		if message.Type != uint16(unix.NFNL_SUBSYS_NFTABLES<<8)|unix.NFT_MSG_DELRULE {
-			t.Fatalf("Close removed a table/chain/set: %v", message.Type)
-		}
 		attributes, err := nftAttributeMap(message.Data[4:])
 		if err != nil {
 			t.Fatal(err)
 		}
-		chain, err := nftStringAttribute(attributes, unix.NFTA_RULE_CHAIN)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if chain == "administrator" {
-			t.Fatal("Close removed a foreign rule")
-		}
-		if len(attributes[unix.NFTA_RULE_HANDLE]) != 8 {
-			t.Fatal("Close issued unscoped rule flush")
+		switch message.Type & 0xff {
+		case unix.NFT_MSG_DELRULE:
+			chain, err := nftStringAttribute(attributes, unix.NFTA_RULE_CHAIN)
+			if err != nil || chain == "administrator" || len(attributes[unix.NFTA_RULE_HANDLE]) != 8 {
+				t.Fatalf("Close issued foreign or unscoped rule deletion: %s %v", chain, err)
+			}
+		case unix.NFT_MSG_DELCHAIN:
+			chain, err := nftStringAttribute(attributes, unix.NFTA_CHAIN_NAME)
+			if err != nil || !managedNFTChain(chain) || message.Flags&unix.NLM_F_NONREC == 0 {
+				t.Fatalf("Close issued recursive or foreign chain deletion: %s %v", chain, err)
+			}
+		case unix.NFT_MSG_DELSET:
+			name, err := nftStringAttribute(attributes, unix.NFTA_SET_NAME)
+			if err != nil || !managedNFTSet(name) {
+				t.Fatalf("Close issued foreign set deletion: %s %v", name, err)
+			}
+		case unix.NFT_MSG_DELTABLE:
+			if message.Flags&unix.NLM_F_NONREC == 0 {
+				t.Fatal("Close could recursively delete external objects")
+			}
+		default:
+			t.Fatalf("Close sent unexpected operation: %v", message.Type)
 		}
 	}
 	cancelled, cancel := context.WithCancel(context.Background())
@@ -594,8 +606,11 @@ func TestNFTApplyFailureAndCloseDoNotDeleteForeignObjects(t *testing.T) {
 		t.Fatalf("cancelled apply wrote mutations: %v", err)
 	}
 	actual = &nftSnapshot{table: program.table, chains: map[string]*nftChainState{}, sets: map[string]*nftSetState{}}
-	if err := f.Close(context.Background()); err == nil || !strings.Contains(err.Error(), "not owned") || len(mutations) != 0 {
+	if err := f.Close(context.Background()); err != nil || len(mutations) != 0 {
 		t.Fatalf("Close claimed foreign table: %v", err)
+	}
+	if err := f.Apply(context.Background(), state); err == nil || len(mutations) != 0 {
+		t.Fatalf("Apply claimed a same-name foreign table: %v", err)
 	}
 }
 
@@ -612,11 +627,8 @@ func TestNFTInvalidStateIsRejectedBeforeCapture(t *testing.T) {
 	} {
 		state := nftTestState()
 		change(&state)
-		if _, err := buildNFTRuleset("test-owner", state); err == nil {
+		if _, err := buildNFTRuleset(state); err == nil {
 			t.Fatalf("accepted invalid state: %+v", state)
 		}
-	}
-	if _, err := newFirewall(""); err == nil {
-		t.Fatal("accepted empty owner")
 	}
 }

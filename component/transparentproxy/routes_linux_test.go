@@ -21,6 +21,10 @@ type routeTestKernel struct {
 	writes             []wirePacket
 	beforeWrite        func(wirePacket) error
 	dropDumpProtection bool
+	tunTypes           map[int]byte
+	extraRoutes        []wireMessage
+	extraRules         []wireMessage
+	failDump           uint16
 }
 
 func testLinkMessage(link networkInterface) wireMessage {
@@ -40,10 +44,20 @@ func testLinkMessage(link networkInterface) wireMessage {
 
 func (k *routeTestKernel) handle(request wirePacket) []wirePacket {
 	var messages []wireMessage
+	if request.Type == k.failDump {
+		return []wirePacket{testWireAck(unix.EIO)}
+	}
 	switch request.Type {
 	case unix.RTM_GETLINK:
 		for _, link := range k.links {
-			messages = append(messages, testLinkMessage(link))
+			message := testLinkMessage(link)
+			if tunType, ok := k.tunTypes[link.Index]; ok {
+				data := appendWireAttribute(nil, unix.IFLA_TUN_TYPE, []byte{tunType})
+				info := appendWireAttribute(nil, unix.IFLA_INFO_KIND, []byte("tun\x00"))
+				info = appendWireAttribute(info, unix.IFLA_INFO_DATA, data)
+				message.Data = appendWireAttribute(message.Data, unix.IFLA_LINKINFO, info)
+			}
+			messages = append(messages, message)
 		}
 		return testWireDump(messages...)
 	case unix.RTM_GETROUTE:
@@ -62,7 +76,7 @@ func (k *routeTestKernel) handle(request wirePacket) []wirePacket {
 			}
 			messages = append(messages, wireMessage{Type: unix.RTM_NEWROUTE, Data: data})
 		}
-		return testWireDump(messages...)
+		return testWireDump(append(messages, k.extraRoutes...)...)
 	case unix.RTM_GETRULE:
 		for _, family := range []byte{unix.AF_INET, unix.AF_INET6} {
 			data := make([]byte, 12)
@@ -73,7 +87,7 @@ func (k *routeTestKernel) handle(request wirePacket) []wirePacket {
 		for _, rule := range k.rules {
 			messages = append(messages, wireMessage{Type: unix.RTM_NEWRULE, Data: marshalOwnedRule(rule)})
 		}
-		return testWireDump(messages...)
+		return testWireDump(append(messages, k.extraRules...)...)
 	case unix.RTM_NEWROUTE, unix.RTM_DELROUTE, unix.RTM_NEWRULE, unix.RTM_DELRULE:
 		if k.beforeWrite != nil {
 			if err := k.beforeWrite(request); err != nil {
@@ -121,9 +135,9 @@ func (k *routeTestKernel) handle(request wirePacket) []wirePacket {
 
 func routeTestSystem(t *testing.T) (*linuxRouteSystem, *routeTestKernel, *int) {
 	t.Helper()
-	kernel := &routeTestKernel{links: []networkInterface{{Index: 1, Name: "lo", Up: true, Loopback: true}, {Index: 10, Name: "utun", Up: true}}}
+	kernel := &routeTestKernel{links: []networkInterface{{Index: 1, Name: "lo", Up: true, Loopback: true}, {Index: 10, Name: "utun", Up: true}}, tunTypes: map[int]byte{10: unix.IFF_TUN}}
 	writes := new(int)
-	system := &linuxRouteSystem{request: testWireConnection(kernel.handle), lease: -1, procRoot: t.TempDir(), writeState: func() error { *writes++; return nil }}
+	system := &linuxRouteSystem{request: testWireConnection(kernel.handle), lease: -1, procRoot: t.TempDir(), beforeSysctlWrite: func(string, string) error { *writes++; return nil }}
 	t.Cleanup(func() { _ = system.Close() })
 	writeTestSysctl(t, system, "net/ipv6/conf/all/disable_ipv6", "0")
 	return system, kernel, writes
@@ -145,14 +159,14 @@ func testTUNPolicies() []routePolicy {
 }
 
 func TestRoutesProtectBeforeForwardingAndDoNotRewriteUnchangedState(t *testing.T) {
-	s, kernel, persisted := routeTestSystem(t)
+	s, kernel, _ := routeTestSystem(t)
 	policies := testTUNPolicies()
 	kernel.beforeWrite = func(request wirePacket) error {
 		switch request.Type {
 		case unix.RTM_NEWROUTE:
 			route, err := decodeObservedRoute(request.Data)
 			if err != nil || !s.ownsRoute(route) {
-				t.Fatalf("route mutation preceded durable ownership: %+v, %v", route, err)
+				t.Fatalf("route mutation preceded runtime ownership: %+v, %v", route, err)
 			}
 			if route.Type != unix.RTN_BLACKHOLE {
 				for _, policy := range policies {
@@ -165,7 +179,7 @@ func TestRoutesProtectBeforeForwardingAndDoNotRewriteUnchangedState(t *testing.T
 		case unix.RTM_NEWRULE:
 			rule, err := decodeObservedRule(request.Data)
 			if err != nil || !s.ownsRule(rule) {
-				t.Fatalf("rule mutation preceded durable ownership: %+v, %v", rule, err)
+				t.Fatalf("rule mutation preceded runtime ownership: %+v, %v", rule, err)
 			}
 		}
 		return nil
@@ -176,15 +190,15 @@ func TestRoutesProtectBeforeForwardingAndDoNotRewriteUnchangedState(t *testing.T
 	if len(kernel.routes) != 4 || len(kernel.rules) != 4 {
 		t.Fatalf("bad dual-stack resources: %+v %+v", kernel.routes, kernel.rules)
 	}
-	writes, diskWrites := len(kernel.writes), *persisted
+	writes := len(kernel.writes)
 	if err := s.EnsureRoutes(context.Background(), policies); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.PruneRoutes(context.Background(), policies); err != nil {
 		t.Fatal(err)
 	}
-	if len(kernel.writes) != writes || *persisted != diskWrites {
-		t.Fatalf("unchanged event wrote kernel/disk: %d->%d %d->%d", writes, len(kernel.writes), diskWrites, *persisted)
+	if len(kernel.writes) != writes {
+		t.Fatalf("unchanged event wrote kernel: %d->%d", writes, len(kernel.writes))
 	}
 }
 
@@ -275,14 +289,26 @@ func TestRoutesDoNotAdoptExternalTableOrPriorityObjects(t *testing.T) {
 	}
 }
 
-func TestRoutesPersistFailureCannotAuthorizeKernelMutation(t *testing.T) {
+func TestRoutesFailedKernelWriteCanBeCleanedBySameProcess(t *testing.T) {
 	s, kernel, _ := routeTestSystem(t)
-	s.writeState = func() error { return os.ErrPermission }
-	if err := s.EnsureRoutes(context.Background(), testTUNPolicies()); !errors.Is(err, os.ErrPermission) {
+	kernel.beforeWrite = func(request wirePacket) error {
+		if request.Type == unix.RTM_NEWRULE {
+			return unix.EPERM
+		}
+		return nil
+	}
+	if err := s.EnsureRoutes(context.Background(), testTUNPolicies()); !errors.Is(err, unix.EPERM) {
 		t.Fatal(err)
 	}
-	if len(kernel.writes) != 0 || len(s.manifest.Policies) != 0 || len(s.manifest.Routes) != 0 {
-		t.Fatal("failed journal left applied or claimed resources")
+	if len(kernel.routes) == 0 || len(s.state.Routes) == 0 {
+		t.Fatal("partial setup lost the resources this process must clean")
+	}
+	kernel.beforeWrite = nil
+	if err := s.CloseRoutes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(kernel.routes) != 0 || len(kernel.rules) != 0 || len(s.state.Policies) != 0 || len(s.state.Routes) != 0 || len(s.state.Rules) != 0 {
+		t.Fatal("partial setup could not be completely cleaned")
 	}
 }
 
@@ -292,8 +318,8 @@ func TestRoutesUnavailableIPv6KeepsIntentAndRefusesUnprotectedClose(t *testing.T
 	if err := s.EnsureRoutes(context.Background(), testTUNPolicies()); err != nil {
 		t.Fatal(err)
 	}
-	if len(s.manifest.Policies) != 2 || s.manifest.Policies[1].Ready {
-		t.Fatalf("IPv6 intent lost: %+v", s.manifest.Policies)
+	if len(s.state.Policies) != 2 || s.state.Policies[1].Ready {
+		t.Fatalf("IPv6 intent lost: %+v", s.state.Policies)
 	}
 	if slices.ContainsFunc(kernel.routes, func(route ownedRoute) bool { return route.Family == unix.AF_INET6 }) {
 		t.Fatal("configured unavailable IPv6")

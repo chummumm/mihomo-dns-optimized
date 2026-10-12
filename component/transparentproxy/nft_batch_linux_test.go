@@ -10,6 +10,7 @@ import (
 
 	"github.com/metacubex/nftables"
 	"github.com/metacubex/nftables/binaryutil"
+	"github.com/metacubex/nftables/userdata"
 	"golang.org/x/sys/unix"
 )
 
@@ -54,7 +55,7 @@ func nftBatchAck(sequence uint32, status int32) []byte {
 }
 
 func TestNFTBatchGenerationAndCompleteAcknowledgements(t *testing.T) {
-	program, err := buildNFTRuleset("batch-owner", nftTestState())
+	program, err := buildNFTRuleset(nftTestState())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,15 +128,15 @@ func TestNFTBatchGenerationAndCompleteAcknowledgements(t *testing.T) {
 
 func TestNFTGenerationRetryRereadsOwnership(t *testing.T) {
 	state := nftTestState()
-	program, err := buildNFTRuleset("owner", state)
+	program, err := buildNFTRuleset(state)
 	if err != nil {
 		t.Fatal(err)
 	}
 	actual := nftSnapshotFromProgram(t, program)
 	state.Tun4 = false
 	reads, writes := 0, 0
-	f := &nftFirewall{owner: "owner"}
-	f.read = func(context.Context, string) (*nftSnapshot, error) { reads++; return actual, nil }
+	f := &nftFirewall{}
+	f.read = func(context.Context) (*nftSnapshot, error) { reads++; return actual, nil }
 	f.write = func(_ context.Context, generation uint32, _ []wireMessage) error {
 		writes++
 		if generation != actual.generation {
@@ -148,7 +149,7 @@ func TestNFTGenerationRetryRereadsOwnership(t *testing.T) {
 		t.Fatal("applied stale plan to externally replaced table")
 	}
 	if reads != 2 || writes != 1 {
-		t.Fatalf("did not revalidate owner after generation failure: reads=%d writes=%d", reads, writes)
+		t.Fatalf("did not revalidate module after generation failure: reads=%d writes=%d", reads, writes)
 	}
 
 	actual = nftSnapshotFromProgram(t, program)
@@ -162,8 +163,31 @@ func TestNFTGenerationRetryRereadsOwnership(t *testing.T) {
 	}
 }
 
+func TestNFTCloseGenerationRetryLeavesExternalReplacement(t *testing.T) {
+	program, err := buildNFTRuleset(nftTestState())
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual := nftSnapshotFromProgram(t, program)
+	reads, writes := 0, 0
+	f := &nftFirewall{
+		read: func(context.Context) (*nftSnapshot, error) { reads++; return actual, nil },
+		write: func(_ context.Context, generation uint32, _ []wireMessage) error {
+			writes++
+			actual = &nftSnapshot{generation: generation + 1, table: program.table}
+			return unix.EAGAIN
+		},
+	}
+	if err := f.Close(context.Background()); err != nil {
+		t.Fatalf("external replacement blocked cleanup of our already removed capture: %v", err)
+	}
+	if reads != 2 || writes != 1 {
+		t.Fatalf("Close did not revalidate or attempted to delete external table: reads=%d writes=%d", reads, writes)
+	}
+}
+
 func TestNFTBatchEncodingMatchesSnapshot(t *testing.T) {
-	program, err := buildNFTRuleset("encode-owner", nftTestState())
+	program, err := buildNFTRuleset(nftTestState())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,6 +201,15 @@ func TestNFTBatchEncodingMatchesSnapshot(t *testing.T) {
 	}
 	for _, operation := range operations {
 		switch operation.Type & 0xff {
+		case unix.NFT_MSG_NEWTABLE:
+			attributes, err := nftMessageAttributes(operation, unix.NFT_MSG_NEWTABLE)
+			if err != nil {
+				t.Fatal(err)
+			}
+			comment, err := nftUserdataString(attributes[nftTableUserdata], byte(userdata.TypeComment))
+			if err != nil || comment != nftModule {
+				t.Fatalf("working table lost its module marker: %q %v", comment, err)
+			}
 		case unix.NFT_MSG_NEWCHAIN:
 			chain, err := decodeNFTChain(operation)
 			if err != nil {
@@ -190,8 +223,8 @@ func TestNFTBatchEncodingMatchesSnapshot(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if set.set.Comment != program.owner+"/set/"+set.set.Name {
-				t.Fatal("lost set owner")
+			if set.set.Comment != nftModule+"/set/"+set.set.Name {
+				t.Fatal("lost working set module marker")
 			}
 		case unix.NFT_MSG_NEWSETELEM:
 			attributes, err := nftMessageAttributes(operation, unix.NFT_MSG_NEWSETELEM)

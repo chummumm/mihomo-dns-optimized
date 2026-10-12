@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync"
@@ -99,7 +98,7 @@ func ApplyConfig(cfg *config.Config, force bool) error {
 	mux.Lock()
 	defer mux.Unlock()
 	wasManaged := transparentproxy.IsEnabled()
-	if err := beginTransparentProxyApply(filepath.Join(C.Path.HomeDir(), "transparent-proxy"), cfg.General.TransparentProxy, transparentProxyRuntime(cfg)); err != nil {
+	if err := beginTransparentProxyApply(cfg.General.TransparentProxy, transparentProxyRuntime(cfg)); err != nil {
 		return fmt.Errorf("apply transparent-proxy: %w", err)
 	}
 	startTransparentProxyRepairs()
@@ -689,20 +688,26 @@ func shutdownLocked() error {
 }
 
 // A process replacement retains capture and blackhole protection until the
-// next process recovers the same ownership journal. Normal shutdown must not
+// next process verifies the owned kernel resources. Normal shutdown must not
 // use this path, because stopping the service should release its interception.
 func shutdownForRestartLocked() error {
 	if err := prepareTransparentRestart(); err != nil {
 		log.Errorln("Preserve running listeners: prepare transparent-proxy restart: %s", err)
 		return err
 	}
-	if err := shutdownBackendsLocked(); err != nil {
+	err := cleanupTunListener()
+	if err == nil {
+		// Original sysctl values live only in this process. Restore them after
+		// TUN close and before reexec, so the replacement samples a fresh base.
+		err = completeTransparentRestart()
+	}
+	if err != nil {
 		// The manager still owns its observer and namespace lease. Publish
 		// only the listeners that survived cleanup; missing ones recover
 		// through its existing backend repair requests.
 		return errors.Join(err, abortTransparentRestart(listener.TransparentProxyBackends()))
 	}
-	completeTransparentRestart()
+	shutdownBackgroundLocked()
 	return nil
 }
 
@@ -711,6 +716,11 @@ func shutdownBackendsLocked() error {
 		log.Errorln("Close TUN listener: %s", err)
 		return err
 	}
+	shutdownBackgroundLocked()
+	return nil
+}
+
+func shutdownBackgroundLocked() {
 	invalidateUpdateConfiguration()
 	updater.StopAutomaticUpdates()
 	tproxy.CleanupTProxyIPTables()
@@ -718,5 +728,4 @@ func shutdownBackendsLocked() error {
 	closeDNSResolvers()
 
 	log.Warnln("Mihomo shutting down")
-	return nil
 }

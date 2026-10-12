@@ -20,9 +20,9 @@ type ownedSysctl struct {
 	Path     string
 	Original string
 	Written  string
-	// A pending global/default restoration may leave the old or new value
-	// after a crash. Both are ours until its per-interface inverse completes.
-	BeforeBulk     string `json:",omitempty"`
+	// A partial global/default restoration may leave the old or new value.
+	// Both remain known to this process until its per-interface inverse completes.
+	BeforeBulk     string
 	InterfaceIndex int
 }
 
@@ -82,6 +82,11 @@ func (s *linuxRouteSystem) readSysctl(path string) (string, error) {
 
 func (s *linuxRouteSystem) writeSysctl(path, value string) error {
 	// The path is selected from the fixed allowlist above, never a YAML command.
+	if s.beforeSysctlWrite != nil {
+		if err := s.beforeSysctlWrite(path, value); err != nil {
+			return err
+		}
+	}
 	file, err := os.OpenFile(filepath.Join(s.procRoot, path), os.O_WRONLY|os.O_TRUNC, 0)
 	if err != nil {
 		return err
@@ -95,12 +100,12 @@ func (s *linuxRouteSystem) ownSysctl(setting desiredSysctl) error {
 	if err != nil {
 		return err
 	}
-	index := slices.IndexFunc(s.manifest.Sysctls, func(old ownedSysctl) bool { return old.Path == setting.Path })
-	if index >= 0 && s.manifest.Sysctls[index].InterfaceIndex != setting.InterfaceIndex {
+	index := slices.IndexFunc(s.state.Sysctls, func(old ownedSysctl) bool { return old.Path == setting.Path })
+	if index >= 0 && s.state.Sysctls[index].InterfaceIndex != setting.InterfaceIndex {
 		// Reusing an interface name does not transfer ownership of the old
 		// device's settings to a replacement interface.
-		if err := s.updateManifest(func(manifest *routeManifest) {
-			manifest.Sysctls = slices.DeleteFunc(manifest.Sysctls, func(old ownedSysctl) bool { return old.Path == setting.Path })
+		if err := s.updateState(func(state *routeState) {
+			state.Sysctls = slices.DeleteFunc(state.Sysctls, func(old ownedSysctl) bool { return old.Path == setting.Path })
 		}); err != nil {
 			return err
 		}
@@ -111,16 +116,16 @@ func (s *linuxRouteSystem) ownSysctl(setting desiredSysctl) error {
 	}
 	owned := ownedSysctl{Path: setting.Path, Original: current, Written: setting.Value, InterfaceIndex: setting.InterfaceIndex}
 	if index >= 0 {
-		owned.Original = s.manifest.Sysctls[index].Original
+		owned.Original = s.state.Sysctls[index].Original
 	}
 	if err := validateOwnedSysctl(owned); err != nil {
 		return err
 	}
-	if err := s.updateManifest(func(manifest *routeManifest) {
+	if err := s.updateState(func(state *routeState) {
 		if index >= 0 {
-			manifest.Sysctls[index] = owned
+			state.Sysctls[index] = owned
 		} else {
-			manifest.Sysctls = append(manifest.Sysctls, owned)
+			state.Sysctls = append(state.Sysctls, owned)
 		}
 	}); err != nil {
 		return err
@@ -175,7 +180,7 @@ func (s *linuxRouteSystem) ApplySysctls(ctx context.Context, state networkState,
 				}
 			}
 			var inheritedRA *ownedSysctl
-			for _, old := range s.manifest.Sysctls {
+			for _, old := range s.state.Sysctls {
 				if old.Path != "net/ipv6/conf/default/accept_ra" {
 					continue
 				}
@@ -211,9 +216,9 @@ func (s *linuxRouteSystem) ApplySysctls(ctx context.Context, state networkState,
 				}
 			}
 			// all.forwarding changes per-interface and default forwarding too.
-			// Journal those side effects before the bulk write, including values
+			// Remember those side effects before the bulk write, including values
 			// already equal to 1 which must survive a later global restoration.
-			bulkOwned := slices.ContainsFunc(s.manifest.Sysctls, func(old ownedSysctl) bool { return old.Path == "net/ipv6/conf/all/forwarding" })
+			bulkOwned := slices.ContainsFunc(s.state.Sysctls, func(old ownedSysctl) bool { return old.Path == "net/ipv6/conf/all/forwarding" })
 			if forwarding == "0" || bulkOwned {
 				settings := []desiredSysctl{{Path: "net/ipv6/conf/default/forwarding", Value: "1"}}
 				for _, link := range state.Interfaces {
@@ -239,7 +244,7 @@ func (s *linuxRouteSystem) ApplySysctls(ctx context.Context, state networkState,
 						return err
 					}
 					wanted[setting.Path] = true
-					oldIndex := slices.IndexFunc(s.manifest.Sysctls, func(old ownedSysctl) bool {
+					oldIndex := slices.IndexFunc(s.state.Sysctls, func(old ownedSysctl) bool {
 						return old.Path == setting.Path && old.InterfaceIndex == setting.InterfaceIndex
 					})
 					if oldIndex >= 0 {
@@ -247,7 +252,7 @@ func (s *linuxRouteSystem) ApplySysctls(ctx context.Context, state networkState,
 					}
 					original := current
 					if bulkOwned && setting.InterfaceIndex != 0 && current == "1" && strings.HasSuffix(setting.Path, "/forwarding") {
-						for _, old := range s.manifest.Sysctls {
+						for _, old := range s.state.Sysctls {
 							if old.Path == "net/ipv6/conf/default/forwarding" {
 								original = old.Original
 							}
@@ -259,10 +264,10 @@ func (s *linuxRouteSystem) ApplySysctls(ctx context.Context, state networkState,
 					}
 					originals = append(originals, entry)
 				}
-				if err := s.updateManifest(func(manifest *routeManifest) {
+				if err := s.updateState(func(state *routeState) {
 					for _, entry := range originals {
-						manifest.Sysctls = slices.DeleteFunc(manifest.Sysctls, func(old ownedSysctl) bool { return old.Path == entry.Path })
-						manifest.Sysctls = append(manifest.Sysctls, entry)
+						state.Sysctls = slices.DeleteFunc(state.Sysctls, func(old ownedSysctl) bool { return old.Path == entry.Path })
+						state.Sysctls = append(state.Sysctls, entry)
 					}
 				}); err != nil {
 					return err
@@ -281,7 +286,7 @@ func (s *linuxRouteSystem) ApplySysctls(ctx context.Context, state networkState,
 			// Keep RA adjustments that preserve the original host behavior while
 			// this same global forwarding change remains owned.
 			if bulkOwned || forwarding == "0" {
-				for _, old := range s.manifest.Sysctls {
+				for _, old := range s.state.Sysctls {
 					if strings.HasSuffix(old.Path, "/accept_ra") {
 						wanted[old.Path] = true
 					}
@@ -294,7 +299,7 @@ func (s *linuxRouteSystem) ApplySysctls(ctx context.Context, state networkState,
 		if err != nil {
 			return err
 		}
-		for _, old := range s.manifest.Sysctls {
+		for _, old := range s.state.Sysctls {
 			if old.Path == "net/ipv4/conf/all/rp_filter" {
 				all = old.Original
 			}
@@ -320,7 +325,7 @@ func (s *linuxRouteSystem) ApplySysctls(ctx context.Context, state networkState,
 				return errors.New("invalid interface rp_filter state")
 			}
 			wantedValue := value
-			for _, old := range s.manifest.Sysctls {
+			for _, old := range s.state.Sysctls {
 				if old.Path == path && old.InterfaceIndex == link.Index && old.Written == value {
 					wantedValue = old.Original
 				}
@@ -345,9 +350,9 @@ func (s *linuxRouteSystem) ApplySysctls(ctx context.Context, state networkState,
 		}
 		if defaultValue != value {
 			// Writing a default IPv4 setting also updates interfaces which have
-			// never overridden it. Journal every affected original first, then
+			// never overridden it. Remember every affected original first, then
 			// apply explicit interface values after the default's bulk change.
-			if err := s.journalSysctlEffects(settings); err != nil {
+			if err := s.rememberSysctlEffects(settings); err != nil {
 				return err
 			}
 		}
@@ -374,11 +379,11 @@ func (s *linuxRouteSystem) ownRouterAdvertisements(path string, ifIndex int, inh
 	if err != nil {
 		return err
 	}
-	index := slices.IndexFunc(s.manifest.Sysctls, func(old ownedSysctl) bool { return old.Path == path })
-	known := index >= 0 && s.manifest.Sysctls[index].InterfaceIndex == ifIndex
+	index := slices.IndexFunc(s.state.Sysctls, func(old ownedSysctl) bool { return old.Path == path })
+	known := index >= 0 && s.state.Sysctls[index].InterfaceIndex == ifIndex
 	original := current
 	if known {
-		old := s.manifest.Sysctls[index]
+		old := s.state.Sysctls[index]
 		if current == old.Written {
 			original = old.Original
 		}
@@ -398,11 +403,11 @@ func (s *linuxRouteSystem) ownRouterAdvertisements(path string, ifIndex int, inh
 	if err := validateOwnedSysctl(entry); err != nil {
 		return err
 	}
-	if err := s.updateManifest(func(manifest *routeManifest) {
+	if err := s.updateState(func(state *routeState) {
 		if index >= 0 {
-			manifest.Sysctls[index] = entry
+			state.Sysctls[index] = entry
 		} else {
-			manifest.Sysctls = append(manifest.Sysctls, entry)
+			state.Sysctls = append(state.Sysctls, entry)
 		}
 	}); err != nil {
 		return err
@@ -413,13 +418,13 @@ func (s *linuxRouteSystem) ownRouterAdvertisements(path string, ifIndex int, inh
 	return nil
 }
 
-// journalSysctlEffects records settings before another sysctl can change them
+// rememberSysctlEffects records settings before another sysctl can change them
 // indirectly. This includes unchanged values, which a later global restoration
 // could otherwise overwrite without an original value to restore.
-func (s *linuxRouteSystem) journalSysctlEffects(settings []desiredSysctl) error {
+func (s *linuxRouteSystem) rememberSysctlEffects(settings []desiredSysctl) error {
 	var originals []ownedSysctl
 	for _, setting := range settings {
-		if slices.ContainsFunc(s.manifest.Sysctls, func(old ownedSysctl) bool {
+		if slices.ContainsFunc(s.state.Sysctls, func(old ownedSysctl) bool {
 			return old.Path == setting.Path && old.InterfaceIndex == setting.InterfaceIndex
 		}) {
 			continue
@@ -434,10 +439,10 @@ func (s *linuxRouteSystem) journalSysctlEffects(settings []desiredSysctl) error 
 		}
 		originals = append(originals, entry)
 	}
-	return s.updateManifest(func(manifest *routeManifest) {
+	return s.updateState(func(state *routeState) {
 		for _, entry := range originals {
-			manifest.Sysctls = slices.DeleteFunc(manifest.Sysctls, func(old ownedSysctl) bool { return old.Path == entry.Path })
-			manifest.Sysctls = append(manifest.Sysctls, entry)
+			state.Sysctls = slices.DeleteFunc(state.Sysctls, func(old ownedSysctl) bool { return old.Path == entry.Path })
+			state.Sysctls = append(state.Sysctls, entry)
 		}
 	})
 }
@@ -477,7 +482,7 @@ func (s *linuxRouteSystem) restoreSysctlsLocked(ctx context.Context, keep map[st
 	// A link may be created after the last handled event and immediately before
 	// explicit disable. Record its inherited RA setting before removing the
 	// default that proves the inheritance; cleanup cannot wait for another event.
-	for _, baseline := range slices.Clone(s.manifest.Sysctls) {
+	for _, baseline := range slices.Clone(s.state.Sysctls) {
 		if baseline.Path != "net/ipv6/conf/default/accept_ra" || keep[baseline.Path] {
 			continue
 		}
@@ -493,7 +498,7 @@ func (s *linuxRouteSystem) restoreSysctlsLocked(ctx context.Context, keep map[st
 		}
 		for _, link := range links {
 			path := "net/ipv6/conf/" + link.Name + "/accept_ra"
-			if keep[path] || slices.ContainsFunc(s.manifest.Sysctls, func(old ownedSysctl) bool { return old.Path == path && old.InterfaceIndex == link.Index }) {
+			if keep[path] || slices.ContainsFunc(s.state.Sysctls, func(old ownedSysctl) bool { return old.Path == path && old.InterfaceIndex == link.Index }) {
 				continue
 			}
 			if err := s.ownRouterAdvertisements(path, link.Index, &baseline, false); err != nil && !os.IsNotExist(err) {
@@ -503,7 +508,7 @@ func (s *linuxRouteSystem) restoreSysctlsLocked(ctx context.Context, keep map[st
 	}
 	var restore []ownedSysctl
 	var retire []string
-	for _, setting := range s.manifest.Sysctls {
+	for _, setting := range s.state.Sysctls {
 		if keep[setting.Path] {
 			continue
 		}
@@ -528,8 +533,8 @@ func (s *linuxRouteSystem) restoreSysctlsLocked(ctx context.Context, keep map[st
 	// A global/default restoration can also affect devices created since the
 	// last event, or an interface whose name was reused. Preserve their actual
 	// current values; the old interface's original values do not apply to them.
-	// Journal this inverse operation before the bulk write so a crash between
-	// restoring the global value and its effects remains recoverable.
+	// Remember this inverse operation before the bulk write so this process
+	// can retry a partially failed restoration without losing interface values.
 	var inverse []ownedSysctl
 	for _, bulk := range slices.Clone(restore) {
 		var paths []desiredSysctl
@@ -578,10 +583,10 @@ func (s *linuxRouteSystem) restoreSysctlsLocked(ctx context.Context, keep map[st
 			}
 		}
 	}
-	if err := s.updateManifest(func(manifest *routeManifest) {
+	if err := s.updateState(func(state *routeState) {
 		for _, entry := range inverse {
-			manifest.Sysctls = slices.DeleteFunc(manifest.Sysctls, func(old ownedSysctl) bool { return old.Path == entry.Path })
-			manifest.Sysctls = append(manifest.Sysctls, entry)
+			state.Sysctls = slices.DeleteFunc(state.Sysctls, func(old ownedSysctl) bool { return old.Path == entry.Path })
+			state.Sysctls = append(state.Sysctls, entry)
 		}
 	}); err != nil {
 		return err
@@ -605,7 +610,7 @@ func (s *linuxRouteSystem) restoreSysctlsLocked(ctx context.Context, keep map[st
 			return fmt.Errorf("restore %s: %w", setting.Path, err)
 		}
 	}
-	return s.updateManifest(func(manifest *routeManifest) {
-		manifest.Sysctls = slices.DeleteFunc(manifest.Sysctls, func(old ownedSysctl) bool { return slices.Contains(retire, old.Path) })
+	return s.updateState(func(state *routeState) {
+		state.Sysctls = slices.DeleteFunc(state.Sysctls, func(old ownedSysctl) bool { return slices.Contains(retire, old.Path) })
 	})
 }

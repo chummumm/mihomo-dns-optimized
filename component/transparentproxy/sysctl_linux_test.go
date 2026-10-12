@@ -4,10 +4,8 @@ package transparentproxy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -71,9 +69,9 @@ func TestSysctlsScopeIdempotenceAndRestore(t *testing.T) {
 	} {
 		assertTestSysctl(t, s, path, expected)
 	}
-	for _, owned := range s.manifest.Sysctls {
+	for _, owned := range s.state.Sysctls {
 		if owned.Original != originals[owned.Path] {
-			t.Fatalf("journal lost original before a bulk update: %+v want %s", owned, originals[owned.Path])
+			t.Fatalf("runtime state lost original before a bulk update: %+v want %s", owned, originals[owned.Path])
 		}
 		if strings.HasSuffix(owned.Path, "disable_ipv6") {
 			t.Fatal("administrator IPv6 switch became owned")
@@ -84,7 +82,7 @@ func TestSysctlsScopeIdempotenceAndRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	if *writes != before {
-		t.Fatalf("unchanged event rewrote sysctl journal: %d -> %d", before, *writes)
+		t.Fatalf("unchanged event rewrote sysctl: %d -> %d", before, *writes)
 	}
 	if err := s.RestoreSysctls(context.Background()); err != nil {
 		t.Fatal(err)
@@ -92,8 +90,8 @@ func TestSysctlsScopeIdempotenceAndRestore(t *testing.T) {
 	for path, expected := range originals {
 		assertTestSysctl(t, s, path, expected)
 	}
-	if len(s.manifest.Sysctls) != 0 {
-		t.Fatalf("cleanup left owned settings: %+v", s.manifest.Sysctls)
+	if len(s.state.Sysctls) != 0 {
+		t.Fatalf("cleanup left owned settings: %+v", s.state.Sysctls)
 	}
 }
 
@@ -118,23 +116,37 @@ func TestSysctlsLeaveExternalChangesAndReusedInterfaceAlone(t *testing.T) {
 	assertTestSysctl(t, s, "net/ipv4/conf/lan0/rp_filter", "2")
 	assertTestSysctl(t, s, "net/ipv4/conf/utun/forwarding", "1")
 	assertTestSysctl(t, s, "net/ipv4/conf/utun/rp_filter", "2")
-	if len(s.manifest.Sysctls) != 0 {
+	if len(s.state.Sysctls) != 0 {
 		t.Fatal("external changes left a stale ownership claim")
 	}
 }
 
-func TestSysctlWriteRequiresDurableOriginal(t *testing.T) {
+func TestSysctlFailedWriteRetainsThisProcessOriginalForRetry(t *testing.T) {
 	s, _, _ := routeTestSystem(t)
 	path := "net/ipv4/conf/utun/forwarding"
 	writeTestSysctl(t, s, path, "0")
-	s.writeState = func() error { return os.ErrPermission }
+	s.beforeSysctlWrite = func(string, string) error {
+		if len(s.state.Sysctls) != 1 || s.state.Sysctls[0].Original != "0" {
+			t.Fatal("write preceded this process's original value")
+		}
+		return os.ErrPermission
+	}
 	if err := s.ownSysctl(desiredSysctl{Path: path, Value: "1", InterfaceIndex: 10}); !errors.Is(err, os.ErrPermission) {
 		t.Fatal(err)
 	}
 	assertTestSysctl(t, s, path, "0")
-	if len(s.manifest.Sysctls) != 0 {
-		t.Fatal("failed journal retained ownership")
+	if len(s.state.Sysctls) != 1 {
+		t.Fatal("failed write lost this process's recovery state")
 	}
+	s.beforeSysctlWrite = nil
+	if err := s.ownSysctl(desiredSysctl{Path: path, Value: "1", InterfaceIndex: 10}); err != nil {
+		t.Fatal(err)
+	}
+	assertTestSysctl(t, s, path, "1")
+	if err := s.RestoreSysctls(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertTestSysctl(t, s, path, "0")
 	if err := s.writeSysctl("net/ipv4/conf/missing/forwarding", "1"); !os.IsNotExist(err) {
 		t.Fatalf("missing proc setting: %v", err)
 	}
@@ -159,43 +171,30 @@ func TestSysctlsRetiredGatewayScopeRestoresSelectedInterface(t *testing.T) {
 	assertTestSysctl(t, s, "net/ipv4/conf/eth0/forwarding", "1")
 }
 
-func TestSysctlJournalSurvivesProcessCloseAndReexec(t *testing.T) {
+func TestSysctlControlledRestartRestoresBeforeFreshProcess(t *testing.T) {
 	s, kernel, state, cfg, runtime, originals, _ := sysctlTestSystem(t)
-	s.statePath, s.writeState = filepath.Join(t.TempDir(), "state.json"), nil
-	if err := s.loadManifest(); err != nil {
-		t.Fatal(err)
-	}
-	owner := s.manifest.Owner
 	if err := s.ApplySysctls(context.Background(), state, cfg, runtime); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.ReadFile(s.statePath)
-	if err != nil {
+	// The manager calls this only after capture is blocked and listeners are
+	// closed. No state file or inherited descriptor is passed to the next core.
+	if err := s.RestoreSysctls(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// Closing the transport/lease for planned reexec does not restore sysctls.
-	assertTestSysctl(t, s, "net/ipv6/conf/all/forwarding", "1")
-	after, err := os.ReadFile(s.statePath)
-	if err != nil || string(before) != string(after) {
-		t.Fatalf("transport close changed journal: %v", err)
-	}
-	next := &linuxRouteSystem{request: testWireConnection(kernel.handle), statePath: s.statePath, procRoot: s.procRoot, lease: -1}
+	next := &linuxRouteSystem{request: testWireConnection(kernel.handle), procRoot: s.procRoot, lease: -1}
 	defer next.Close()
-	if err := next.loadManifest(); err != nil {
-		t.Fatal(err)
-	}
-	if next.manifest.Owner != owner {
-		t.Fatal("same-namespace reexec changed durable owner")
+	for path, expected := range originals {
+		assertTestSysctl(t, next, path, expected)
 	}
 	if err := next.ApplySysctls(context.Background(), state, cfg, runtime); err != nil {
 		t.Fatal(err)
 	}
-	for _, setting := range next.manifest.Sysctls {
+	for _, setting := range next.state.Sysctls {
 		if setting.Original != originals[setting.Path] {
-			t.Fatalf("reexec replaced the pre-policy original: %+v", setting)
+			t.Fatalf("fresh process did not use its actual baseline: %+v", setting)
 		}
 	}
 	if err := next.RestoreSysctls(context.Background()); err != nil {
@@ -204,13 +203,43 @@ func TestSysctlJournalSurvivesProcessCloseAndReexec(t *testing.T) {
 	for path, expected := range originals {
 		assertTestSysctl(t, next, path, expected)
 	}
-	info, err := os.Stat(s.statePath)
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("ownership file mode: %v %v", info, err)
+}
+
+func TestSysctlUnexpectedExitDoesNotInventPreviousProcessOriginals(t *testing.T) {
+	s, kernel, state, cfg, runtime, originals, _ := sysctlTestSystem(t)
+	if err := s.ApplySysctls(context.Background(), state, cfg, runtime); err != nil {
+		t.Fatal(err)
+	}
+	// SIGKILL loses memory without restoring sysctls. Only the current values
+	// are authoritative for a new process; the old originals cannot be known.
+	baseline := make(map[string]string, len(originals))
+	for path := range originals {
+		value, err := s.readSysctl(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		baseline[path] = value
+	}
+	if baseline["net/ipv6/conf/all/forwarding"] == originals["net/ipv6/conf/all/forwarding"] {
+		t.Fatal("fixture did not change a process-global sysctl")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	next := &linuxRouteSystem{request: testWireConnection(kernel.handle), procRoot: s.procRoot, lease: -1}
+	defer next.Close()
+	if err := next.ApplySysctls(context.Background(), state, cfg, runtime); err != nil {
+		t.Fatal(err)
+	}
+	if err := next.RestoreSysctls(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for path, expected := range baseline {
+		assertTestSysctl(t, next, path, expected)
 	}
 }
 
-func TestSysctlBulkRestorationRecoversAfterInterruptedCleanup(t *testing.T) {
+func TestSysctlBulkRestorationRetriesInSameProcess(t *testing.T) {
 	s, kernel, state, cfg, runtime, originals, _ := sysctlTestSystem(t)
 	if err := s.ApplySysctls(context.Background(), state, cfg, runtime); err != nil {
 		t.Fatal(err)
@@ -226,20 +255,15 @@ func TestSysctlBulkRestorationRecoversAfterInterruptedCleanup(t *testing.T) {
 	writeTestSysctl(t, s, "net/ipv6/conf/utun/force_forwarding", "1")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var durable []byte
-	s.writeState = func() error {
-		var err error
-		durable, err = json.Marshal(s.manifest)
-		if err != nil {
-			return err
-		}
-		if !slices.ContainsFunc(s.manifest.Sysctls, func(setting ownedSysctl) bool { return setting.BeforeBulk != "" }) {
+	s.beforeSysctlWrite = func(path, value string) error {
+		if path != "net/ipv6/conf/all/forwarding" || value != "0" {
 			return nil
 		}
-		// Model a crash immediately after the IPv6 all.forwarding restoration:
-		// Linux changed default/per-interface values, while individual inverse
-		// writes have not yet run. This touches only the isolated fake proc tree.
-		writeTestSysctl(t, s, "net/ipv6/conf/all/forwarding", "0")
+		if !slices.ContainsFunc(s.state.Sysctls, func(setting ownedSysctl) bool { return setting.BeforeBulk != "" }) {
+			t.Fatal("global restoration lost its pending interface inverse")
+		}
+		// Model the real kernel bulk side effects, then cancellation before
+		// per-interface restoration. Only this process's memory can retry it.
 		writeTestSysctl(t, s, "net/ipv6/conf/default/forwarding", "0")
 		for _, link := range kernel.links {
 			writeTestSysctl(t, s, "net/ipv6/conf/"+link.Name+"/forwarding", "0")
@@ -251,24 +275,20 @@ func TestSysctlBulkRestorationRecoversAfterInterruptedCleanup(t *testing.T) {
 	if err := s.RestoreSysctls(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("interrupted cleanup: %v", err)
 	}
-	next := &linuxRouteSystem{request: testWireConnection(kernel.handle), procRoot: s.procRoot, lease: -1, writeState: func() error { return nil }}
-	defer next.Close()
-	if err := json.Unmarshal(durable, &next.manifest); err != nil {
+	s.beforeSysctlWrite = nil
+	if err := s.RestoreSysctls(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := next.RestoreSysctls(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	assertTestSysctl(t, next, "net/ipv6/conf/eth0/forwarding", originals["net/ipv6/conf/eth0/forwarding"])
-	assertTestSysctl(t, next, "net/ipv6/conf/eth0/force_forwarding", "1")
-	assertTestSysctl(t, next, "net/ipv6/conf/utun/forwarding", "1")
-	assertTestSysctl(t, next, "net/ipv6/conf/utun/force_forwarding", "1")
-	if len(next.manifest.Sysctls) != 0 {
-		t.Fatal("recovered cleanup retained stale ownership")
+	assertTestSysctl(t, s, "net/ipv6/conf/eth0/forwarding", originals["net/ipv6/conf/eth0/forwarding"])
+	assertTestSysctl(t, s, "net/ipv6/conf/eth0/force_forwarding", "1")
+	assertTestSysctl(t, s, "net/ipv6/conf/utun/forwarding", "1")
+	assertTestSysctl(t, s, "net/ipv6/conf/utun/force_forwarding", "1")
+	if len(s.state.Sysctls) != 0 {
+		t.Fatal("successful cleanup retained stale ownership")
 	}
 }
 
-func TestSysctlManifestRejectsArbitraryPathsAndValues(t *testing.T) {
+func TestSysctlRuntimeStateRejectsArbitraryPathsAndValues(t *testing.T) {
 	for _, setting := range []ownedSysctl{
 		{Path: "net/ipv6/conf/all/disable_ipv6", Original: "1", Written: "0"},
 		{Path: "net/ipv4/conf/../forwarding", Original: "0", Written: "1"},
@@ -278,7 +298,7 @@ func TestSysctlManifestRejectsArbitraryPathsAndValues(t *testing.T) {
 		{Path: "net/ipv4/conf/utun/rp_filter", Original: "1", Written: "0", BeforeBulk: "$(command)", InterfaceIndex: 10},
 	} {
 		if err := validateOwnedSysctl(setting); err == nil {
-			t.Fatalf("accepted unsafe journal entry: %+v", setting)
+			t.Fatalf("accepted unsafe sysctl setting: %+v", setting)
 		}
 	}
 }

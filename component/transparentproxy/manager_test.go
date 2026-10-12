@@ -30,14 +30,18 @@ func (r *managerRecorder) all() []string {
 func (r *managerRecorder) reset() { r.mu.Lock(); defer r.mu.Unlock(); r.entries = nil }
 
 type managerTestSystem struct {
-	recorder              *managerRecorder
-	network               networkState
-	ensureErr, quiesceErr error
-	watchMu               sync.Mutex
-	watches               []chan systemEvent
+	recorder                               *managerRecorder
+	network                                networkState
+	ensureErr, quiesceErr                  error
+	recoverErr, closeRoutesErr, restoreErr error
+	watchMu                                sync.Mutex
+	watches                                []chan systemEvent
 }
 
-func (s *managerTestSystem) Owner() string { return "test" }
+func (s *managerTestSystem) RecoverRoutes(context.Context, []routePolicy, []captureScope) error {
+	s.recorder.add("recover-routes")
+	return s.recoverErr
+}
 func (s *managerTestSystem) Watch(context.Context) (<-chan systemEvent, io.Closer, error) {
 	s.recorder.add("watch")
 	s.watchMu.Lock()
@@ -64,7 +68,7 @@ func (s *managerTestSystem) QuiesceTUN(context.Context) error {
 }
 func (s *managerTestSystem) CloseRoutes(context.Context) error {
 	s.recorder.add("close-routes")
-	return nil
+	return s.closeRoutesErr
 }
 func (s *managerTestSystem) ApplySysctls(context.Context, networkState, Config, Runtime) error {
 	s.recorder.add("sysctls")
@@ -72,7 +76,7 @@ func (s *managerTestSystem) ApplySysctls(context.Context, networkState, Config, 
 }
 func (s *managerTestSystem) RestoreSysctls(context.Context) error {
 	s.recorder.add("restore-sysctls")
-	return nil
+	return s.restoreErr
 }
 func (s *managerTestSystem) Close() error { s.recorder.add("close-system"); return nil }
 
@@ -84,6 +88,12 @@ type managerTestFirewall struct {
 	recorder           *managerRecorder
 	state              firewallState
 	applyErr, closeErr error
+	recoverErr         error
+}
+
+func (f *managerTestFirewall) RecoverScopes(context.Context) ([]captureScope, bool, error) {
+	f.recorder.add("read-capture")
+	return nil, false, f.recoverErr
 }
 
 func (f *managerTestFirewall) Apply(_ context.Context, state firewallState) error {
@@ -99,6 +109,9 @@ func (f *managerTestFirewall) Apply(_ context.Context, state firewallState) erro
 }
 func (f *managerTestFirewall) Close(context.Context) error {
 	f.recorder.add("close-capture")
+	if f.closeErr == nil {
+		f.state.Enabled = false
+	}
 	return f.closeErr
 }
 
@@ -107,7 +120,7 @@ func testManager(t *testing.T) (*manager, *managerTestSystem, *managerTestFirewa
 	r := &managerRecorder{}
 	s := &managerTestSystem{recorder: r, network: testNetwork()}
 	f := &managerTestFirewall{recorder: r}
-	m := makeManager("test", s, f)
+	m := makeManager(s, f)
 	cfg := DefaultConfig()
 	cfg.Enable = true
 	if err := m.applyConfigurationLocked(cfg, testRuntime(), nil, []uint32{DefaultOutboundMark}); err != nil {
@@ -119,7 +132,7 @@ func testManager(t *testing.T) (*manager, *managerTestSystem, *managerTestFirewa
 
 func TestManagerRoutesBeforeCaptureAndRetiredRoutesAfter(t *testing.T) {
 	_, _, _, r := testManager(t)
-	want := []string{"snapshot", "ensure", "sysctls", "capture", "prune"}
+	want := []string{"snapshot", "read-capture", "recover-routes", "ensure", "sysctls", "capture", "prune"}
 	if !slices.Equal(r.all(), want) {
 		t.Fatalf("unsafe application order: %v", r.all())
 	}
@@ -157,7 +170,7 @@ func withPublicManager(t *testing.T, m *manager) {
 		managed.Lock()
 		managed.current = nil
 		managed.config = Config{}
-		managed.handoffDir = ""
+		managed.handoff = nil
 		managed.active.Store(false)
 		managed.Unlock()
 	})
@@ -172,7 +185,7 @@ func TestRestartRetainsCaptureAndBlackholesForNextProcess(t *testing.T) {
 	}
 	want := []string{"blackhole-ack", "capture-tun-closed"}
 	if !slices.Equal(r.all(), want) {
-		t.Fatalf("restart removed persistent protections: %v", r.all())
+		t.Fatalf("restart removed working protections: %v", r.all())
 	}
 	if f.state.Tun4 || f.state.Tun6 || f.state.TProxyTCP4 || f.state.TProxyTCP6 || f.state.TProxyUDP4 || f.state.TProxyUDP6 {
 		t.Fatal("restart gap left a backend enabled")
@@ -189,8 +202,10 @@ func TestRestartRetainsCaptureAndBlackholesForNextProcess(t *testing.T) {
 		t.Fatal("listener cleanup skipped the live route fence")
 	}
 	r.reset()
-	CompleteRestart()
-	if !slices.Equal(r.all(), []string{"close-system"}) || managed.handoffDir != m.stateDir || managed.current != nil {
+	if err := CompleteRestart(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(r.all(), []string{"restore-sysctls", "close-system"}) || managed.handoff != m || managed.current != nil {
 		t.Fatal("completed restart did not retain protection while relinquishing transport ownership")
 	}
 }
@@ -268,6 +283,169 @@ func TestCaptureRemovalFailureRetainsAllRouteProtection(t *testing.T) {
 	}
 	if !slices.Equal(r.all(), []string{"close-capture", "close-routes", "restore-sysctls", "close-system"}) {
 		t.Fatalf("unsafe cleanup order: %v", r.all())
+	}
+}
+
+func TestStopRetriesCleanupWithoutLosingMemoryOrRecreatingCapture(t *testing.T) {
+	for _, failed := range []string{"routes", "sysctls"} {
+		t.Run(failed, func(t *testing.T) {
+			m, s, f, r := testManager(t)
+			withPublicManager(t, m)
+			failure := errors.New("temporary cleanup failure")
+			if failed == "routes" {
+				s.closeRoutesErr = failure
+			} else {
+				s.restoreErr = failure
+			}
+			r.reset()
+			if err := Close(); !errors.Is(err, failure) {
+				t.Fatalf("cleanup error lost: %v", err)
+			}
+			if managed.current != m || m.closed || !m.closing || f.state.Enabled || slices.Contains(r.all(), "close-system") {
+				t.Fatalf("failed stop discarded ownership or left capture active: %v", r.all())
+			}
+			r.reset()
+			if err := NotifyBackends(BackendState{TunReady: true, TunIPv6Ready: true}); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.reconcileLocked(); err != nil {
+				t.Fatal(err)
+			}
+			if mark, err := OutboundMark(0x3344); err != nil || mark != 0x3344 {
+				t.Fatalf("stopping socket control: %#x %v", mark, err)
+			}
+			if len(r.all()) != 0 {
+				t.Fatalf("stop retry allowed capture to be recreated: %v", r.all())
+			}
+			if err := BeforeTunClose(); err == nil {
+				t.Fatal("TUN closed before remaining stop cleanup finished")
+			}
+			if err := PrepareRestart(); err == nil {
+				t.Fatal("restart replaced a pending stop")
+			}
+			s.closeRoutesErr, s.restoreErr = nil, nil
+			if err := Close(); err != nil {
+				t.Fatal(err)
+			}
+			if managed.current != nil || !m.closed || IsEnabled() {
+				t.Fatal("successful retry did not finish stop")
+			}
+			want := []string{"close-capture", "close-routes", "restore-sysctls", "close-system"}
+			if !slices.Equal(r.all(), want) {
+				t.Fatalf("cleanup was not retried before releasing transports: %v", r.all())
+			}
+		})
+	}
+}
+
+func TestRestartSettingsFailureKeepsObservationUntilAbort(t *testing.T) {
+	m, s, f, r := testManager(t)
+	withPublicManager(t, m)
+	if err := PrepareRestart(); err != nil {
+		t.Fatal(err)
+	}
+	s.restoreErr = errors.New("sysctl restore failed")
+	r.reset()
+	if err := CompleteRestart(); !errors.Is(err, s.restoreErr) {
+		t.Fatalf("restart hid failed settings restoration: %v", err)
+	}
+	if managed.current != m || m.closed || !m.restartPrepared || !slices.Equal(r.all(), []string{"restore-sysctls"}) {
+		t.Fatal("failed restart restoration relinquished its observer")
+	}
+	if f.state.Tun4 || f.state.Tun6 || f.state.TProxyTCP4 {
+		t.Fatal("failed restoration reopened capture")
+	}
+	s.restoreErr = nil
+	if err := AbortRestart(BackendState{TunName: "utun", TunIndex: 4, TunReady: true, TunIPv6Ready: true,
+		TProxyPort: 7895, TProxyTCP: true, TProxyUDP: true, TProxyTCPIPv6: true, TProxyUDPIPv6: true}); err != nil {
+		t.Fatal(err)
+	}
+	if m.restartPrepared || !f.state.Tun4 || !f.state.TProxyTCP4 {
+		t.Fatal("aborted restart did not recover surviving backends")
+	}
+}
+
+func TestInitialRecoveryFailureCannotPrepareRoutesOrCapture(t *testing.T) {
+	r := &managerRecorder{}
+	s := &managerTestSystem{recorder: r, network: testNetwork()}
+	f := &managerTestFirewall{recorder: r, recoverErr: errors.New("incomplete nft snapshot")}
+	m := makeManager(s, f)
+	t.Cleanup(m.cancel)
+	cfg := DefaultConfig()
+	cfg.Enable = true
+	if err := m.applyConfigurationLocked(cfg, testRuntime(), nil, nil); !errors.Is(err, f.recoverErr) {
+		t.Fatalf("missing recovery error: %v", err)
+	}
+	if m.recovered || !slices.Equal(r.all(), []string{"snapshot", "read-capture"}) {
+		t.Fatalf("incomplete observation authorized mutation: %v", r.all())
+	}
+	f.recoverErr = nil
+	s.recoverErr = errors.New("incomplete route snapshot")
+	r.reset()
+	if err := m.applyConfigurationLocked(cfg, testRuntime(), nil, nil); !errors.Is(err, s.recoverErr) {
+		t.Fatalf("missing route recovery error: %v", err)
+	}
+	if m.recovered || !slices.Equal(r.all(), []string{"snapshot", "read-capture", "recover-routes"}) {
+		t.Fatalf("failed route recovery authorized mutation: %v", r.all())
+	}
+}
+
+func TestInitialRecoveryFailurePreservesPreviousKernelProtection(t *testing.T) {
+	r := &managerRecorder{}
+	s := &managerTestSystem{recorder: r, network: testNetwork(), recoverErr: errors.New("incomplete route dump")}
+	f := &managerTestFirewall{recorder: r, state: firewallState{Enabled: true}}
+	m := makeManager(s, f)
+	withPublicManager(t, m)
+	previous := &manager{closed: true}
+	managed.handoff = previous
+	cfg := DefaultConfig()
+	cfg.Enable = true
+	if err := m.applyConfigurationLocked(cfg, testRuntime(), nil, nil); !errors.Is(err, s.recoverErr) {
+		t.Fatalf("missing startup recovery failure: %v", err)
+	}
+	r.reset()
+	protection := &socketProtection{finish: func(commit bool) error {
+		if commit {
+			t.Fatal("failed startup committed temporary socket protection")
+		}
+		r.add("rollback-sockets")
+		return nil
+	}}
+	if err := m.rollbackInitialApplyLocked(cfg, testRuntime(), nil, protection); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(r.all(), []string{"close-system", "rollback-sockets"}) || !f.state.Enabled {
+		t.Fatalf("failed observation destroyed old capture or route evidence: %v", r.all())
+	}
+	if managed.current != nil || managed.handoff != previous || IsEnabled() || !m.closed || protection.finish != nil {
+		t.Fatal("failed startup retained descriptors or lost the previous same-process restart context")
+	}
+}
+
+func TestInitialCleanupFailureReleasesSocketsAfterCaptureIsGone(t *testing.T) {
+	m, s, f, r := testManager(t)
+	withPublicManager(t, m)
+	s.closeRoutesErr = errors.New("temporary route cleanup failure")
+	r.reset()
+	protection := &socketProtection{finish: func(commit bool) error {
+		if commit {
+			t.Fatal("removed capture committed temporary socket protection")
+		}
+		r.add("rollback-sockets")
+		return nil
+	}}
+	if err := m.rollbackInitialApplyLocked(m.config, m.runtime, m.uids, protection); !errors.Is(err, s.closeRoutesErr) {
+		t.Fatalf("cleanup failure was hidden: %v", err)
+	}
+	if !slices.Equal(r.all(), []string{"close-capture", "close-routes", "restore-sysctls", "rollback-sockets"}) {
+		t.Fatalf("unsafe failed activation cleanup order: %v", r.all())
+	}
+	if managed.current != m || !m.closing || m.closed || f.state.Enabled || protection.finish != nil {
+		t.Fatal("partial cleanup lost route ownership, retained capture or leaked pinned sockets")
+	}
+	s.closeRoutesErr = nil
+	if err := Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

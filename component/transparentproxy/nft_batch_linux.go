@@ -40,7 +40,8 @@ func encodeNFTChanges(plan *nftChangePlan) ([]wireMessage, error) {
 	for _, chain := range plan.deleteChains {
 		attributes := appendWireAttribute(nil, unix.NFTA_CHAIN_TABLE, []byte(nftTableName+"\x00"))
 		attributes = appendWireAttribute(attributes, unix.NFTA_CHAIN_NAME, []byte(chain.Name+"\x00"))
-		add(unix.NFT_MSG_DELCHAIN, 0, attributes)
+		// Never recursively remove rules injected into a managed chain.
+		add(unix.NFT_MSG_DELCHAIN, unix.NLM_F_NONREC, attributes)
 	}
 	for _, set := range plan.deleteSets {
 		attributes := appendWireAttribute(nil, unix.NFTA_SET_TABLE, []byte(nftTableName+"\x00"))
@@ -50,6 +51,7 @@ func encodeNFTChanges(plan *nftChangePlan) ([]wireMessage, error) {
 	if plan.createTable != nil {
 		attributes := appendWireAttribute(nil, unix.NFTA_TABLE_NAME, []byte(nftTableName+"\x00"))
 		attributes = appendWireAttribute(attributes, unix.NFTA_TABLE_FLAGS, binaryutil.BigEndian.PutUint32(0))
+		attributes = appendWireAttribute(attributes, nftTableUserdata, userdata.AppendString(nil, userdata.TypeComment, nftModule))
 		add(unix.NFT_MSG_NEWTABLE, unix.NLM_F_CREATE|unix.NLM_F_EXCL, attributes)
 	}
 	for _, desired := range plan.createSets {
@@ -124,6 +126,11 @@ func encodeNFTChanges(plan *nftChangePlan) ([]wireMessage, error) {
 		for _, elementMessage := range elements {
 			add(unix.NFT_MSG_NEWSETELEM, unix.NLM_F_CREATE, elementMessage)
 		}
+	}
+	if plan.deleteTable != nil {
+		// A foreign chain, set, object or flowtable must keep its container.
+		attributes := appendWireAttribute(nil, unix.NFTA_TABLE_NAME, []byte(nftTableName+"\x00"))
+		add(unix.NFT_MSG_DELTABLE, unix.NLM_F_NONREC, attributes)
 	}
 	return operations, nil
 }

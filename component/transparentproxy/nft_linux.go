@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/metacubex/mihomo/log"
 	"github.com/metacubex/nftables"
 	"github.com/metacubex/nftables/userdata"
 	"golang.org/x/sys/unix"
@@ -18,16 +19,12 @@ import (
 
 type nftFirewall struct {
 	mu    sync.Mutex
-	owner string
-	read  func(context.Context, string) (*nftSnapshot, error)
+	read  func(context.Context) (*nftSnapshot, error)
 	write func(context.Context, uint32, []wireMessage) error
 }
 
-func newFirewall(owner string) (firewall, error) {
-	if _, err := buildNFTRuleset(owner, firewallState{TCP: ModeOff, UDP: ModeOff}); err != nil {
-		return nil, err
-	}
-	return &nftFirewall{owner: owner, read: readNFTSnapshot, write: writeNFTBatch}, nil
+func newFirewall() (firewall, error) {
+	return &nftFirewall{read: readNFTSnapshot, write: writeNFTBatch}, nil
 }
 
 func (f *nftFirewall) Apply(ctx context.Context, state firewallState) error {
@@ -36,12 +33,12 @@ func (f *nftFirewall) Apply(ctx context.Context, state firewallState) error {
 	if !state.Enabled {
 		return f.close(ctx)
 	}
-	desired, err := buildNFTRuleset(f.owner, state)
+	desired, err := buildNFTRuleset(state)
 	if err != nil {
 		return err
 	}
 	for attempt := 0; ; attempt++ {
-		actual, err := f.read(ctx, f.owner)
+		actual, err := f.read(ctx)
 		if err != nil {
 			return fmt.Errorf("read transparent-proxy nftables: %w", err)
 		}
@@ -66,32 +63,135 @@ func (f *nftFirewall) Close(ctx context.Context) error {
 }
 
 func (f *nftFirewall) close(ctx context.Context) error {
-	owner := nftOwner(f.owner)
 	for attempt := 0; ; attempt++ {
-		actual, err := f.read(ctx, f.owner)
+		actual, err := f.read(ctx)
 		if err != nil {
 			return fmt.Errorf("read transparent-proxy nftables for removal: %w", err)
 		}
 		if actual.table == nil {
 			return nil
 		}
-		if err := requireNFTOwner(actual, owner); err != nil {
-			return err
+		if !hasNFTModuleObjects(actual) {
+			return nil
 		}
-		plan := &nftChangePlan{generation: actual.generation}
-		for _, chain := range actual.chains {
-			for _, rule := range chain.rules {
-				if strings.HasPrefix(rule.comment, owner+"/rule/") {
-					plan.deleteRules = append(plan.deleteRules, rule.rule)
-				}
-			}
-		}
-		// Keep the ownership marker/table. It permits safe recovery after
-		// reexec, and avoids deleting foreign objects that an administrator
-		// may have added. Empty chains/sets are bounded and have no capture.
+		plan := planNFTClose(actual)
 		err = f.commit(ctx, plan)
 		if errors.Is(err, unix.EAGAIN) && attempt == 0 {
 			continue
+		}
+		if errors.Is(err, unix.EBUSY) {
+			// The complete transaction was rejected without changing anything.
+			// Remove capture first, then retain only objects needed by external
+			// rules. Kernel reference counts cover unfamiliar expression types.
+			return f.closeReferenced(ctx)
+		}
+		return err
+	}
+}
+
+func planNFTClose(actual *nftSnapshot) *nftChangePlan {
+	plan := &nftChangePlan{generation: actual.generation}
+	if actual.comment == nftModule {
+		plan.deleteTable = actual.table
+	}
+	for name, chain := range actual.chains {
+		if !managedNFTChain(name) {
+			continue
+		}
+		for _, rule := range chain.rules {
+			if managedNFTRule(rule, name) {
+				plan.deleteRules = append(plan.deleteRules, rule.rule)
+			}
+		}
+		if actual.comment == nftModule {
+			plan.deleteChains = append(plan.deleteChains, chain.chain)
+		}
+	}
+	for name, set := range actual.sets {
+		if set.set.Comment == nftModule+"/set/"+name && managedNFTSet(name) {
+			plan.deleteSets = append(plan.deleteSets, set.set)
+		}
+	}
+	return plan
+}
+
+func (f *nftFirewall) closeReferenced(ctx context.Context) error {
+	var targets *nftChangePlan
+	for attempt := 0; ; attempt++ {
+		actual, err := f.read(ctx)
+		if err != nil {
+			return err
+		}
+		if actual.table == nil {
+			return nil
+		}
+		if !hasNFTModuleObjects(actual) {
+			return nil
+		}
+		targets = planNFTClose(actual)
+		err = f.commit(ctx, &nftChangePlan{generation: actual.generation, deleteRules: targets.deleteRules})
+		if errors.Is(err, unix.EAGAIN) && attempt == 0 {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		break
+	}
+	// NONREC protects foreign rules in known chains; deleting a set always
+	// checks its live references. A table is only deleted when truly empty.
+	for _, chain := range targets.deleteChains {
+		if err := f.closeContainer(ctx, chain.Name, false); err != nil {
+			return err
+		}
+	}
+	for _, set := range targets.deleteSets {
+		if err := f.closeContainer(ctx, set.Name, true); err != nil {
+			return err
+		}
+	}
+	return f.closeContainer(ctx, "", false)
+}
+
+func (f *nftFirewall) closeContainer(ctx context.Context, name string, set bool) error {
+	for attempt := 0; ; attempt++ {
+		actual, err := f.read(ctx)
+		if err != nil {
+			return err
+		}
+		if actual.table == nil {
+			return nil
+		}
+		if !hasNFTModuleObjects(actual) {
+			return nil
+		}
+		plan := &nftChangePlan{generation: actual.generation}
+		if name == "" {
+			if len(planNFTClose(actual).deleteRules) != 0 {
+				return errors.New("managed nftables capture changed while stopping")
+			}
+			if actual.comment != nftModule {
+				return nil
+			}
+			plan.deleteTable = actual.table
+		} else if set {
+			present := actual.sets[name]
+			if present == nil || present.set.Comment != nftModule+"/set/"+name {
+				return nil
+			}
+			plan.deleteSets = append(plan.deleteSets, present.set)
+		} else if present := actual.chains[name]; present != nil && actual.comment == nftModule {
+			plan.deleteChains = append(plan.deleteChains, present.chain)
+		}
+		err = f.commit(ctx, plan)
+		if errors.Is(err, unix.EAGAIN) && attempt == 0 {
+			continue
+		}
+		if errors.Is(err, unix.EBUSY) {
+			if name == "" {
+				log.Warnln("[Transparent Proxy] Managed capture removed; keeping nftables table %s and containers required by external objects", nftTableName)
+			}
+			return nil
 		}
 		return err
 	}
@@ -100,6 +200,7 @@ func (f *nftFirewall) close(ctx context.Context) error {
 type nftChangePlan struct {
 	generation   uint32
 	createTable  *nftables.Table
+	deleteTable  *nftables.Table
 	deleteRules  []*nftables.Rule
 	deleteChains []*nftables.Chain
 	deleteSets   []*nftables.Set
@@ -110,13 +211,13 @@ type nftChangePlan struct {
 }
 
 func (plan *nftChangePlan) empty() bool {
-	return plan.createTable == nil && len(plan.deleteRules)+len(plan.deleteChains)+len(plan.deleteSets)+len(plan.createSets)+len(plan.updateSets)+len(plan.createChains)+len(plan.createRules) == 0
+	return plan.createTable == nil && plan.deleteTable == nil && len(plan.deleteRules)+len(plan.deleteChains)+len(plan.deleteSets)+len(plan.createSets)+len(plan.updateSets)+len(plan.createChains)+len(plan.createRules) == 0
 }
 
 func planNFTChanges(actual *nftSnapshot, desired *nftRuleset) (*nftChangePlan, error) {
 	plan := &nftChangePlan{generation: actual.generation}
 	if actual.table != nil {
-		if err := requireNFTOwner(actual, desired.owner); err != nil {
+		if err := requireNFTModule(actual); err != nil {
 			return nil, err
 		}
 		if actual.table.Flags != 0 {
@@ -153,7 +254,7 @@ func planNFTChanges(actual *nftSnapshot, desired *nftRuleset) (*nftChangePlan, e
 			continue
 		}
 		for _, rule := range present.rules {
-			if !strings.HasPrefix(rule.comment, desired.owner+"/rule/"+wanted.chain.Name+"/") {
+			if !managedNFTRule(rule, wanted.chain.Name) {
 				return nil, fmt.Errorf("transparent-proxy nftables chain %q contains a foreign rule", wanted.chain.Name)
 			}
 		}
@@ -184,31 +285,55 @@ func planNFTChanges(actual *nftSnapshot, desired *nftRuleset) (*nftChangePlan, e
 	return plan, nil
 }
 
-func requireNFTOwner(actual *nftSnapshot, owner string) error {
-	// Any intact owner-tagged object proves the same persistent installation.
-	// This also recovers when an administrator flushed/deleted the dedicated
-	// marker while leaving other owned objects. An empty, unknown table is
-	// deliberately not adopted merely because it has our usual name.
-	for _, set := range actual.sets {
-		if set.set.Comment == owner+"/set/"+set.set.Name {
-			return nil
-		}
-		if set.set.Name == "owner" {
-			for _, element := range set.elements {
-				if element.Comment == owner && !element.IntervalEnd {
-					return nil
+func requireNFTModule(actual *nftSnapshot) error {
+	if actual.table != nil && actual.comment == nftModule {
+		return nil
+	}
+	return fmt.Errorf("nftables table %q has no mihomo-optimized module marker", nftTableName)
+}
+
+func hasNFTModuleObjects(actual *nftSnapshot) bool {
+	if actual.table == nil {
+		return false
+	}
+	if actual.comment == nftModule {
+		return true
+	}
+	for name, chain := range actual.chains {
+		if managedNFTChain(name) {
+			for _, rule := range chain.rules {
+				if managedNFTRule(rule, name) {
+					return true
 				}
 			}
 		}
 	}
-	for _, chain := range actual.chains {
-		for _, rule := range chain.rules {
-			if strings.HasPrefix(rule.comment, owner+"/rule/") {
-				return nil
-			}
+	for name, set := range actual.sets {
+		if managedNFTSet(name) && set.set.Comment == nftModule+"/set/"+name {
+			return true
 		}
 	}
-	return fmt.Errorf("nftables table %q is not owned by this mihomo-optimized installation", nftTableName)
+	return false
+}
+
+func managedNFTRule(rule *nftRuleState, chain string) bool {
+	return strings.HasPrefix(rule.comment, nftModule+"/rule/"+chain+"/")
+}
+
+func managedNFTChain(name string) bool {
+	switch name {
+	case "prerouting", "output", "pre4", "pre6", "out4", "out6", "tproxy4", "tproxy6", "mark_tproxy4", "mark_tproxy6", "tun4", "tun6":
+		return true
+	}
+	return false
+}
+
+func managedNFTSet(name string) bool {
+	switch name {
+	case "local4", "local6", "gateway", "bypass_uids", "bypass_marks", "bypass_udp_ports", "local_types", "fake4", "fake6", "bypass4", "bypass6":
+		return true
+	}
+	return false
 }
 
 func equalNFTSetShape(actual *nftSetState, desired *nftables.Set) bool {

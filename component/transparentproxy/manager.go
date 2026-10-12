@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/metacubex/mihomo/log"
@@ -21,7 +22,7 @@ var managed struct {
 	sync.Mutex
 	current       *manager
 	config        Config
-	handoffDir    string
+	handoff       *manager
 	active        atomic.Bool
 	ipv6Available atomic.Bool
 }
@@ -36,7 +37,7 @@ type manager struct {
 	mu              sync.Mutex
 	system          routeSystem
 	wall            firewall
-	stateDir        string
+	previous        *manager
 	config          Config
 	runtime         Runtime
 	uids            []uint32
@@ -44,6 +45,8 @@ type manager struct {
 	lastFirewall    firewallState
 	hasFirewall     bool
 	closed          bool
+	closing         bool
+	recovered       bool
 	restartPrepared bool
 	uncertain       bool
 	ctx             context.Context
@@ -60,14 +63,14 @@ type manager struct {
 // BeginApply activates the new capture policy using the listeners which really
 // exist before a configuration reload. An unavailable backend starts closed.
 // All required route protection is acknowledged before nftables starts capture.
-func BeginApply(stateDir string, cfg Config, runtime Runtime) error {
+func BeginApply(cfg Config, runtime Runtime) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
 	managed.Lock()
 	defer managed.Unlock()
 	if !cfg.Enable {
-		if err := closeManagedLocked(stateDir); err != nil {
+		if err := closeManagedLocked(true); err != nil {
 			return err
 		}
 		managed.config = cfg.Clone()
@@ -78,17 +81,21 @@ func BeginApply(stateDir string, cfg Config, runtime Runtime) error {
 		return err
 	}
 	m := managed.current
+	if m != nil && m.closing {
+		return errors.New("transparent-proxy stop cleanup is still in progress")
+	}
 	created := m == nil
 	if created {
-		system, err := newRouteSystem(stateDir)
+		system, err := newRouteSystem()
 		if err != nil {
 			return err
 		}
-		wall, err := newFirewall(system.Owner())
+		wall, err := newFirewall()
 		if err != nil {
 			return errors.Join(err, system.Close())
 		}
-		m = makeManager(stateDir, system, wall)
+		m = makeManager(system, wall)
+		m.previous = managed.handoff
 		// Subscribe before the first snapshot. A change during initial setup
 		// remains queued and is reconciled after activation.
 		if err := m.subscribe(); err != nil {
@@ -100,8 +107,6 @@ func BeginApply(stateDir string, cfg Config, runtime Runtime) error {
 		// mutex. Publishing before scanning existing sockets closes the gap
 		// between old connections and newly constructed Dialers.
 		managed.active.Store(true)
-	} else if filepath.Clean(m.stateDir) != filepath.Clean(stateDir) {
-		return errors.New("transparent-proxy state directory cannot change while enabled")
 	}
 
 	m.mu.Lock()
@@ -115,7 +120,7 @@ func BeginApply(stateDir string, cfg Config, runtime Runtime) error {
 			protection.commit()
 		}
 		managed.config = m.config.Clone()
-		managed.handoffDir = ""
+		managed.handoff = nil
 		m.startLocked()
 		if m.retryNeeded {
 			m.requestSync()
@@ -131,15 +136,42 @@ func BeginApply(stateDir string, cfg Config, runtime Runtime) error {
 		m.mu.Unlock()
 		return err
 	}
-	// A failed initial activation may have installed protection or capture.
-	// Remove capture before relaxing routes or undoing socket protection.
-	cleanupErr := m.closeLocked()
-	if m.closed {
-		managed.current = nil
-		managed.handoffDir = ""
-		managed.active.Store(false)
+	cleanupErr := m.rollbackInitialApplyLocked(cfg, runtime, uids, protection)
+	m.mu.Unlock()
+	return errors.Join(err, cleanupErr)
+}
+
+// rollbackInitialApplyLocked runs with both lifecycle locks held. Until recovery
+// succeeds, this instance has not changed any working network resource. Keep
+// earlier protection intact if its complete ownership could not be observed.
+func (m *manager) rollbackInitialApplyLocked(cfg Config, runtime Runtime, uids []uint32, protection *socketProtection) error {
+	var cleanupErr error
+	if !m.recovered {
+		m.closed = true
+		m.cancel()
+		if m.watch != nil {
+			cleanupErr = m.watch.Close()
+			m.watch = nil
+		}
+		cleanupErr = errors.Join(cleanupErr, m.system.Close())
+	} else {
+		// Once resources may have changed, remove capture before relaxing
+		// routes or undoing socket protection.
+		cleanupErr = m.closeLocked()
+	}
+	if m.closed || m.closing {
+		if m.closed {
+			managed.current = nil
+			if m.recovered {
+				managed.handoff = nil
+			}
+			managed.active.Store(false)
+			managed.ipv6Available.Store(false)
+		}
+		// This instance never changed capture, or removed it successfully.
+		// Release pinned descriptors even if route/sysctl cleanup must retry.
 		if protection != nil {
-			err = errors.Join(err, protection.rollback())
+			cleanupErr = errors.Join(cleanupErr, protection.rollback())
 		}
 	} else {
 		// If removing capture failed, keep the manager and its blackholes.
@@ -157,13 +189,12 @@ func BeginApply(stateDir string, cfg Config, runtime Runtime) error {
 		m.startLocked()
 		m.requestSync()
 	}
-	m.mu.Unlock()
-	return errors.Join(err, cleanupErr)
+	return cleanupErr
 }
 
-func makeManager(stateDir string, system routeSystem, wall firewall) *manager {
+func makeManager(system routeSystem, wall firewall) *manager {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &manager{system: system, wall: wall, stateDir: stateDir, ctx: ctx,
+	return &manager{system: system, wall: wall, ctx: ctx,
 		cancel: cancel, kick: make(chan struct{}, 1), done: make(chan struct{}),
 		marks: []uint32{DefaultOutboundMark}}
 }
@@ -178,7 +209,7 @@ func (m *manager) subscribe() error {
 }
 
 func (m *manager) startLocked() {
-	if !m.started && !m.closed {
+	if !m.started && !m.closed && !m.closing {
 		m.started = true
 		go m.run()
 		if m.retryNeeded {
@@ -198,6 +229,9 @@ func Configure(runtime Runtime) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closing {
+		return errors.New("transparent-proxy is stopping")
+	}
 	m.runtime = cloneRuntime(runtime)
 	protection, err := protectProcessSockets(m.config)
 	if err != nil {
@@ -225,6 +259,9 @@ func NotifyBackends(state BackendState) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closing {
+		return nil
+	}
 	m.setBackendsLocked(state)
 	err := m.reconcileLocked()
 	if err != nil || m.retryNeeded {
@@ -253,6 +290,9 @@ func BeforeTunClose() error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closing {
+		return errors.New("finish transparent-proxy stop cleanup before closing TUN")
+	}
 	ctx, cancel := context.WithTimeout(m.ctx, operationTimeout)
 	defer cancel()
 	if err := m.system.QuiesceTUN(ctx); err != nil {
@@ -299,6 +339,11 @@ func OutboundMark(mark uint32) (uint32, error) {
 	if err := validateOutboundMark(m.config, mark); err != nil {
 		return 0, err
 	}
+	if m.closing {
+		// Capture has already been removed. A new background socket must not
+		// rebuild it while a failed route/sysctl cleanup is being retried.
+		return mark, nil
+	}
 	if !m.hasFirewall {
 		return 0, errors.New("transparent-proxy capture initialization has not completed")
 	}
@@ -327,7 +372,7 @@ func validateOutboundMark(cfg Config, mark uint32) error {
 func Close() error {
 	managed.Lock()
 	defer managed.Unlock()
-	return closeManagedLocked("")
+	return closeManagedLocked(false)
 }
 
 // PrepareRestart blocks capture synchronously but keeps observation alive until
@@ -342,6 +387,9 @@ func PrepareRestart() error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closing {
+		return errors.New("transparent-proxy is stopping")
+	}
 	ctx, cancel := context.WithTimeout(m.ctx, operationTimeout)
 	defer cancel()
 	if err := m.system.QuiesceTUN(ctx); err != nil {
@@ -382,21 +430,28 @@ func AbortRestart(state BackendState) error {
 	return err
 }
 
-// CompleteRestart is called only after successful listener and resolver
-// cleanup. Capture, blackholes and their durable owner remain in the namespace
-// until the replacement process confirms its own backends are ready.
-func CompleteRestart() {
+// CompleteRestart follows successful listener cleanup, before canceling the
+// running configuration. Restore this process's sysctl baseline while capture
+// is blocked, then release observation. Only working rules and blackholes cross
+// exec; the replacement reads them and samples its own current sysctl baseline.
+func CompleteRestart() error {
 	managed.Lock()
 	defer managed.Unlock()
 	m := managed.current
 	if m == nil {
-		return
+		return nil
 	}
 	m.mu.Lock()
 	if !m.restartPrepared {
 		m.mu.Unlock()
-		log.Errorln("[Transparent Proxy] Refuse to relinquish unprepared restart protection")
-		return
+		return errors.New("refuse to relinquish unprepared restart protection")
+	}
+	ctx, cancel := context.WithTimeout(m.ctx, operationTimeout)
+	err := m.system.RestoreSysctls(ctx)
+	cancel()
+	if err != nil {
+		m.mu.Unlock()
+		return fmt.Errorf("restore transparent-proxy network settings before restart: %w", err)
 	}
 	m.closed = true
 	m.cancel()
@@ -407,46 +462,63 @@ func CompleteRestart() {
 	}
 	closeErr = errors.Join(closeErr, m.system.Close())
 	started := m.started
-	managed.current, managed.handoffDir = nil, m.stateDir
+	managed.current, managed.handoff = nil, m
 	managed.active.Store(false)
 	m.mu.Unlock()
 	if started {
 		<-m.done
 	}
 	if closeErr != nil {
-		// Protection is committed and its persistent journal remains valid.
-		// A descriptor close error must not reopen forwarding or abandon an
-		// already-prepared process replacement.
+		// Working protection remains in the kernel. A descriptor close error
+		// must not reopen forwarding or abandon the prepared replacement.
 		log.Warnln("[Transparent Proxy] Restart protection retained; closing observer: %v", closeErr)
 	}
+	return nil
 }
 
-func closeManagedLocked(stateDir string) error {
+func closeManagedLocked(probePrevious bool) error {
 	m := managed.current
 	recovering := m == nil
-	if stateDir == "" {
-		stateDir = managed.handoffDir
-	}
 	if m == nil {
-		// Disabled installations have no side effects. Only an existing journal
-		// authorizes recovery of resources left by an earlier crashed process.
-		if stateDir == "" {
+		if !probePrevious && managed.handoff == nil || runtime.GOOS != "linux" {
 			return nil
 		}
-		if _, err := os.Lstat(filepath.Join(stateDir, "state.json")); os.IsNotExist(err) {
-			return nil
-		} else if err != nil {
-			return err
-		}
-		system, err := newRouteSystem(stateDir)
+		wall, err := newFirewall()
 		if err != nil {
 			return err
 		}
-		wall, err := newFirewall(system.Owner())
+		ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
+		defer cancel()
+		captures, present, err := wall.RecoverScopes(ctx)
 		if err != nil {
+			// Default-disabled, unprivileged proxy use must not require network
+			// administration access just to look for an earlier managed table.
+			if managed.handoff == nil && (errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES)) {
+				return nil
+			}
+			return err
+		}
+		if !present && managed.handoff == nil {
+			return nil
+		}
+		system, err := newRouteSystem()
+		if err != nil {
+			return err
+		}
+		var configured []routePolicy
+		if previous := managed.handoff; previous != nil {
+			network, readErr := system.Snapshot(ctx)
+			if readErr != nil {
+				return errors.Join(readErr, system.Close())
+			}
+			configured, _ = desiredState(previous.config, previous.runtime, network, previous.uids, previous.marks)
+		}
+		if err := system.RecoverRoutes(ctx, configured, captures); err != nil {
 			return errors.Join(err, system.Close())
 		}
-		m = makeManager(stateDir, system, wall)
+		m = makeManager(system, wall)
+		m.recovered = true
+		managed.current = m
 	}
 	m.mu.Lock()
 	err := m.closeLocked()
@@ -454,7 +526,7 @@ func closeManagedLocked(stateDir string) error {
 	m.mu.Unlock()
 	if closed {
 		managed.current = nil
-		managed.handoffDir = ""
+		managed.handoff = nil
 		managed.active.Store(false)
 		managed.ipv6Available.Store(false)
 		managed.config.Enable = false
@@ -462,10 +534,9 @@ func closeManagedLocked(stateDir string) error {
 			<-m.done
 		}
 	} else if recovering {
-		// Recovery did not activate this process. Release the temporary lease
-		// so a later explicit cleanup attempt can retry the durable journal.
-		m.cancel()
-		err = errors.Join(err, m.system.Close())
+		// Keep the in-memory ownership and lease until a later stop attempt
+		// completes. There is no external journal to recover lost progress.
+		managed.active.Store(false)
 	}
 	return err
 }
@@ -479,21 +550,27 @@ func (m *manager) closeLocked() error {
 	if err := m.wall.Close(ctx); err != nil {
 		return fmt.Errorf("keep route protection because removing capture failed: %w", err)
 	}
-	// With capture removed, stopping the observer cannot leak new packets.
-	// Remaining ownership stays in the journal if any cleanup step fails.
-	m.closed = true
+	// Once capture is removed, no event or backend callback may enable it
+	// again. Retain ownership in memory until every cleanup operation succeeds.
+	m.closing = true
 	m.cancel()
 	var watchErr error
 	if m.watch != nil {
 		watchErr = m.watch.Close()
 		m.watch = nil
 	}
-	err := m.system.CloseRoutes(ctx)
-	err = errors.Join(err, m.system.RestoreSysctls(ctx), watchErr, m.system.Close())
-	return err
+	err := errors.Join(m.system.CloseRoutes(ctx), m.system.RestoreSysctls(ctx))
+	if err != nil {
+		return errors.Join(err, watchErr)
+	}
+	m.closed = true
+	return errors.Join(watchErr, m.system.Close())
 }
 
 func (m *manager) applyConfigurationLocked(cfg Config, runtime Runtime, uids, marks []uint32) error {
+	if m.closing || m.closed {
+		return errors.New("transparent-proxy is stopping")
+	}
 	ctx, cancel := context.WithTimeout(m.ctx, operationTimeout)
 	defer cancel()
 	for _, mark := range marks {
@@ -507,6 +584,22 @@ func (m *manager) applyConfigurationLocked(cfg Config, runtime Runtime, uids, ma
 	}
 	managed.ipv6Available.Store(network.IPv6Available)
 	policies, state := desiredState(cfg, runtime, network, uids, marks)
+	if !m.recovered {
+		captures, _, err := m.wall.RecoverScopes(ctx)
+		if err != nil {
+			return fmt.Errorf("inspect existing transparent-proxy capture: %w", err)
+		}
+		configured := slices.Clone(policies)
+		if previous := m.previous; previous != nil {
+			oldPolicies, _ := desiredState(previous.config, previous.runtime, network, previous.uids, previous.marks)
+			configured = append(configured, oldPolicies...)
+		}
+		if err := m.system.RecoverRoutes(ctx, configured, captures); err != nil {
+			return fmt.Errorf("recover existing transparent-proxy routes: %w", err)
+		}
+		m.recovered = true
+		m.previous = nil
+	}
 	if m.restartPrepared {
 		for i := range policies {
 			policies[i].Ready = false
@@ -555,7 +648,7 @@ func blockedFirewall(state firewallState) firewallState {
 }
 
 func (m *manager) reconcileLocked() error {
-	if m.closed {
+	if m.closed || m.closing {
 		return nil
 	}
 	if m.uncertain {
@@ -613,7 +706,7 @@ func (m *manager) run() {
 	for {
 		m.mu.Lock()
 		events := m.events
-		closed := m.closed
+		closed := m.closed || m.closing
 		m.mu.Unlock()
 		if closed {
 			return
@@ -642,7 +735,7 @@ func (m *manager) run() {
 			}
 		}
 		m.mu.Lock()
-		if m.closed {
+		if m.closed || m.closing {
 			m.mu.Unlock()
 			return
 		}

@@ -18,11 +18,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const nftTableName = "mihomo_optimized_tp"
-
-// The persistent route manifest supplies owner. A name alone never authorizes
-// adoption of a table left by another installation or firewall administrator.
-func nftOwner(owner string) string { return "mihomo-optimized/transparent-proxy/v1/" + owner }
+const (
+	nftTableName = "mihomo_optimized_tp"
+	// This identifies working firewall objects, not a serialized recovery
+	// record. One namespace lease excludes concurrent module instances.
+	nftModule = "mihomo-optimized/transparent-proxy/v1"
+)
 
 type nftDesiredSet struct {
 	set      *nftables.Set
@@ -36,15 +37,11 @@ type nftDesiredChain struct {
 
 type nftRuleset struct {
 	table  *nftables.Table
-	owner  string
 	sets   []*nftDesiredSet
 	chains []*nftDesiredChain
 }
 
-func buildNFTRuleset(owner string, state firewallState) (*nftRuleset, error) {
-	if owner == "" || len(owner) > 96 || strings.IndexByte(owner, 0) >= 0 {
-		return nil, errors.New("invalid transparent-proxy firewall owner")
-	}
+func buildNFTRuleset(state firewallState) (*nftRuleset, error) {
 	for _, mode := range []Mode{state.TCP, state.UDP} {
 		if mode != ModeOff && mode != ModeTUN && mode != ModeTProxy {
 			return nil, fmt.Errorf("invalid transparent-proxy capture mode %q", mode)
@@ -72,18 +69,15 @@ func buildNFTRuleset(owner string, state firewallState) (*nftRuleset, error) {
 
 	ruleset := &nftRuleset{
 		table: &nftables.Table{Name: nftTableName, Family: nftables.TableFamilyINet},
-		owner: nftOwner(owner),
 	}
 	addSet := func(name string, kind nftables.SetDatatype, elements []nftables.SetElement, interval bool) *nftables.Set {
 		set := &nftables.Set{
 			Table: ruleset.table, Name: name, ID: uint32(len(ruleset.sets) + 1),
-			KeyType: kind, Interval: interval, Comment: ruleset.owner + "/set/" + name,
+			KeyType: kind, Interval: interval, Comment: nftModule + "/set/" + name,
 		}
 		ruleset.sets = append(ruleset.sets, &nftDesiredSet{set: set, elements: normalizeNFTElements(elements)})
 		return set
 	}
-	addSet("owner", nftables.TypeInteger, []nftables.SetElement{{Key: binaryutil.NativeEndian.PutUint32(0x4d484f31), Comment: ruleset.owner}}, false)
-
 	interfaces := make(map[string]*nftables.Set)
 	for _, entry := range []struct {
 		name  string
@@ -150,7 +144,7 @@ func buildNFTRuleset(owner string, state firewallState) (*nftRuleset, error) {
 	}
 	addRule := func(chain string, expressions ...expr.Any) {
 		current := chains[chain]
-		comment := fmt.Sprintf("%s/rule/%s/%d", ruleset.owner, chain, len(current.rules))
+		comment := fmt.Sprintf("%s/rule/%s/%d", nftModule, chain, len(current.rules))
 		current.rules = append(current.rules, &nftables.Rule{
 			Table: ruleset.table, Chain: current.chain, Exprs: expressions,
 			UserData: userdata.AppendString(nil, userdata.TypeComment, comment),
@@ -195,12 +189,15 @@ func buildNFTRuleset(owner string, state firewallState) (*nftRuleset, error) {
 				&expr.Meta{Key: expr.MetaKeyMARK, SourceRegister: true, Register: 1}, nftAccept())...)
 			addRule(markProxy, append(nftProtocol(protocol.protocol), nftSetMark(state.TProxyMark)...)...)
 		}
-		addRule(proxy, nftDrop())
-		addRule(markProxy, nftDrop())
+		// Packet classification retains its mark even while the backend is
+		// blocked. The terminal verdict still drops, and the actual working
+		// rule remains sufficient to identify its policy after a restart.
+		addRule(proxy, nftMarkVerdict(state.TProxyMark, nftDrop())...)
+		addRule(markProxy, nftMarkVerdict(state.TProxyMark, nftDrop())...)
 		if tunReady {
 			addRule(tun, nftSetMark(state.TunMark)...)
 		} else {
-			addRule(tun, nftDrop())
+			addRule(tun, nftMarkVerdict(state.TunMark, nftDrop())...)
 		}
 
 		for _, chain := range []string{pre, out} {
@@ -368,8 +365,12 @@ func nftReturn() *expr.Verdict           { return &expr.Verdict{Kind: expr.Verdi
 func nftAccept() *expr.Verdict           { return &expr.Verdict{Kind: expr.VerdictAccept} }
 func nftDrop() *expr.Verdict             { return &expr.Verdict{Kind: expr.VerdictDrop} }
 func nftSetMark(mark uint32) []expr.Any {
+	return nftMarkVerdict(mark, nftAccept())
+}
+
+func nftMarkVerdict(mark uint32, verdict *expr.Verdict) []expr.Any {
 	return []expr.Any{
 		&expr.Immediate{Register: 1, Data: binaryutil.NativeEndian.PutUint32(mark)},
-		&expr.Meta{Key: expr.MetaKeyMARK, SourceRegister: true, Register: 1}, nftAccept(),
+		&expr.Meta{Key: expr.MetaKeyMARK, SourceRegister: true, Register: 1}, verdict,
 	}
 }
