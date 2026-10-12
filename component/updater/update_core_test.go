@@ -253,19 +253,8 @@ func TestCoreUpdaterPinnedReleaseAndFailurePreservesExecutable(t *testing.T) {
 	oldVersion := C.Version
 	C.Version = "v1.19.32-dns.2" // the NEW updater may encounter an older installed version label
 	t.Cleanup(func() { C.Version = oldVersion })
-	newCore := []byte("isolated updated core fixture\n")
-	if runtime.GOOS == "darwin" {
-		// Exercise re-signing an already signed native Go executable. The
-		// staged fixture is never run or used to replace the test process.
-		path, err := os.Executable()
-		if err != nil {
-			t.Fatal(err)
-		}
-		newCore, err = os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
+	t.Setenv("MIHOMO_TEST_CORE_VERSION", version)
+	newCore := coreTestExecutable(t)
 	for _, fault := range []string{"", "legacy-asset", "both-asset-names", "both-corrupt-new", "both-new-http", "both-new-broken", "checksum", "missing-checksum", "duplicate-checksum", "duplicate-other-checksum", "archive-http", "version-http", "official-version", "empty-executable", "broken-archive"} {
 		t.Run(fault, func(t *testing.T) {
 			dir := t.TempDir()
@@ -443,17 +432,7 @@ func TestCoreUpdaterChannelsAndDowngrade(t *testing.T) {
 func TestCoreUpdaterReleaseFormatMigrationAndForce(t *testing.T) {
 	oldVersion := C.Version
 	t.Cleanup(func() { C.Version = oldVersion })
-	payload := []byte("new updater fixture for either release spelling\n")
-	if runtime.GOOS == "darwin" {
-		path, err := os.Executable()
-		if err != nil {
-			t.Fatal(err)
-		}
-		payload, err = os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
+	payload := coreTestExecutable(t)
 	for _, test := range []struct {
 		name, installed, advertised, wantError string
 		force                                  bool
@@ -480,6 +459,10 @@ func TestCoreUpdaterReleaseFormatMigrationAndForce(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			C.Version = test.installed
+			t.Setenv("MIHOMO_TEST_CORE_VERSION", test.advertised)
+			if strings.HasPrefix(test.advertised, "v") {
+				t.Setenv("MIHOMO_TEST_CORE_PROBE", "legacy-prefix")
+			}
 			dir := t.TempDir()
 			current := filepath.Join(dir, "mihomo")
 			original := []byte("existing executable is preserved until verification\n")

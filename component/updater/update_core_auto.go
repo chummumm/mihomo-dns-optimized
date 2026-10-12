@@ -24,6 +24,7 @@ type coreAutomaticUpdate struct {
 	done     chan struct{}
 	interval time.Duration
 	next     atomic.Pointer[time.Time]
+	phase    atomic.Uint32
 	restart  CoreAutomaticRestartHandler
 }
 
@@ -60,6 +61,17 @@ func (u *CoreUpdater) NextCheck() string {
 		}
 	}
 	return ""
+}
+
+// AutomaticSchedule exposes the actual timer and current automatic operation.
+// An unset restart handler (including embedded use) has no live schedule.
+func (u *CoreUpdater) AutomaticSchedule() (time.Time, string) {
+	u.policyMu.Lock()
+	defer u.policyMu.Unlock()
+	if job := u.automatic; job != nil {
+		return automaticSchedule(job.ctx, &job.next, &job.phase)
+	}
+	return time.Time{}, ""
 }
 
 // ConfigureAutoUpdate is nonblocking with respect to network I/O. An unchanged
@@ -116,6 +128,9 @@ func (u *CoreUpdater) startAutomaticUpdatesLocked(immediate bool) {
 	}
 	next := time.Now().Add(interval)
 	job.next.Store(&next)
+	if immediate {
+		job.phase.Store(automaticWaiting)
+	}
 	u.automatic = job
 	var ticks <-chan time.Time
 	var stop func()
@@ -166,6 +181,9 @@ func (u *CoreUpdater) automaticUpdate(job *coreAutomaticUpdate, waitForOperation
 	if job.ctx.Err() != nil {
 		return
 	}
+	job.phase.Store(automaticWaiting)
+	finishedPhase := automaticScheduled
+	defer func() { job.phase.Store(finishedPhase) }()
 	executable := os.Executable
 	if u.executable != nil {
 		executable = u.executable
@@ -174,6 +192,7 @@ func (u *CoreUpdater) automaticUpdate(job *coreAutomaticUpdate, waitForOperation
 		if err := u.readiness.wait(job.ctx); err != nil {
 			return err
 		}
+		job.phase.Store(automaticChecking)
 		path, err := executable()
 		if err != nil {
 			return err
@@ -189,6 +208,7 @@ func (u *CoreUpdater) automaticUpdate(job *coreAutomaticUpdate, waitForOperation
 		err = action()
 	}
 	if err != nil && job.ctx.Err() == nil && !errors.Is(err, ErrCoreUpdateBusy) {
+		finishedPhase = automaticRetrying
 		log.Warnln("Automatic core update failed: %s", err)
 	}
 }

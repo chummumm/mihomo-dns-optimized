@@ -8,10 +8,11 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 )
 
-// dnsObservedOutbound uses the same physical leaf, effective socket policy and
-// replacement epoch as native transport reuse, without rule/group identities.
+// dnsObservedOutbound groups the same configured leaf and effective socket
+// policy across reloads. Cache and transport keys retain their separate object
+// and epoch boundaries; those lifetimes must not split process statistics.
 // Opaque selectors and an unfrozen dialer-proxy cannot prove the actual exit.
-func dnsObservedOutbound(proxy C.ProxyAdapter, epoch uint64) dnsstats.Outbound {
+func dnsObservedOutbound(proxy C.ProxyAdapter) dnsstats.Outbound {
 	if proxy == nil {
 		return dnsstats.Outbound{}
 	}
@@ -40,8 +41,17 @@ func dnsObservedOutbound(proxy C.ProxyAdapter, epoch uint64) dnsstats.Outbound {
 	if proxy.Type() == C.Direct || proxy.Type() == C.Compatible {
 		kind = "direct"
 	}
+	identity := ""
+	if source, ok := proxy.(interface{ DNSStatsIdentity() string }); ok {
+		identity = source.DNSStatsIdentity()
+	}
+	if identity == "" {
+		// An externally constructed adapter may hide credentials or dialer policy.
+		// Its display name/address cannot establish equivalence with another one.
+		identity = fmt.Sprintf("instance:%T:%p", proxy, proxy)
+	}
 	return dnsstats.Outbound{
-		Key:  fmt.Sprintf("native-leaf:%T:%p|%d|%#v|epoch:%d|interface:%q|mark:%d", proxy, proxy, proxy.Type(), info, epoch, iface, mark),
+		Key:  fmt.Sprintf("native-leaf:%q|%d|%#v|interface:%q|mark:%d", identity, proxy.Type(), info, iface, mark),
 		Name: proxy.Name(), Type: kind,
 	}
 }
@@ -50,7 +60,7 @@ func (p *DNSRoutingPlan) ObservabilityOutbound() dnsstats.Outbound {
 	if p == nil {
 		return dnsstats.Outbound{}
 	}
-	return dnsObservedOutbound(p.route.proxy, p.epoch)
+	return dnsObservedOutbound(p.route.proxy)
 }
 
 // A transport bound to a frozen plan has a known exit even on a reused
@@ -63,5 +73,5 @@ func (d *DNSDialer) ObservabilityOutbound() dnsstats.Outbound {
 	if d.plan != nil {
 		return d.plan.ObservabilityOutbound()
 	}
-	return dnsObservedOutbound(d.proxyAdapter, DNSRoutingEpoch())
+	return dnsObservedOutbound(d.proxyAdapter)
 }

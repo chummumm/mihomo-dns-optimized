@@ -253,7 +253,7 @@ jobs:
       - name: Verify native core replacement, rollback and macOS signing
         run: go test -tags with_gvisor -count=1 -timeout=5m ./component/updater ./component/resource ./component/mmdb ./component/geodata ./rules/provider
       - name: Verify native configuration editing and private UI staging
-        run: go test -tags with_gvisor -count=1 -timeout=5m ./hub/route -run 'ConfigFile|UIUpdater|UnifiedUpgrade'
+        run: go test -tags with_gvisor -count=1 -timeout=5m ./hub/route -run 'ConfigFile|UIUpdater|UnifiedUpgrade|UpgradeSchedule'
 
   release:
     name: Publish GitHub release
@@ -327,6 +327,9 @@ jobs:
             {
               printf 'mihomo-optimized `%s`\n\n' "$BUILD_VERSION"
               printf 'Source commit: `%s`\n\n' "$BUILD_SHA"
+              printf 'Core 1.0.10 keeps DNS upstream statistics continuous across ordinary reloads using stable configured outbound identities. Different node configurations, providers, effective interfaces and marks remain separate; DNS cache and transport isolation are unchanged.\n\n'
+              printf 'Bare-core updates now compare versions before filesystem preparation, ensure owner execution permission on staged Unix cores, and require a bounded native version/platform probe before replacement or shutdown. Extracted archives are removed early and Unix backups use verified hard links with a checked copy fallback to reduce storage use. Devices already blocked by an older updater may need one manual installation of 1.0.10.\n\n'
+              printf 'With dashboard 0.4.8, all four automatic update classes (core, dashboard, GeoData and rule providers) show their real next check or retry time using the browser clock and time zone. Resource groups show the nearest schedule when collapsed and individual schedules when expanded. Read-only schedule refresh does not initiate updates.\n\n'
               printf 'Core 1.0.9 tolerates disappearing per-interface sysctl entries during TUN recreation, including wrapped and joined ENOENT from IPv4/IPv6 forwarding, RA, rp_filter and restoration. Permission, read-only, I/O and required global/default setting failures remain errors; mixed error trees are not discarded. Existing blackholes, interface identity checks and event-driven recovery remain in place. A successful synchronization after a fault now logs the applied TCP/UDP backend availability per address family, distinguishing ready, protected and disabled without repeating on healthy events.\n\n'
               printf 'Core 1.0.8 reduces ordinary pull-request packaging to seven representative targets: Linux amd64/arm64/386, Windows amd64, macOS arm64, FreeBSD amd64 and Android arm64-v8. Toolchain, dependency, platform-specific, build-constraint and packaging/workflow changes retain all 37 targets; uncertain PR diffs also fall back to the full matrix. Existing functional, race, network-namespace, non-root systemd and native updater tests remain required. Main, tag, manual and upstream-sync builds still produce the complete release matrix once, and publication verifies and uploads artifacts from that same run.\n\n'
               printf 'Core 1.0.7 adds TCP REDIRECT through redir-port and protocol-specific local.bypass-ports.udp/tcp (defaults [123]/[]). local.bypass-users now defaults to [mihomo]; explicit [] disables UID bypass. The old bypass-udp-ports remains a parse-only alias, and mixing both keys is rejected. REDIRECT validates real IPv4/IPv6 listeners and guards existing conntrack sessions across port/backend changes and restarts. HTTP/SOCKS/mixed remain explicit proxy protocols.\n\n'

@@ -28,6 +28,11 @@ type fetcherUpdateContext struct {
 	commit func(func() error) error
 }
 
+type fetcherSchedule struct {
+	next  time.Time
+	state string
+}
+
 type Fetcher[V any] struct {
 	ctx           context.Context
 	ctxCancel     context.CancelFunc
@@ -36,6 +41,7 @@ type Fetcher[V any] struct {
 	vehicle       P.Vehicle
 	bundleFile    BundleFile
 	updatedAt     atomic.TypedValue[time.Time]
+	schedule      atomic.TypedValue[fetcherSchedule]
 	hash          utils.HashType
 	parser        Parser[V]
 	parserContext ContextParser[V]
@@ -68,6 +74,20 @@ func (f *Fetcher[V]) UpdatedAt() time.Time {
 // does not enable or otherwise change its automatic update policy.
 func (f *Fetcher[V]) UpdateInterval() time.Duration {
 	return f.interval
+}
+
+// AutomaticSchedule reads the pull loop's actual deadline, including retry
+// backoff. UpdatedAt cannot reconstruct it: manual updates do not reset the
+// timer, and a failed automatic read can schedule a much earlier retry.
+func (f *Fetcher[V]) AutomaticSchedule() (time.Time, string) {
+	if f.interval <= 0 || f.vehicle.Type() == P.File || f.ctx.Err() != nil {
+		return time.Time{}, ""
+	}
+	if binding := f.updateContext.Load(); binding != nil && binding.ctx.Err() != nil {
+		return time.Time{}, ""
+	}
+	schedule := f.schedule.Load()
+	return schedule.next, schedule.state
 }
 
 func (f *Fetcher[V]) SetContextParser(parser ContextParser[V]) {
@@ -297,6 +317,7 @@ func (f *Fetcher[V]) Close() error {
 }
 
 func (f *Fetcher[V]) pullLoop(forceUpdate bool) {
+	defer f.schedule.Store(fetcherSchedule{})
 	initialInterval := f.interval - time.Since(f.UpdatedAt())
 	if initialInterval > f.interval {
 		initialInterval = f.interval
@@ -304,6 +325,7 @@ func (f *Fetcher[V]) pullLoop(forceUpdate bool) {
 
 	if forceUpdate {
 		log.Warnln("[Provider] %s not updated for a long time, force refresh", f.Name())
+		f.schedule.Store(fetcherSchedule{state: "checking"})
 		f.updateWithLog()
 	}
 	if attempt := f.backoff.Attempt(); attempt > 0 { // f.Update() was failed, decrease the interval from backoff to achieve fast retry
@@ -312,11 +334,13 @@ func (f *Fetcher[V]) pullLoop(forceUpdate bool) {
 		}
 	}
 
+	f.recordNextCheck(initialInterval)
 	timer := time.NewTimer(initialInterval)
 	defer timer.Stop()
 	for {
 		select {
 		case <-timer.C:
+			f.schedule.Store(fetcherSchedule{state: "checking"})
 			f.updateWithLog()
 			interval := f.interval
 			if attempt := f.backoff.Attempt(); attempt > 0 { // f.Update() was failed, decrease the interval from backoff to achieve fast retry
@@ -324,11 +348,23 @@ func (f *Fetcher[V]) pullLoop(forceUpdate bool) {
 					interval = duration
 				}
 			}
+			f.recordNextCheck(interval)
 			timer.Reset(interval)
 		case <-f.ctx.Done():
 			return
 		}
 	}
+}
+
+func (f *Fetcher[V]) recordNextCheck(delay time.Duration) {
+	if delay < 0 {
+		delay = 0 // time.Timer also fires immediately for an expired deadline.
+	}
+	state := "scheduled"
+	if f.backoff.Attempt() > 0 {
+		state = "retrying"
+	}
+	f.schedule.Store(fetcherSchedule{next: time.Now().Add(delay), state: state})
 }
 
 func (f *Fetcher[V]) startPullLoop(forceUpdate bool) (err error) {
@@ -346,6 +382,7 @@ func (f *Fetcher[V]) startPullLoop(forceUpdate bool) (err error) {
 			return err
 		}
 	} else if f.interval > 0 {
+		f.schedule.Store(fetcherSchedule{state: "waiting"})
 		go f.pullLoop(forceUpdate)
 	}
 	return

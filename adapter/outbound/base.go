@@ -27,19 +27,20 @@ type ProxyAdapter interface {
 }
 
 type Base struct {
-	name   string
-	addr   string
-	tp     C.AdapterType
-	pdName string
-	udp    bool
-	xudp   bool
-	tfo    bool
-	mpTcp  bool
-	iface  string
-	rmark  int
-	prefer C.DNSPrefer
-	dialer C.Dialer
-	id     uuid.UUID
+	name             string
+	addr             string
+	tp               C.AdapterType
+	pdName           string
+	udp              bool
+	xudp             bool
+	tfo              bool
+	mpTcp            bool
+	iface            string
+	rmark            int
+	prefer           C.DNSPrefer
+	dialer           C.Dialer
+	id               uuid.UUID
+	dnsStatsIdentity string
 }
 
 type BaseOption struct {
@@ -58,18 +59,19 @@ type BaseOption struct {
 
 func NewBase(opt BaseOption) *Base {
 	return &Base{
-		name:   opt.Name,
-		addr:   opt.Addr,
-		tp:     opt.Type,
-		pdName: opt.ProviderName,
-		udp:    opt.UDP,
-		xudp:   opt.XUDP,
-		tfo:    opt.TFO,
-		mpTcp:  opt.MPTCP,
-		iface:  opt.Interface,
-		rmark:  opt.RoutingMark,
-		prefer: opt.Prefer,
-		id:     utils.NewUUIDV4(),
+		name:             opt.Name,
+		addr:             opt.Addr,
+		tp:               opt.Type,
+		pdName:           opt.ProviderName,
+		udp:              opt.UDP,
+		xudp:             opt.XUDP,
+		tfo:              opt.TFO,
+		mpTcp:            opt.MPTCP,
+		iface:            opt.Interface,
+		rmark:            opt.RoutingMark,
+		prefer:           opt.Prefer,
+		id:               utils.NewUUIDV4(),
+		dnsStatsIdentity: directDNSStatsIdentity(opt),
 	}
 }
 
@@ -372,8 +374,9 @@ type AddRef interface {
 
 type autoCloseProxyAdapter struct {
 	ProxyAdapter
-	closeOnce sync.Once
-	closeErr  error
+	closeOnce        sync.Once
+	closeErr         error
+	dnsStatsIdentity string
 }
 
 func (p *autoCloseProxyAdapter) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
@@ -408,8 +411,15 @@ func (p *autoCloseProxyAdapter) Close() error {
 }
 
 func NewAutoCloseProxyAdapter(adapter ProxyAdapter) ProxyAdapter {
+	return newAutoCloseProxyAdapter(adapter)
+}
+
+func newAutoCloseProxyAdapter(adapter ProxyAdapter) *autoCloseProxyAdapter {
 	proxy := &autoCloseProxyAdapter{
 		ProxyAdapter: adapter,
+	}
+	if source, ok := adapter.(interface{ DNSStatsIdentity() string }); ok {
+		proxy.dnsStatsIdentity = source.DNSStatsIdentity()
 	}
 	// auto close ProxyAdapter
 	runtime.SetFinalizer(proxy, (*autoCloseProxyAdapter).Close)
