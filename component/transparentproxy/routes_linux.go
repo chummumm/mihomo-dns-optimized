@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 
 	"golang.org/x/exp/slices"
@@ -42,14 +43,21 @@ type observedRoute struct {
 	Default  bool
 	Plain    bool
 	Flags    uint32
+	// A single gateway does not make a route owned. Record its otherwise
+	// ordinary shape separately for the native output-bound TUN lookup.
+	Gateway              netip.Addr
+	SinglePath           bool
+	UnsupportedAttribute uint16
 }
 
 type observedRule struct {
 	ownedRule
-	Protocol uint8
-	MarkSet  bool
-	Mask     uint32
-	Plain    bool
+	Protocol             uint8
+	MarkSet              bool
+	Mask                 uint32
+	Plain                bool
+	Flags                uint32
+	UnsupportedAttribute uint16
 	// An output-device selector is never part of our owned rule identity.
 	// Keep its exact shape separately to assess the native IPv6 TUN helper.
 	OIFName     string
@@ -231,6 +239,7 @@ func decodeObservedRoute(data []byte) (observedRoute, error) {
 	}
 	route.Family, route.Table, route.Protocol, route.Scope, route.Type = data[0], uint32(data[4]), data[5], data[6], data[7]
 	route.Default, route.Plain = data[1] == 0, data[2] == 0 && data[3] == 0
+	route.SinglePath = route.Plain
 	route.Flags = wireOrder.Uint32(data[8:12])
 	attributes, err := parseWireAttributes(data[12:])
 	if err != nil {
@@ -264,6 +273,16 @@ func decodeObservedRoute(data []byte) (observedRoute, error) {
 					route.Default = false
 				}
 			}
+		case unix.RTA_GATEWAY:
+			length := 4
+			if route.Family == unix.AF_INET6 {
+				length = 16
+			}
+			if len(attribute.Data) != length || route.Gateway.IsValid() {
+				return route, fmt.Errorf("%w: invalid or duplicate route gateway", errIncompleteNetlink)
+			}
+			route.Gateway, _ = netip.AddrFromSlice(attribute.Data)
+			route.Plain = false
 		case unix.RTA_PREF:
 			// IPv6 reports the kernel's default router preference even when the
 			// creator did not specify it. A non-default preference is external.
@@ -272,11 +291,17 @@ func decodeObservedRoute(data []byte) (observedRoute, error) {
 			}
 			if attribute.Data[0] != 0 {
 				route.Plain = false
+				route.SinglePath = false
+				route.UnsupportedAttribute = unix.RTA_PREF
 			}
 		case unix.RTA_CACHEINFO:
 			// Usage counters and cache timestamps are kernel observations.
 		default:
 			route.Plain = false
+			route.SinglePath = false
+			if route.UnsupportedAttribute == 0 {
+				route.UnsupportedAttribute = attribute.Type & wireAttributeTypeMask
+			}
 		}
 	}
 	// IPv6 reject routes are internally attached to the namespace loopback by
@@ -295,6 +320,7 @@ func decodeObservedRule(data []byte) (observedRule, error) {
 	}
 	rule.Family, rule.Table, rule.Action = data[0], uint32(data[4]), data[7]
 	flags := wireOrder.Uint32(data[8:12])
+	rule.Flags = flags
 	plainSelector := data[1] == 0 && data[2] == 0 && data[3] == 0
 	rule.Plain = plainSelector && flags == 0
 	oifOnly := plainSelector && flags&^uint32(unix.FIB_RULE_OIF_DETACHED) == 0
@@ -326,6 +352,7 @@ func decodeObservedRule(data []byte) (observedRule, error) {
 				if value != ^uint32(0) {
 					rule.Plain = false
 					oifOnly = false
+					rule.UnsupportedAttribute = attribute.Type & wireAttributeTypeMask
 				}
 			}
 		case unix.FRA_OIFNAME:
@@ -346,6 +373,9 @@ func decodeObservedRule(data []byte) (observedRule, error) {
 		default:
 			rule.Plain = false
 			oifOnly = false
+			if rule.UnsupportedAttribute == 0 {
+				rule.UnsupportedAttribute = attribute.Type & wireAttributeTypeMask
+			}
 		}
 	}
 	rule.OIFOnly = oifOnly && rule.OIFName != ""
@@ -382,8 +412,15 @@ func (s *linuxRouteSystem) checkRouteConflicts(observation routeObservation, pol
 			// An inverted or otherwise extended selector cannot safely be ruled
 			// out by comparing marks alone. Refuse ambiguous earlier policy.
 			markMatches := !rule.Plain || !rule.MarkSet || policy.Mark&rule.Mask == rule.Mark&rule.Mask
-			if priorityCollision || rule.Priority < policy.Priority && markMatches && !s.safeOutputBoundTUNRule(observation, rule, policies) {
-				return fmt.Errorf("transparent proxy mark %#x or priority pair %d/%d conflicts with external rule %d (family %d)", policy.Mark, policy.Priority, policy.Priority+1, rule.Priority, family)
+			if priorityCollision || rule.Priority < policy.Priority && markMatches {
+				reason := "priority is reserved by the managed lookup/guard pair"
+				if !priorityCollision {
+					reason = s.outputBoundTUNRuleConflict(observation, rule, policies)
+					if reason == "" {
+						continue
+					}
+				}
+				return fmt.Errorf("transparent proxy mark %#x or priority pair %d/%d conflicts with external rule %d (family %d, table %d, oif %q): %s", policy.Mark, policy.Priority, policy.Priority+1, rule.Priority, family, rule.Table, rule.OIFName, reason)
 			}
 		}
 	}

@@ -5,6 +5,7 @@ package transparentproxy
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -26,6 +27,12 @@ func nativeTUNTestRoute(table uint32, index int) wireMessage {
 	data := marshalOwnedRoute(ownedRoute{Family: unix.AF_INET6, Table: table, Metric: 1024, Type: unix.RTN_UNICAST, Scope: unix.RT_SCOPE_UNIVERSE, IfIndex: index})
 	data[5] = unix.RTPROT_BOOT
 	return wireMessage{Type: unix.RTM_NEWROUTE, Data: data}
+}
+
+func nativeTUNTestGatewayRoute(table uint32, index int, gateway string) wireMessage {
+	route := nativeTUNTestRoute(table, index)
+	route.Data = appendWireAttribute(route.Data, unix.RTA_GATEWAY, netip.MustParseAddr(gateway).AsSlice())
+	return route
 }
 
 func nativeHelperPolicies() []routePolicy {
@@ -87,14 +94,22 @@ func TestRoutesNativeIPv6TUNHelperDoesNotConflictOrBecomeOwned(t *testing.T) {
 		name        string
 		policies    []routePolicy
 		table, pref uint32
+		gateway     string
 	}{
 		{name: "mixed backends", policies: nativeHelperPolicies(), table: 2022, pref: 999},
 		{name: "both protocols use TProxy", policies: nativeHelperPolicies()[2:], table: 2022, pref: 999},
 		{name: "different native table and preference", policies: nativeHelperPolicies(), table: 4242, pref: 7},
+		// sing-tun v0.4.27 Inet6GatewayAddr for the real stop fixture's
+		// fdfe:dcba:9876::1/126 is ::2, even with auto-route disabled.
+		{name: "native IPv6 gateway", policies: nativeHelperPolicies(), table: 2022, pref: 999, gateway: "fdfe:dcba:9876::2"},
+		{name: "native gateway with both TProxy", policies: nativeHelperPolicies()[2:], table: 2022, pref: 999, gateway: "fdfe:dcba:9876::2"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			s, kernel, _ := routeTestSystem(t)
 			kernel.extraRoutes = []wireMessage{nativeTUNTestRoute(test.table, 10)}
+			if test.gateway != "" {
+				kernel.extraRoutes[0] = nativeTUNTestGatewayRoute(test.table, 10, test.gateway)
+			}
 			kernel.extraRules = []wireMessage{nativeOIFTestRule(test.table, test.pref, 0, "utun")}
 			if err := s.RecoverRoutes(context.Background(), test.policies, nil); err != nil {
 				t.Fatal(err)
@@ -124,6 +139,58 @@ func TestRoutesNativeIPv6TUNHelperDoesNotConflictOrBecomeOwned(t *testing.T) {
 						t.Fatalf("modified the native rule: %+v %v", rule, err)
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestRoutesNativeGatewayDecodingKeepsOwnershipStrict(t *testing.T) {
+	message := nativeTUNTestGatewayRoute(101, 10, "fdfe:dcba:9876::2")
+	message.Data[5] = linuxOwnerProtocol
+	route, err := decodeObservedRoute(message.Data)
+	if err != nil || route.Plain || !route.SinglePath || canonicalModuleRoute(route) || route.Gateway != netip.MustParseAddr("fdfe:dcba:9876::2") {
+		t.Fatalf("gateway changed ownership or was not decoded: %+v %v", route, err)
+	}
+	for _, data := range [][]byte{
+		appendWireAttribute(nativeTUNTestRoute(2022, 10).Data, unix.RTA_GATEWAY, make([]byte, 4)),
+		appendWireAttribute(message.Data, unix.RTA_GATEWAY, netip.MustParseAddr("fdfe:dcba:9876::3").AsSlice()),
+	} {
+		if _, err := decodeObservedRoute(data); !errors.Is(err, errIncompleteNetlink) {
+			t.Fatalf("malformed or duplicate gateway accepted: %v", err)
+		}
+	}
+}
+
+func TestRoutesNativeGatewayRejectsUnprovenPaths(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func([]byte) []byte
+		reason string
+	}{
+		{name: "WAN gateway", reason: "dev 77 instead of TUN 10", change: func([]byte) []byte { return nativeTUNTestGatewayRoute(2022, 77, "fdfe:dcba:9876::2").Data }},
+		{name: "unspecified", reason: "invalid IPv6 unicast gateway", change: func([]byte) []byte { return nativeTUNTestGatewayRoute(2022, 10, "::").Data }},
+		{name: "mapped IPv4", reason: "invalid IPv6 unicast gateway", change: func([]byte) []byte { return nativeTUNTestGatewayRoute(2022, 10, "::ffff:192.0.2.1").Data }},
+		{name: "multicast", reason: "invalid IPv6 unicast gateway", change: func([]byte) []byte { return nativeTUNTestGatewayRoute(2022, 10, "ff02::1").Data }},
+		{name: "multipath", reason: "attribute 9", change: func(data []byte) []byte { return appendWireAttribute(data, unix.RTA_MULTIPATH, make([]byte, 8)) }},
+		{name: "nexthop object", reason: "attribute 30", change: func(data []byte) []byte { return appendWireAttribute(data, 30, wireUint32(5)) }},
+		{name: "encapsulation", reason: "attribute 22", change: func(data []byte) []byte { return appendWireAttribute(data, unix.RTA_ENCAP, nil) }},
+		{name: "via", reason: "attribute 18", change: func(data []byte) []byte { return appendWireAttribute(data, unix.RTA_VIA, make([]byte, 18)) }},
+		{name: "unknown attribute", reason: "attribute 16382", change: func(data []byte) []byte { return appendWireAttribute(data, 0x3ffe, nil) }},
+		{name: "offloaded route", reason: "flags 0x4000", change: func(data []byte) []byte { wireOrder.PutUint32(data[8:12], unix.RTM_F_OFFLOAD); return data }},
+		{name: "terminating route with gateway", reason: "terminating target route has a gateway", change: func(data []byte) []byte { data[7] = unix.RTN_PROHIBIT; return data }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s, kernel, _ := routeTestSystem(t)
+			kernel.extraRules = []wireMessage{nativeOIFTestRule(2022, 999, 0, "utun")}
+			message := nativeTUNTestGatewayRoute(2022, 10, "fdfe:dcba:9876::2")
+			message.Data = test.change(message.Data)
+			kernel.extraRoutes = []wireMessage{message}
+			err := s.EnsureRoutes(context.Background(), nativeHelperPolicies())
+			if err == nil || !strings.Contains(err.Error(), test.reason) || !strings.Contains(err.Error(), "table 2022, oif \"utun\"") {
+				t.Fatalf("unsafe gateway path accepted or diagnostic lost: %v", err)
+			}
+			if len(kernel.writes) != 0 {
+				t.Fatal("unsafe gateway lookup was detected after route mutation")
 			}
 		})
 	}
