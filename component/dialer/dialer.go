@@ -97,6 +97,9 @@ func Listen(ctx context.Context, network, address string, options ...Option) (ne
 
 func listenConfig(network, address string, rAddrPort netip.AddrPort, opt option) (*net.ListenConfig, string, error) {
 	lc := &net.ListenConfig{}
+	if opt.routingMark == 0 {
+		opt.routingMark = int(DefaultRoutingMark.Load())
+	}
 	if opt.addrReuse {
 		addrReuseToListenConfig(lc)
 	}
@@ -126,13 +129,11 @@ func listenConfig(network, address string, rAddrPort netip.AddrPort, opt option)
 			}
 			address = addr
 		}
-		if opt.routingMark == 0 {
-			opt.routingMark = int(DefaultRoutingMark.Load())
-		}
 		if opt.routingMark != 0 {
 			bindMarkToListenConfig(opt.routingMark, lc, network, address)
 		}
 	}
+	addControlToListenConfig(lc, managedOutboundControl(opt.routingMark))
 
 	return lc, address, nil
 }
@@ -156,6 +157,9 @@ func dialContext(ctx context.Context, network string, destination netip.Addr, po
 	dialer := netDialer.(*net.Dialer)
 	keepalive.SetNetDialer(dialer)
 	mptcp.SetNetDialer(dialer, opt.mpTcp)
+	if opt.routingMark == 0 {
+		opt.routingMark = int(DefaultRoutingMark.Load())
+	}
 
 	if DefaultSocketHook != nil { // ignore interfaceName, routingMark and tfo when DefaultSocketHook not null (in CMFA)
 		socketHookToToDialer(dialer)
@@ -177,15 +181,13 @@ func dialContext(ctx context.Context, network string, destination netip.Addr, po
 				return nil, err
 			}
 		}
-		if opt.routingMark == 0 {
-			opt.routingMark = int(DefaultRoutingMark.Load())
-		}
 		if opt.routingMark != 0 {
 			bindMarkToDialer(opt.routingMark, dialer, network, destination)
 		}
-		if opt.tfo && !DisableTFO {
-			return dialTFO(ctx, *dialer, network, address)
-		}
+	}
+	addControlToDialer(dialer, managedOutboundControl(opt.routingMark))
+	if DefaultSocketHook == nil && opt.tfo && !DisableTFO {
+		return dialTFO(ctx, *dialer, network, address)
 	}
 
 	return dialer.DialContext(ctx, network, address)
@@ -198,13 +200,26 @@ func ICMPControl(destination netip.Addr) func(network, address string, conn sysc
 // ICMPControlWithOptions lets probes inherit an explicit DIRECT adapter's
 // interface and mark while retaining the existing global defaults and hook.
 func ICMPControlWithOptions(destination netip.Addr, options ...Option) func(network, address string, conn syscall.RawConn) error {
+	return SocketControlWithOptions(destination, options...)
+}
+
+// SocketControlWithOptions applies the native socket policy to protocols
+// which create raw IP sockets outside DialContext, including ICMP and FakeTCP.
+func SocketControlWithOptions(destination netip.Addr, options ...Option) func(network, address string, conn syscall.RawConn) error {
 	opt := applyOptions(options...)
 	return func(network, address string, conn syscall.RawConn) error {
 		if (opt.network == 4 && !destination.Unmap().Is4()) || (opt.network == 6 && !destination.Is6()) {
-			return errors.New("ICMP destination does not match the DIRECT IP version")
+			return errors.New("socket destination does not match the configured IP version")
+		}
+		routingMark := opt.routingMark
+		if routingMark == 0 {
+			routingMark = int(DefaultRoutingMark.Load())
 		}
 		if DefaultSocketHook != nil {
-			return DefaultSocketHook(network, address, conn)
+			if err := DefaultSocketHook(network, address, conn); err != nil {
+				return err
+			}
+			return managedOutboundControl(routingMark)(context.Background(), network, address, conn)
 		}
 		dialer := &net.Dialer{}
 		interfaceName := opt.interfaceName
@@ -221,13 +236,10 @@ func ICMPControlWithOptions(destination netip.Addr, options ...Option) func(netw
 				return err
 			}
 		}
-		routingMark := opt.routingMark
-		if routingMark == 0 {
-			routingMark = int(DefaultRoutingMark.Load())
-		}
 		if routingMark != 0 {
 			bindMarkToDialer(routingMark, dialer, network, destination)
 		}
+		addControlToDialer(dialer, managedOutboundControl(routingMark))
 		if dialer.ControlContext != nil {
 			return dialer.ControlContext(context.TODO(), network, address, conn)
 		}

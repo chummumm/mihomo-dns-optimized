@@ -27,6 +27,7 @@ import (
 	"github.com/metacubex/mihomo/component/process"
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/sniffer"
+	"github.com/metacubex/mihomo/component/transparentproxy"
 	"github.com/metacubex/mihomo/component/trie"
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
@@ -55,6 +56,8 @@ type General struct {
 	IPv6                     bool                    `json:"ipv6"`
 	Interface                string                  `json:"interface-name"`
 	RoutingMark              int                     `json:"routing-mark"`
+	TransparentProxy         transparentproxy.Config `json:"transparent-proxy"`
+	IPTables                 IPTables                `json:"iptables"`
 	GeoXUrl                  GeoXUrl                 `json:"geox-url"`
 	GeoAutoUpdate            bool                    `json:"geo-auto-update"`
 	GeoUpdateInterval        int                     `json:"geo-update-interval"`
@@ -133,10 +136,10 @@ type Experimental struct {
 
 // IPTables config
 type IPTables struct {
-	Enable           bool
-	InboundInterface string
-	Bypass           []string
-	DnsRedirect      bool
+	Enable           bool     `json:"enable"`
+	InboundInterface string   `json:"inbound-interface"`
+	Bypass           []string `json:"bypass"`
+	DnsRedirect      bool     `json:"dns-redirect"`
 }
 
 // NTP config
@@ -469,6 +472,7 @@ type RawConfig struct {
 	Secret                   string                  `yaml:"secret" json:"secret"`
 	Interface                string                  `yaml:"interface-name" json:"interface-name"`
 	RoutingMark              int                     `yaml:"routing-mark" json:"routing-mark"`
+	TransparentProxy         transparentproxy.Config `yaml:"transparent-proxy" json:"transparent-proxy"`
 	Tunnels                  []LC.Tunnel             `yaml:"tunnels" json:"tunnels"`
 	GeoAutoUpdate            bool                    `yaml:"geo-auto-update" json:"geo-auto-update"`
 	GeoUpdateInterval        GeoUpdateInterval       `yaml:"geo-update-interval" json:"geo-update-interval"`
@@ -529,6 +533,7 @@ func DefaultRawConfig() *RawConfig {
 		ExternalUIUpdateInterval: 24,
 		CoreAutoUpdate:           false,
 		CoreUpdateInterval:       24,
+		TransparentProxy:         transparentproxy.DefaultConfig(),
 		GeodataMode:              geodata.GeodataMode(),
 		GeodataLoader:            "memconservative",
 		UnifiedDelay:             false,
@@ -703,6 +708,7 @@ func parseRawConfig(rawCfg *RawConfig) (*Config, error) {
 		return nil, err
 	}
 	config.IPTables = iptables
+	config.General.IPTables = *iptables
 
 	ntpCfg, err := parseNTP(rawCfg)
 	if err != nil {
@@ -807,6 +813,9 @@ func parseRawConfig(rawCfg *RawConfig) (*Config, error) {
 func temporaryUpdateGeneral(general *General) func()
 
 func parseGeneral(cfg *RawConfig) (*General, error) {
+	if err := validateTransparentProxy(cfg); err != nil {
+		return nil, err
+	}
 	const maxUpdateHours = int64(1<<63-1) / int64(time.Hour)
 	for _, schedule := range []struct {
 		name  string
@@ -840,13 +849,14 @@ func parseGeneral(cfg *RawConfig) (*General, error) {
 			InboundTfo:        cfg.InboundTfo,
 			InboundMPTCP:      cfg.InboundMPTCP,
 		},
-		DNSRuleRouting: cfg.DNSRuleRouting,
-		UnifiedDelay:   cfg.UnifiedDelay,
-		Mode:           cfg.Mode,
-		LogLevel:       cfg.LogLevel,
-		IPv6:           cfg.IPv6,
-		Interface:      cfg.Interface,
-		RoutingMark:    cfg.RoutingMark,
+		DNSRuleRouting:   cfg.DNSRuleRouting,
+		UnifiedDelay:     cfg.UnifiedDelay,
+		Mode:             cfg.Mode,
+		LogLevel:         cfg.LogLevel,
+		IPv6:             cfg.IPv6,
+		Interface:        cfg.Interface,
+		RoutingMark:      cfg.RoutingMark,
+		TransparentProxy: cfg.TransparentProxy.Clone(),
 		GeoXUrl: GeoXUrl{
 			GeoIp:   cfg.GeoXUrl.GeoIp,
 			Mmdb:    cfg.GeoXUrl.Mmdb,
@@ -898,7 +908,7 @@ func parseExperimental(cfg *RawConfig) (*Experimental, error) {
 
 func parseIPTables(cfg *RawConfig) (*IPTables, error) {
 	return &IPTables{
-		Enable:           cfg.IPTables.Enable,
+		Enable:           cfg.IPTables.Enable && !cfg.TransparentProxy.Enable,
 		InboundInterface: cfg.IPTables.InboundInterface,
 		Bypass:           cfg.IPTables.Bypass,
 		DnsRedirect:      cfg.IPTables.DnsRedirect,
@@ -1785,7 +1795,9 @@ func parseAuthentication(rawRecords []string) []auth.AuthUser {
 }
 
 func parseIPV6(rawCfg *RawConfig) {
-	if !rawCfg.IPv6 || !verifyIP6() {
+	// Managed capture follows IPv6 availability after startup. Keep the user's
+	// IPv6 intent when an address has not arrived yet, so it can recover later.
+	if !rawCfg.IPv6 || (!rawCfg.TransparentProxy.Enable && !verifyIP6()) {
 		rawCfg.DNS.FakeIPRange6 = ""
 		rawCfg.Tun.Inet6Address = nil
 	}
@@ -1803,7 +1815,7 @@ func parseTun(rawTun RawTun, dns *DNS, general *General) error {
 		Device:              rawTun.Device,
 		Stack:               rawTun.Stack,
 		DNSHijack:           rawTun.DNSHijack,
-		AutoRoute:           rawTun.AutoRoute,
+		AutoRoute:           rawTun.AutoRoute && !general.TransparentProxy.Enable,
 		AutoDetectInterface: rawTun.AutoDetectInterface,
 
 		MTU:                                   rawTun.MTU,
@@ -1813,7 +1825,7 @@ func parseTun(rawTun RawTun, dns *DNS, general *General) error {
 		Inet6Address:                          rawTun.Inet6Address,
 		IPRoute2TableIndex:                    rawTun.IPRoute2TableIndex,
 		IPRoute2RuleIndex:                     rawTun.IPRoute2RuleIndex,
-		AutoRedirect:                          rawTun.AutoRedirect,
+		AutoRedirect:                          rawTun.AutoRedirect && !general.TransparentProxy.Enable,
 		AutoRedirectInputMark:                 rawTun.AutoRedirectInputMark,
 		AutoRedirectOutputMark:                rawTun.AutoRedirectOutputMark,
 		AutoRedirectIPRoute2FallbackRuleIndex: rawTun.AutoRedirectIPRoute2FallbackRuleIndex,

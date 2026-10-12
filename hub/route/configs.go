@@ -1,6 +1,8 @@
 package route
 
 import (
+	"errors"
+	"fmt"
 	"net/netip"
 	"path/filepath"
 
@@ -8,6 +10,7 @@ import (
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/process"
 	"github.com/metacubex/mihomo/component/resolver"
+	"github.com/metacubex/mihomo/component/transparentproxy"
 	"github.com/metacubex/mihomo/component/updater"
 	"github.com/metacubex/mihomo/config"
 	C "github.com/metacubex/mihomo/constant"
@@ -42,6 +45,7 @@ type configSchema struct {
 	TProxyPort        *int                     `json:"tproxy-port"`
 	MixedPort         *int                     `json:"mixed-port"`
 	DNSRuleRouting    *bool                    `json:"dns-rule-routing"`
+	TransparentProxy  *transparentproxy.Config `json:"transparent-proxy"`
 	Tun               *tunSchema               `json:"tun"`
 	TuicServer        *tuicServerSchema        `json:"tuic-server"`
 	ShadowSocksConfig *string                  `json:"ss-config"`
@@ -63,7 +67,7 @@ type configSchema struct {
 }
 
 type tunSchema struct {
-	Enable              bool        `yaml:"enable" json:"enable"`
+	Enable              *bool       `yaml:"enable" json:"enable"`
 	Device              *string     `yaml:"device" json:"device"`
 	Stack               *C.TUNStack `yaml:"stack" json:"stack"`
 	DNSHijack           *[]string   `yaml:"dns-hijack" json:"dns-hijack"`
@@ -147,7 +151,9 @@ func pointerOrDefault[T any](p *T, def T) T {
 
 func pointerOrDefaultTun(p *tunSchema, def LC.Tun) LC.Tun {
 	if p != nil {
-		def.Enable = p.Enable
+		if p.Enable != nil {
+			def.Enable = *p.Enable
+		}
 		if p.Device != nil {
 			def.Device = *p.Device
 		}
@@ -337,72 +343,101 @@ func patchConfigs(w http.ResponseWriter, r *http.Request) {
 		render.JSON(w, r, ErrBadRequest)
 		return
 	}
-	// This switch also rebuilds resolver policies and bootstrap paths. A
-	// scalar PATCH must never leave the old DNS resolver running underneath.
-	if general.DNSRuleRouting != nil {
-		render.Status(r, http.StatusBadRequest)
-		render.JSON(w, r, newError("dns-rule-routing requires a full configuration reload using PUT /configs"))
+	status := http.StatusInternalServerError
+	err := executor.ApplyConfigPatch(func() error {
+		// These settings change resources outside a scalar controller patch.
+		// Reject them before any other value in the same request is applied.
+		if general.DNSRuleRouting != nil {
+			status = http.StatusBadRequest
+			return fmt.Errorf("dns-rule-routing requires a full configuration reload using PUT /configs")
+		}
+		if general.TransparentProxy != nil {
+			status = http.StatusBadRequest
+			return fmt.Errorf("transparent-proxy requires a full configuration reload using PUT /configs")
+		}
+		if general.IPv6 != nil && transparentproxy.IsEnabled() {
+			status = http.StatusBadRequest
+			return fmt.Errorf("ipv6 requires a full configuration reload while transparent-proxy is enabled")
+		}
+		policy := transparentproxy.CurrentConfig()
+		if general.TProxyPort != nil && (*general.TProxyPort < 0 || *general.TProxyPort > 65535) {
+			status = http.StatusBadRequest
+			return fmt.Errorf("tproxy-port must be 0..65535")
+		}
+		if policy.Uses(transparentproxy.ModeTProxy) && general.TProxyPort != nil && *general.TProxyPort == 0 {
+			status = http.StatusBadRequest
+			return fmt.Errorf("change transparent-proxy tcp/udp in YAML before disabling its selected tproxy-port")
+		}
+		if policy.Uses(transparentproxy.ModeTUN) && general.Tun != nil && general.Tun.Enable != nil && !*general.Tun.Enable {
+			status = http.StatusBadRequest
+			return fmt.Errorf("change transparent-proxy tcp/udp in YAML before disabling its selected tun listener")
+		}
+
+		if general.AllowLan != nil {
+			listener.SetAllowLan(*general.AllowLan)
+		}
+
+		if general.SkipAuthPrefixes != nil {
+			inbound.SetSkipAuthPrefixes(*general.SkipAuthPrefixes)
+		}
+
+		if general.LanAllowedIPs != nil {
+			inbound.SetAllowedIPs(*general.LanAllowedIPs)
+		}
+
+		if general.LanDisAllowedIPs != nil {
+			inbound.SetDisAllowedIPs(*general.LanDisAllowedIPs)
+		}
+
+		if general.BindAddress != nil {
+			listener.SetBindAddress(*general.BindAddress)
+		}
+
+		if general.Sniffing != nil {
+			tunnel.SetSniffing(*general.Sniffing)
+		}
+
+		if general.TcpConcurrent != nil {
+			dialer.SetTcpConcurrent(*general.TcpConcurrent)
+		}
+
+		if general.InterfaceName != nil {
+			dialer.DefaultInterface.Store(*general.InterfaceName)
+		}
+
+		ports := listener.GetPorts()
+
+		listener.ReCreateHTTP(pointerOrDefault(general.Port, ports.Port), tunnel.Tunnel)
+		listener.ReCreateSocks(pointerOrDefault(general.SocksPort, ports.SocksPort), tunnel.Tunnel)
+		listener.ReCreateRedir(pointerOrDefault(general.RedirPort, ports.RedirPort), tunnel.Tunnel)
+		patchErr := listener.ReCreateTProxy(pointerOrDefault(general.TProxyPort, ports.TProxyPort), tunnel.Tunnel)
+		listener.ReCreateMixed(pointerOrDefault(general.MixedPort, ports.MixedPort), tunnel.Tunnel)
+		patchErr = errors.Join(patchErr, listener.ReCreateTun(pointerOrDefaultTun(general.Tun, listener.GetLastTunConf()), tunnel.Tunnel))
+		listener.ReCreateShadowSocks(pointerOrDefault(general.ShadowSocksConfig, ports.ShadowSocksConfig), tunnel.Tunnel)
+		listener.ReCreateVmess(pointerOrDefault(general.VmessConfig, ports.VmessConfig), tunnel.Tunnel)
+		listener.ReCreateTuic(pointerOrDefaultTuicServer(general.TuicServer, listener.LastTuicConf), tunnel.Tunnel)
+
+		if general.Mode != nil {
+			tunnel.SetMode(*general.Mode)
+		}
+
+		if general.FindProcessMode != nil {
+			tunnel.SetFindProcessMode(*general.FindProcessMode)
+		}
+
+		if general.LogLevel != nil {
+			log.SetLevel(*general.LogLevel)
+		}
+
+		if general.IPv6 != nil {
+			resolver.DisableIPv6 = !*general.IPv6
+		}
+		return patchErr
+	})
+	if err != nil {
+		render.Status(r, status)
+		render.JSON(w, r, newError(err.Error()))
 		return
-	}
-
-	if general.AllowLan != nil {
-		listener.SetAllowLan(*general.AllowLan)
-	}
-
-	if general.SkipAuthPrefixes != nil {
-		inbound.SetSkipAuthPrefixes(*general.SkipAuthPrefixes)
-	}
-
-	if general.LanAllowedIPs != nil {
-		inbound.SetAllowedIPs(*general.LanAllowedIPs)
-	}
-
-	if general.LanDisAllowedIPs != nil {
-		inbound.SetDisAllowedIPs(*general.LanDisAllowedIPs)
-	}
-
-	if general.BindAddress != nil {
-		listener.SetBindAddress(*general.BindAddress)
-	}
-
-	if general.Sniffing != nil {
-		tunnel.SetSniffing(*general.Sniffing)
-	}
-
-	if general.TcpConcurrent != nil {
-		dialer.SetTcpConcurrent(*general.TcpConcurrent)
-	}
-
-	if general.InterfaceName != nil {
-		dialer.DefaultInterface.Store(*general.InterfaceName)
-	}
-
-	ports := listener.GetPorts()
-
-	listener.ReCreateHTTP(pointerOrDefault(general.Port, ports.Port), tunnel.Tunnel)
-	listener.ReCreateSocks(pointerOrDefault(general.SocksPort, ports.SocksPort), tunnel.Tunnel)
-	listener.ReCreateRedir(pointerOrDefault(general.RedirPort, ports.RedirPort), tunnel.Tunnel)
-	listener.ReCreateTProxy(pointerOrDefault(general.TProxyPort, ports.TProxyPort), tunnel.Tunnel)
-	listener.ReCreateMixed(pointerOrDefault(general.MixedPort, ports.MixedPort), tunnel.Tunnel)
-	listener.ReCreateTun(pointerOrDefaultTun(general.Tun, listener.LastTunConf), tunnel.Tunnel)
-	listener.ReCreateShadowSocks(pointerOrDefault(general.ShadowSocksConfig, ports.ShadowSocksConfig), tunnel.Tunnel)
-	listener.ReCreateVmess(pointerOrDefault(general.VmessConfig, ports.VmessConfig), tunnel.Tunnel)
-	listener.ReCreateTuic(pointerOrDefaultTuicServer(general.TuicServer, listener.LastTuicConf), tunnel.Tunnel)
-
-	if general.Mode != nil {
-		tunnel.SetMode(*general.Mode)
-	}
-
-	if general.FindProcessMode != nil {
-		tunnel.SetFindProcessMode(*general.FindProcessMode)
-	}
-
-	if general.LogLevel != nil {
-		log.SetLevel(*general.LogLevel)
-	}
-
-	if general.IPv6 != nil {
-		resolver.DisableIPv6 = !*general.IPv6
 	}
 
 	render.NoContent(w, r)
@@ -455,7 +490,11 @@ func updateConfigs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	executor.ApplyConfig(cfg, force)
+	if err := executor.ApplyConfig(cfg, force); err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, newError(err.Error()))
+		return
+	}
 	render.NoContent(w, r)
 }
 

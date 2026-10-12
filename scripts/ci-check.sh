@@ -15,6 +15,10 @@ case "${1:-test}" in
       ./adapter ./common/arc/... ./common/lru/... ./common/net/... ./common/singleflight/... ./component/trie/... ./component/fakeip/... ./component/dnsmessage/... ./component/dnsstats/... ./component/process/... ./component/resolver/... ./component/resource/... ./component/geodata/... ./component/mmdb/... ./component/updater/... ./context/... ./dns/... ./listener/sing_tun/... ./transport/socks4/... ./transport/socks5/... \
       ./tunnel/... ./rules/logic/... ./rules/provider/... ./adapter/provider/... ./config/... \
       ./hub/route/... ./hub/executor/...
+    CGO_ENABLED=0 go test -tags with_gvisor -count=1 -timeout=5m \
+      ./component/transparentproxy ./component/dialer ./listener ./listener/tproxy
+    CGO_ENABLED=1 go test -race -tags with_gvisor -count=1 -timeout=5m \
+      ./component/transparentproxy ./component/dialer ./listener ./listener/tproxy
     CGO_ENABLED=0 go test -tags with_gvisor ./dns -run '^$' \
       -bench '^BenchmarkRedirHostFilter$' -benchmem -benchtime=200ms -count=1
     CGO_ENABLED=0 go test -tags with_gvisor ./component/dnsstats -run '^$' \

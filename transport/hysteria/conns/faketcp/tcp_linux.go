@@ -4,6 +4,7 @@
 package faketcp
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -394,6 +395,12 @@ func (conn *TCPConn) SyscallConn() (syscall.RawConn, error) {
 // Dial connects to the remote TCP port,
 // and returns a single packet-oriented connection
 func Dial(network, address string) (*TCPConn, error) {
+	return DialContext(context.Background(), network, address, nil)
+}
+
+// DialContext protects both native sockets before their first packet. A
+// caller-supplied control carries the adapter's complete interface/mark policy.
+func DialContext(ctx context.Context, network, address string, control func(string, string, syscall.RawConn) error) (*TCPConn, error) {
 	// init gopacket.layers
 	layers.Init()
 	// remote address resolve
@@ -402,36 +409,26 @@ func Dial(network, address string) (*TCPConn, error) {
 		return nil, err
 	}
 
-	var lTcpAddr *net.TCPAddr
-	var lIpAddr *net.IPAddr
-	rAddrPort := raddr.AddrPort()
-	ifaceName := dialer.DefaultInterface.Load()
-	if ifaceName == "" {
-		if finder := dialer.DefaultInterfaceFinder.Load(); finder != nil {
-			ifaceName = finder.FindInterfaceName(rAddrPort.Addr().Unmap())
-		}
-	}
-	if len(ifaceName) > 0 {
-		addr, err := dialer.LookupLocalAddrFromIfaceName(ifaceName, network, rAddrPort.Addr(), int(rAddrPort.Port()))
-		if err != nil {
-			return nil, err
-		}
-		lTcpAddr = addr.(*net.TCPAddr)
-		lIpAddr = &net.IPAddr{IP: lTcpAddr.IP}
+	if control == nil {
+		control = dialer.SocketControlWithOptions(raddr.AddrPort().Addr().Unmap())
 	}
 
 	// AF_INET
-	handle, err := net.DialIP("ip:tcp", lIpAddr, &net.IPAddr{IP: raddr.IP})
+	nativeDialer := &net.Dialer{Control: control}
+	ipConn, err := nativeDialer.DialContext(ctx, "ip:tcp", (&net.IPAddr{IP: raddr.IP, Zone: raddr.Zone}).String())
 	if err != nil {
 		return nil, err
 	}
+	handle := ipConn.(*net.IPConn)
 
 	// create an established tcp connection
 	// will hack this tcp connection for packet transmission
-	tcpconn, err := net.DialTCP(network, lTcpAddr, raddr)
+	tcp, err := nativeDialer.DialContext(ctx, network, raddr.String())
 	if err != nil {
+		handle.Close()
 		return nil, err
 	}
+	tcpconn := tcp.(*net.TCPConn)
 
 	// fields
 	conn := new(TCPConn)
@@ -451,6 +448,7 @@ func Dial(network, address string) (*TCPConn, error) {
 	// iptables
 	err = setTTL(tcpconn, 1)
 	if err != nil {
+		conn.Close()
 		return nil, err
 	}
 

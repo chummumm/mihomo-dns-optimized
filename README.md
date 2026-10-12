@@ -6,7 +6,7 @@
 
 [下载 Releases](https://github.com/chummumm/mihomo-optimized/releases) · [构建状态](https://github.com/chummumm/mihomo-optimized/actions/workflows/build.yml) · [完整配置说明](docs/dns-proxy.md) · [验证记录](docs/dns-rule-routing-validation.md)
 
-**配置入口：** [完整配置示例](#完整配置示例) · [面板与内核自动更新](#面板与内核自动更新) · [DNS 可选字段](#可选-dns-设置) · [共享连接例外](#共享-dns-连接与单个上游例外) · [旧配置迁移](#旧配置迁移与停用范围)
+**配置入口：** [完整配置示例](#完整配置示例) · [面板与内核自动更新](#面板与内核自动更新) · [Linux 透明代理与自动路由恢复](#linux-透明代理与自动路由恢复) · [DNS 可选字段](#可选-dns-设置) · [共享连接例外](#共享-dns-连接与单个上游例外) · [旧配置迁移](#旧配置迁移与停用范围)
 
 ## 解决什么问题
 
@@ -39,7 +39,7 @@ UDP、TCP 和 DoT 上游在实际出口固定时共享连接，多个查询通�
 
 新增的 DNS 面板数据由本机控制器提供，查询记录、趋势和上游统计只保存在进程内存中，不写数据库或日志文件，也不发送遥测。无需维护第二份分流规则；观测不会改变 DNS 回答和出口选择。优化范围、缓存安全边界及测试方式见 [DNS 性能说明](docs/dns-performance.md)。
 
-正式版本采用 **`mihomo-optimized-vX.Y.Z`**，当前为 `mihomo-optimized-v1.0.5`。tag、发行标题、`version.txt` 和运行内核版本一致；`PROJECT_VERSION` 记录独立项目版本，上游 mihomo 的版本与提交另存于 `UPSTREAM_VERSION` / `UPSTREAM_COMMIT`。源码哈希保留在 BUILDINFO 中。**旧版 `v1.19.32-optimized-N` 及更早内核首次切换到新系列，需要手动安装一次**；新系列随后可通过 YAML 启用内核后台检查和更新，详见[更新说明](docs/releases.md#内核自动更新)。
+正式版本采用 **`mihomo-optimized-vX.Y.Z`**，当前为 `mihomo-optimized-v1.0.6`。tag、发行标题、`version.txt` 和运行内核版本一致；`PROJECT_VERSION` 记录独立项目版本，上游 mihomo 的版本与提交另存于 `UPSTREAM_VERSION` / `UPSTREAM_COMMIT`。源码哈希保留在 BUILDINFO 中。**旧版 `v1.19.32-optimized-N` 及更早内核首次切换到新系列，需要手动安装一次**；新系列随后可通过 YAML 启用内核后台检查和更新，详见[更新说明](docs/releases.md#内核自动更新)。
 
 ## DNS 状态与原版面板
 
@@ -132,7 +132,54 @@ geo-update-interval: 24 # 整数小时，默认 24，范围 1..2562047
 
 从内核 `1.0.5` 起，完整重载会实际应用 GeoData 自动更新的开关和间隔：关闭会取消旧自动任务，开启会根据已使用数据库的更新时间决定是否立即检查；相同策略保留原计时，修改间隔后按新间隔计时。启动、启用时发现缺失或过期的数据会尝试更新，首次检查失败仍保留后续定期检查。间隔使用与面板、内核一致的整数小时范围，停止更新使用 `geo-auto-update: false`。具体行为见 [GeoData 自动更新调度](docs/dashboard-management.md#geodata-自动更新调度)。
 
-Linux 的 TCP / UDP 独立接管、事件驱动路由恢复与可配置标记 / 路由表另有[透明代理托管方案](docs/transparent-proxy-plan.md)。**这是设计文档，尚未实现；当前版本不要添加其中的 `transparent-proxy` 字段，也不能依靠它恢复手写路由。**
+## Linux 透明代理与自动路由恢复
+
+从内核 `1.0.6` 起，新增默认关闭的顶层 `transparent-proxy`。TCP、UDP 可分别选择 `tproxy`、`tun` 或 `"off"`；内核维护 IPv4 / IPv6 捕获、fwmark 规则、路由与动态接口前缀。以下示例对应 **TCP 走 TProxy、UDP 走 TUN**，沿用已有 DNS、节点与业务规则：
+
+```yaml
+ipv6: true
+tproxy-port: 7895
+tun:
+  enable: true
+  device: utun
+  auto-detect-interface: true
+  auto-route: false
+  auto-redirect: false
+
+transparent-proxy:
+  enable: true
+  tcp: tproxy
+  udp: tun
+  routing:
+    tproxy:
+      mark: 0x1
+      table: 100
+      priority: 1000 # 1001 同时用于终止黑洞保护
+    tun:
+      mark: 0x162
+      table: 101
+      priority: 1010 # 1011 同时用于终止黑洞保护
+  local:
+    enable: true
+    interfaces: [eth0] # [auto] 按 IPv4 / IPv6 分别选择当前出口
+    bypass-users: [mihomo] # 额外排除；不默认排除 root
+    bypass-udp-ports: [123]
+  gateway:
+    enable: true
+    interfaces: ["*"]
+  bypass:
+    reserved-addresses: true
+    interface-prefixes: [eth0] # LAN 委派前缀应填写实际 LAN 接口
+    extra-addresses: []
+```
+
+表号与 mark 均可自定义，两个后端使用独立资源。mark 为完整 32 位精确匹配；priority 明确设置且每组保留后一位。TProxy 保留 Linux 官方示例的 `local 0/0 dev lo`，TUN 使用实际设备的默认路由；捕获链使用标准 `mangle` 优先级和 OUTPUT route 链。详细默认值、官方依据和冲突处理见[透明代理与路由托管](docs/transparent-proxy-plan.md)。
+
+**TUN 重建前先同步确认已启用地址族的黑洞保护，成功后才关闭旧设备；保护失败会中止重建。** 开启 IPv6 时同时保护双栈。常驻黑洞不依赖 TUN，设备意外消失或单条查表规则被删时，也阻止已标记流量回落到 main 表。新设备与监听器实际就绪后才恢复转发。相同有效配置重载继续复用 TUN。
+
+正常运行完全由 link / address / route / rule / NETCONF / nftables 事件驱动，**没有 `reconcile-interval` 配置或健康巡检定时器**；失败后的重订阅、事务及缺失后端恢复使用退避重试。IPv4 / IPv6 地址和前缀从实际接口学习，普通 WAN 前缀轮换不重建 TUN。
+
+启用后，旧 `tun.auto-route`、`tun.auto-redirect`、`iptables.enable` 在运行态规范化为关闭，避免两套管理器重复接管；磁盘 YAML 保留原文，关闭新模块后恢复旧字段语义。首次迁移需一次性去掉手写 nftables 接管表、systemd `ExecStartPost` / `ExecStop` 路由命令和更新前缀的 cron，并清理它们原来创建的规则；保留其他防火墙。模块遇到外部同编号资源会报明冲突，不会自动接管或删除。Linux 权限、完整迁移及恢复边界见上述文档。
 
 ## 快速开始
 

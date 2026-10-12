@@ -69,6 +69,39 @@ type Tun struct {
 	ProcessorsPerChannel int `yaml:"processors-per-channel" json:"processors-per-channel,omitempty"`
 }
 
+// Clone separates the requested configuration from listener defaults, sorting
+// and caller-owned slices. Equality must compare stable requested values.
+func (t Tun) Clone() Tun {
+	t.DNSHijack = slices.Clone(t.DNSHijack)
+	t.Inet4Address = slices.Clone(t.Inet4Address)
+	t.Inet6Address = slices.Clone(t.Inet6Address)
+	t.LoopbackAddress = slices.Clone(t.LoopbackAddress)
+	t.RouteAddress = slices.Clone(t.RouteAddress)
+	t.RouteAddressSet = slices.Clone(t.RouteAddressSet)
+	t.RouteExcludeAddress = slices.Clone(t.RouteExcludeAddress)
+	t.RouteExcludeAddressSet = slices.Clone(t.RouteExcludeAddressSet)
+	t.IncludeInterface = slices.Clone(t.IncludeInterface)
+	t.ExcludeInterface = slices.Clone(t.ExcludeInterface)
+	t.IncludeUID = slices.Clone(t.IncludeUID)
+	t.IncludeUIDRange = slices.Clone(t.IncludeUIDRange)
+	t.ExcludeUID = slices.Clone(t.ExcludeUID)
+	t.ExcludeUIDRange = slices.Clone(t.ExcludeUIDRange)
+	t.ExcludeSrcPort = slices.Clone(t.ExcludeSrcPort)
+	t.ExcludeSrcPortRange = slices.Clone(t.ExcludeSrcPortRange)
+	t.ExcludeDstPort = slices.Clone(t.ExcludeDstPort)
+	t.ExcludeDstPortRange = slices.Clone(t.ExcludeDstPortRange)
+	t.IncludeAndroidUser = slices.Clone(t.IncludeAndroidUser)
+	t.IncludePackage = slices.Clone(t.IncludePackage)
+	t.ExcludePackage = slices.Clone(t.ExcludePackage)
+	t.IncludeMACAddress = slices.Clone(t.IncludeMACAddress)
+	t.ExcludeMACAddress = slices.Clone(t.ExcludeMACAddress)
+	t.Inet4RouteAddress = slices.Clone(t.Inet4RouteAddress)
+	t.Inet6RouteAddress = slices.Clone(t.Inet6RouteAddress)
+	t.Inet4RouteExcludeAddress = slices.Clone(t.Inet4RouteExcludeAddress)
+	t.Inet6RouteExcludeAddress = slices.Clone(t.Inet6RouteExcludeAddress)
+	return t
+}
+
 func (t *Tun) Sort() {
 	slices.Sort(t.DNSHijack)
 

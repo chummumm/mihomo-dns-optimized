@@ -15,6 +15,7 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
 	"github.com/metacubex/mihomo/hub/executor"
+	"github.com/metacubex/mihomo/log"
 
 	"github.com/metacubex/chi/render"
 	"github.com/metacubex/http"
@@ -28,17 +29,19 @@ const (
 )
 
 type upgradeCheckItem struct {
-	ID             string `json:"id"`
-	Kind           string `json:"kind"`
-	Name           string `json:"name"`
-	Status         string `json:"status"`
-	CurrentVersion string `json:"current_version,omitempty"`
-	LatestVersion  string `json:"latest_version,omitempty"`
-	AutoUpdate     *bool  `json:"auto_update,omitempty"`
-	UpdateInterval int64  `json:"update_interval,omitempty"`
-	IntervalUnit   string `json:"interval_unit,omitempty"`
-	Reason         string `json:"reason,omitempty"`
-	Error          string `json:"error,omitempty"`
+	ID               string `json:"id"`
+	Kind             string `json:"kind"`
+	Name             string `json:"name"`
+	Status           string `json:"status"`
+	CurrentVersion   string `json:"current_version,omitempty"`
+	LatestVersion    string `json:"latest_version,omitempty"`
+	InstalledVersion string `json:"installed_version,omitempty"`
+	PendingRestart   bool   `json:"pending_restart,omitempty"`
+	AutoUpdate       *bool  `json:"auto_update,omitempty"`
+	UpdateInterval   int64  `json:"update_interval,omitempty"`
+	IntervalUnit     string `json:"interval_unit,omitempty"`
+	Reason           string `json:"reason,omitempty"`
+	Error            string `json:"error,omitempty"`
 }
 
 type upgradeCheckSnapshot struct {
@@ -475,17 +478,17 @@ func buildUpgradeCheckPlan() (*upgradeCheckPlan, error) {
 			}
 			restart := func(path string, commit func() error) error {
 				return executor.ApplyUpdateAndRestart(func() error {
-					if err := cfg.Commit(commit); err != nil {
-						return err
-					}
+					return cfg.Commit(commit)
+				}, func() {
 					coreItem.Status, coreItem.Error = "restarting", ""
+					coreItem.InstalledVersion, coreItem.PendingRestart = coreItem.LatestVersion, true
 					report(coreItem)
 					// Pollers get a stable opportunity to record the expected new
 					// version before this process replaces itself. No network work
 					// or updater lock is held during this bounded notice period.
 					time.Sleep(upgradeRestartNotice)
-					return nil
-				}, func() { restartProcess(path) })
+					restartProcess(path)
+				})
 			}
 			result, err := reservation.CheckAndUpdate(ctx, executable, restart, func(result updater.CoreCheckResult) {
 				coreItem.CurrentVersion, coreItem.LatestVersion = result.CurrentVersion, result.LatestVersion
@@ -495,8 +498,10 @@ func buildUpgradeCheckPlan() (*upgradeCheckPlan, error) {
 			if result.Updated && err == nil {
 				return
 			}
-			coreItem.CurrentVersion, coreItem.LatestVersion = result.CurrentVersion, result.LatestVersion
-			coreItem.Status, coreItem.Error = upgradeItemOutcome(result.Updated, err)
+			if result.Updated && err != nil {
+				log.Errorln("Core file %s is installed but restart failed; this process still runs %s and needs a restart: %s", result.LatestVersion, result.CurrentVersion, err)
+			}
+			coreItem = coreUpgradeOutcome(coreItem, result, err)
 			report(coreItem)
 		}})
 	} else {
@@ -507,6 +512,22 @@ func buildUpgradeCheckPlan() (*upgradeCheckPlan, error) {
 		}
 	}
 	return plan, nil
+}
+
+// Installed bytes and the running process have separate lifetimes. A failed
+// restart must remain actionable instead of looking like a failed download or
+// a successfully activated version. The executable installer retains its own
+// pending-restart guard, so a later task cannot install another core over it.
+func coreUpgradeOutcome(item upgradeCheckItem, result updater.CoreCheckResult, err error) upgradeCheckItem {
+	item.CurrentVersion, item.LatestVersion = result.CurrentVersion, result.LatestVersion
+	item.Status, item.Error = upgradeItemOutcome(result.Updated, err)
+	if result.Updated {
+		item.InstalledVersion, item.PendingRestart = result.LatestVersion, true
+		if err != nil {
+			item.Error = "installed_restart_failed"
+		}
+	}
+	return item
 }
 
 func upgradeItemOutcome(changed bool, err error) (string, string) {
