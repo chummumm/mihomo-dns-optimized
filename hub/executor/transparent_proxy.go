@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"errors"
 	"net/netip"
 	"sync"
 
@@ -48,6 +49,9 @@ func transparentProxyRuntime(cfg *config.Config) transparentproxy.Runtime {
 func ApplyConfigPatch(patch func() error) error {
 	mux.Lock()
 	defer mux.Unlock()
+	if stopping {
+		return ErrShuttingDown
+	}
 	return patch()
 }
 
@@ -58,13 +62,15 @@ func startTransparentProxyRepairs() {
 				// Configuration replacement, shutdown and local recovery share
 				// the same ordering. The manager only sends nonblocking requests
 				// and never waits for this consumer while holding its own lock.
-				mux.Lock()
-				if transparentproxy.IsEnabled() {
-					if err := listener.RepairTransparentBackends(tunnel.Tunnel); err != nil {
-						log.Warnln("[Transparent Proxy] backend recovery: %s", err)
+				err := ApplyConfigPatch(func() error {
+					if !transparentproxy.IsEnabled() {
+						return nil
 					}
+					return listener.RepairTransparentBackends(tunnel.Tunnel)
+				})
+				if err != nil && !errors.Is(err, ErrShuttingDown) {
+					log.Warnln("[Transparent Proxy] backend recovery: %s", err)
 				}
-				mux.Unlock()
 			}
 		}()
 	})

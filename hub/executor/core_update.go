@@ -7,6 +7,9 @@ import "fmt"
 func Restart(restart func()) error {
 	mux.Lock()
 	defer mux.Unlock()
+	if stopping {
+		return ErrShuttingDown
+	}
 	if err := shutdownForRestartLocked(); err != nil {
 		return err
 	}
@@ -21,6 +24,9 @@ func Restart(restart func()) error {
 func ApplyUpdateAndRestart(commit func() error, restart func()) error {
 	mux.Lock()
 	defer mux.Unlock()
+	if stopping {
+		return ErrShuttingDown
+	}
 	if err := commit(); err != nil {
 		return err
 	}

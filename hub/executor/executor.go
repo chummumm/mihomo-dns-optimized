@@ -48,6 +48,13 @@ import (
 
 var mux sync.Mutex
 
+// ErrShuttingDown rejects new configuration work after a normal stop request.
+var ErrShuttingDown = errors.New("mihomo is shutting down")
+
+// Protected by mux. Only Shutdown sets this: a failed controlled restart must
+// still permit the running process to recover through configuration changes.
+var stopping bool
+
 // Serialized by mux. A later configuration's activation must also wait for
 // earlier resets, since they can still touch the shared system resolver.
 var updaterResetDone <-chan struct{}
@@ -97,6 +104,9 @@ func ParseWithBytes(buf []byte) (*config.Config, error) {
 func ApplyConfig(cfg *config.Config, force bool) error {
 	mux.Lock()
 	defer mux.Unlock()
+	if stopping {
+		return ErrShuttingDown
+	}
 	wasManaged := transparentproxy.IsEnabled()
 	if err := beginTransparentProxyApply(cfg.General.TransparentProxy, transparentProxyRuntime(cfg)); err != nil {
 		return fmt.Errorf("apply transparent-proxy: %w", err)
@@ -675,6 +685,10 @@ func updateIPTables(cfg *config.Config) {
 func Shutdown() error {
 	mux.Lock()
 	defer mux.Unlock()
+	// Keep admission closed across cleanup retries and post-down execution.
+	// Releasing mux must never allow a queued controller request to recreate
+	// the TUN or its capture policy after graceful cleanup has completed.
+	stopping = true
 	return shutdownLocked()
 }
 

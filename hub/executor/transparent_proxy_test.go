@@ -16,6 +16,7 @@ import (
 
 func preserveTransparentProxyIntegration(t *testing.T) {
 	t.Helper()
+	preserveStopAdmission(t)
 	begin, finish := beginTransparentProxyApply, finishTransparentProxyApply
 	closePolicy, restartPolicy := closeTransparentProxy, prepareTransparentRestart
 	abort, complete, cleanup := abortTransparentRestart, completeTransparentRestart, cleanupTunListener

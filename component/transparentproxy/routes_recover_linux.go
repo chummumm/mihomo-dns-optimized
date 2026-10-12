@@ -39,9 +39,13 @@ func (s *linuxRouteSystem) RecoverRoutes(ctx context.Context, configured []route
 	if err != nil {
 		return err
 	}
-	loopback, tunLinks, err := s.recoveryLinks(ctx)
-	if err != nil {
-		return err
+	links := observation.Links
+	if links == nil {
+		read, err := s.readRouteLinks(ctx)
+		if err != nil {
+			return err
+		}
+		links = &read
 	}
 	for _, scope := range captures {
 		// One mark cannot prove two different backends. A partially modified
@@ -86,10 +90,10 @@ func (s *linuxRouteSystem) RecoverRoutes(ctx context.Context, configured []route
 				if !sameRoute(owned, blackholeRoute(policy)) {
 					wanted := policy
 					wanted.IfIndex = owned.IfIndex
-					if !sameRoute(owned, activeRoute(wanted, loopback)) || owned.IfIndex <= 0 {
+					if !sameRoute(owned, activeRoute(wanted, links.Loopback)) || owned.IfIndex <= 0 {
 						continue
 					}
-					if policy.Backend == ModeTUN && !tunLinks[owned.IfIndex] {
+					if policy.Backend == ModeTUN && !links.TUN[owned.IfIndex] {
 						continue
 					}
 				}
@@ -120,35 +124,40 @@ func canonicalModuleRule(rule observedRule) bool {
 	return rule.Protocol == linuxOwnerProtocol && rule.MarkSet && rule.Mask == ^uint32(0) && rule.Plain
 }
 
-// A surviving active route may point only to the real loopback/TUN device.
-// A same-table unicast route through an unrelated device remains external even
-// when an administrator gave it our reserved protocol and metric.
-func (s *linuxRouteSystem) recoveryLinks(ctx context.Context) (int, map[int]bool, error) {
+type routeLinkState struct {
+	Loopback   int
+	Interfaces map[string]int
+	TUN        map[int]bool
+}
+
+// Recovering an active route or assessing an output-bound lookup requires the
+// actual device kind, not just a familiar interface name.
+func (s *linuxRouteSystem) readRouteLinks(ctx context.Context) (routeLinkState, error) {
+	state := routeLinkState{Interfaces: make(map[string]int), TUN: make(map[int]bool)}
 	messages, err := s.request.Execute(ctx, unix.RTM_GETLINK, unix.NLM_F_DUMP, make([]byte, 16))
 	if err != nil {
-		return 0, nil, fmt.Errorf("read links for route recovery: %w", err)
+		return state, fmt.Errorf("read links for route verification: %w", err)
 	}
-	loopback := 0
-	tunLinks := make(map[int]bool)
 	seen := make(map[int]bool)
 	for _, message := range messages {
 		if message.Type != unix.RTM_NEWLINK {
-			return 0, nil, fmt.Errorf("%w: unexpected recovery link message", errIncompleteNetlink)
+			return state, fmt.Errorf("%w: unexpected route link message", errIncompleteNetlink)
 		}
 		link, err := decodeNetworkLink(message.Data)
 		if err != nil {
-			return 0, nil, err
+			return state, err
 		}
-		if seen[link.Index] {
-			return 0, nil, fmt.Errorf("%w: duplicate recovery link", errIncompleteNetlink)
+		if seen[link.Index] || state.Interfaces[link.Name] != 0 {
+			return state, fmt.Errorf("%w: duplicate route link", errIncompleteNetlink)
 		}
 		seen[link.Index] = true
+		state.Interfaces[link.Name] = link.Index
 		if link.Name == "lo" && link.Loopback {
-			loopback = link.Index
+			state.Loopback = link.Index
 		}
 		attributes, err := parseWireAttributes(message.Data[16:])
 		if err != nil {
-			return 0, nil, err
+			return state, err
 		}
 		linkInfoSeen := false
 		for _, attribute := range attributes {
@@ -156,24 +165,24 @@ func (s *linuxRouteSystem) recoveryLinks(ctx context.Context) (int, map[int]bool
 				continue
 			}
 			if linkInfoSeen {
-				return 0, nil, fmt.Errorf("%w: duplicate recovery link info", errIncompleteNetlink)
+				return state, fmt.Errorf("%w: duplicate route link info", errIncompleteNetlink)
 			}
 			linkInfoSeen = true
 			info, err := parseWireAttributes(attribute.Data)
 			if err != nil {
-				return 0, nil, err
+				return state, err
 			}
 			kind, data := "", []byte(nil)
 			for _, item := range info {
 				switch item.Type & wireAttributeTypeMask {
 				case unix.IFLA_INFO_KIND:
 					if kind != "" {
-						return 0, nil, fmt.Errorf("%w: duplicate recovery link kind", errIncompleteNetlink)
+						return state, fmt.Errorf("%w: duplicate route link kind", errIncompleteNetlink)
 					}
 					kind = string(item.Data)
 				case unix.IFLA_INFO_DATA:
 					if data != nil {
-						return 0, nil, fmt.Errorf("%w: duplicate recovery link data", errIncompleteNetlink)
+						return state, fmt.Errorf("%w: duplicate route link data", errIncompleteNetlink)
 					}
 					data = item.Data
 				}
@@ -183,7 +192,7 @@ func (s *linuxRouteSystem) recoveryLinks(ctx context.Context) (int, map[int]bool
 			}
 			details, err := parseWireAttributes(data)
 			if err != nil {
-				return 0, nil, err
+				return state, err
 			}
 			typeSeen := false
 			for _, item := range details {
@@ -191,12 +200,12 @@ func (s *linuxRouteSystem) recoveryLinks(ctx context.Context) (int, map[int]bool
 					continue
 				}
 				if typeSeen || len(item.Data) != 1 {
-					return 0, nil, fmt.Errorf("%w: invalid recovery TUN type", errIncompleteNetlink)
+					return state, fmt.Errorf("%w: invalid route TUN type", errIncompleteNetlink)
 				}
 				typeSeen = true
-				tunLinks[link.Index] = item.Data[0] == unix.IFF_TUN
+				state.TUN[link.Index] = item.Data[0] == unix.IFF_TUN
 			}
 		}
 	}
-	return loopback, tunLinks, nil
+	return state, nil
 }

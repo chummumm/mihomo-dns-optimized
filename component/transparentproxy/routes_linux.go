@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"golang.org/x/exp/slices"
 	"golang.org/x/sys/unix"
@@ -40,6 +41,7 @@ type observedRoute struct {
 	Protocol uint8
 	Default  bool
 	Plain    bool
+	Flags    uint32
 }
 
 type observedRule struct {
@@ -48,11 +50,17 @@ type observedRule struct {
 	MarkSet  bool
 	Mask     uint32
 	Plain    bool
+	// An output-device selector is never part of our owned rule identity.
+	// Keep its exact shape separately to assess the native IPv6 TUN helper.
+	OIFName     string
+	OIFOnly     bool
+	OIFDetached bool
 }
 
 type routeObservation struct {
 	Routes  []observedRoute
 	Rules   []observedRule
+	Links   *routeLinkState
 	changed bool
 }
 
@@ -206,6 +214,13 @@ func (s *linuxRouteSystem) routeSnapshot(ctx context.Context) (routeObservation,
 		}
 		observation.Rules = append(observation.Rules, rule)
 	}
+	if slices.ContainsFunc(observation.Rules, func(rule observedRule) bool { return rule.OIFOnly }) {
+		links, err := s.readRouteLinks(ctx)
+		if err != nil {
+			return observation, err
+		}
+		observation.Links = &links
+	}
 	return observation, nil
 }
 
@@ -216,6 +231,7 @@ func decodeObservedRoute(data []byte) (observedRoute, error) {
 	}
 	route.Family, route.Table, route.Protocol, route.Scope, route.Type = data[0], uint32(data[4]), data[5], data[6], data[7]
 	route.Default, route.Plain = data[1] == 0, data[2] == 0 && data[3] == 0
+	route.Flags = wireOrder.Uint32(data[8:12])
 	attributes, err := parseWireAttributes(data[12:])
 	if err != nil {
 		return route, err
@@ -278,7 +294,11 @@ func decodeObservedRule(data []byte) (observedRule, error) {
 		return rule, fmt.Errorf("%w: short rule", errIncompleteNetlink)
 	}
 	rule.Family, rule.Table, rule.Action = data[0], uint32(data[4]), data[7]
-	rule.Plain = data[1] == 0 && data[2] == 0 && data[3] == 0 && wireOrder.Uint32(data[8:12]) == 0
+	flags := wireOrder.Uint32(data[8:12])
+	plainSelector := data[1] == 0 && data[2] == 0 && data[3] == 0
+	rule.Plain = plainSelector && flags == 0
+	oifOnly := plainSelector && flags&^uint32(unix.FIB_RULE_OIF_DETACHED) == 0
+	rule.OIFDetached = flags&unix.FIB_RULE_OIF_DETACHED != 0
 	rule.Mask = ^uint32(0)
 	attributes, err := parseWireAttributes(data[12:])
 	if err != nil {
@@ -298,13 +318,25 @@ func decodeObservedRule(data []byte) (observedRule, error) {
 				rule.Priority = value
 			case unix.FRA_FWMARK:
 				rule.Mark, rule.MarkSet = value, true
+				oifOnly = false
 			case unix.FRA_FWMASK:
 				rule.Mask = value
+				oifOnly = false
 			default:
 				if value != ^uint32(0) {
 					rule.Plain = false
+					oifOnly = false
 				}
 			}
+		case unix.FRA_OIFNAME:
+			if rule.OIFName != "" || len(attribute.Data) < 2 || len(attribute.Data) > unix.IFNAMSIZ || attribute.Data[len(attribute.Data)-1] != 0 {
+				return rule, fmt.Errorf("%w: invalid rule output interface", errIncompleteNetlink)
+			}
+			rule.OIFName = string(attribute.Data[:len(attribute.Data)-1])
+			if strings.IndexByte(rule.OIFName, 0) >= 0 {
+				return rule, fmt.Errorf("%w: embedded null in rule output interface", errIncompleteNetlink)
+			}
+			rule.Plain = false
 		case unix.FRA_PROTOCOL:
 			if len(attribute.Data) != 1 {
 				return rule, fmt.Errorf("%w: invalid rule protocol", errIncompleteNetlink)
@@ -313,8 +345,10 @@ func decodeObservedRule(data []byte) (observedRule, error) {
 		case unix.FRA_PAD:
 		default:
 			rule.Plain = false
+			oifOnly = false
 		}
 	}
+	rule.OIFOnly = oifOnly && rule.OIFName != ""
 	return rule, nil
 }
 
@@ -348,7 +382,7 @@ func (s *linuxRouteSystem) checkRouteConflicts(observation routeObservation, pol
 			// An inverted or otherwise extended selector cannot safely be ruled
 			// out by comparing marks alone. Refuse ambiguous earlier policy.
 			markMatches := !rule.Plain || !rule.MarkSet || policy.Mark&rule.Mask == rule.Mark&rule.Mask
-			if priorityCollision || rule.Priority < policy.Priority && markMatches {
+			if priorityCollision || rule.Priority < policy.Priority && markMatches && !s.safeOutputBoundTUNRule(observation, rule, policies) {
 				return fmt.Errorf("transparent proxy mark %#x or priority pair %d/%d conflicts with external rule %d (family %d)", policy.Mark, policy.Priority, policy.Priority+1, rule.Priority, family)
 			}
 		}
