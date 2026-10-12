@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/metacubex/mihomo/common/cmd"
 	"github.com/metacubex/mihomo/component/age"
@@ -73,10 +75,10 @@ func init() {
 	flag.BoolVar(&geodataMode, "m", false, "set geodata mode")
 	flag.BoolVar(&version, "v", false, "show current version of mihomo")
 	flag.BoolVar(&testConfig, "t", false, "test configuration and exit")
-	flag.Parse()
 }
 
 func main() {
+	flag.Parse()
 	// Defensive programming: panic when code mistakenly calls net.DefaultResolver
 	net.DefaultResolver.PreferGo = true
 	net.DefaultResolver.Dial = func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -212,36 +214,112 @@ func main() {
 		options = append(options, hub.WithSecret(secret))
 	}
 
-	if err := hub.Parse(configBytes, options...); err != nil {
-		log.Fatalln("Parse config error: %s", err.Error())
+	if err := runDaemon(options); err != nil {
+		// runDaemon has completed cleanup before reporting startup failure.
+		log.Fatalln("%s", err)
 	}
+}
 
-	if postDown != "" {
-		defer func() {
+func runDaemon(options []hub.Option) error {
+	termSign := make(chan os.Signal, 1)
+	hupSign := make(chan os.Signal, 1)
+	// Queue stop requests before configuration can create managed resources.
+	// systemd may stop a Type=simple service while its startup is still running.
+	signal.Notify(termSign, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(hupSign, syscall.SIGHUP)
+	defer signal.Stop(termSign)
+	defer signal.Stop(hupSign)
+	stopRequests, stopWatching := relayStopSignals(termSign, executor.RequestShutdown)
+	defer stopWatching()
+	configured := false
+	defer func() {
+		shutdownUntilComplete(executor.Shutdown, stopRequests)
+		if configured && postDown != "" {
 			if _, err := cmd.ExecShell(postDown); err != nil {
 				log.Errorln("post-down script error: %s", err.Error())
 			}
-		}()
+		}
+	}()
+	if err := hub.Parse(configBytes, options...); err != nil {
+		if errors.Is(err, executor.ErrShuttingDown) {
+			return nil
+		}
+		return fmt.Errorf("parse config error: %w", err)
+	}
+	configured = true
+	select {
+	case <-stopRequests:
+		return nil
+	default:
 	}
 	if postUp != "" {
 		if _, err := cmd.ExecShell(postUp); err != nil {
-			log.Fatalln("post-up script error: %s", err.Error())
+			return fmt.Errorf("post-up script error: %w", err)
 		}
 	}
-
-	defer executor.Shutdown()
-
-	termSign := make(chan os.Signal, 1)
-	hupSign := make(chan os.Signal, 1)
-	signal.Notify(termSign, syscall.SIGINT, syscall.SIGTERM)
-	signal.Notify(hupSign, syscall.SIGHUP)
 	for {
 		select {
-		case <-termSign:
-			return
+		case <-stopRequests:
+			return nil
 		case <-hupSign:
 			if err := hub.Parse(configBytes, options...); err != nil {
+				if errors.Is(err, executor.ErrShuttingDown) {
+					return nil
+				}
 				log.Errorln("Parse config error: %s", err.Error())
+			}
+		}
+	}
+}
+
+// Publish stop intent independently of configuration parsing and the executor
+// lock, then wake the existing exit/retry loop. Repeated signals never block
+// this relay while the main goroutine is busy with startup or cleanup.
+func relayStopSignals(received <-chan os.Signal, publish func()) (<-chan os.Signal, func()) {
+	requests := make(chan os.Signal, 1)
+	cancel, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-cancel:
+				return
+			case sig, ok := <-received:
+				if !ok {
+					return
+				}
+				publish()
+				select {
+				case requests <- sig:
+				default:
+				}
+			}
+		}
+	}()
+	return requests, func() { close(cancel); <-done }
+}
+
+// A failed graceful cleanup must not become a successful process exit. Keep
+// runtime ownership available for retries; only an external forced termination
+// can abandon it. The service manager retains control of its stop timeout.
+func shutdownUntilComplete(stop func() error, signals <-chan os.Signal) {
+	delay := 100 * time.Millisecond
+	for {
+		if err := stop(); err == nil {
+			return
+		} else {
+			log.Errorln("Shutdown incomplete; keeping the process alive and retrying owned resource cleanup: %s", err)
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-signals:
+		case <-timer.C:
+		}
+		timer.Stop()
+		if delay < time.Second {
+			delay *= 2
+			if delay > time.Second {
+				delay = time.Second
 			}
 		}
 	}

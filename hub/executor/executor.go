@@ -7,10 +7,10 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 	_ "unsafe"
 
@@ -48,6 +48,21 @@ import (
 )
 
 var mux sync.Mutex
+
+// ErrShuttingDown rejects new configuration work after a normal stop request.
+var ErrShuttingDown = errors.New("mihomo is shutting down")
+
+// Publish stop intent before waiting for mux: another goroutine may own mux
+// while preparing an exec that would discard the waiting shutdown goroutine.
+// Controlled restart failures do not publish a normal stop request.
+var stopping atomic.Bool
+
+// RequestShutdown closes admission immediately, including during startup or
+// restart preparation. Shutdown performs the serialized resource cleanup.
+func RequestShutdown() { stopping.Store(true) }
+
+// ShutdownRequested permits a final check immediately before process exec.
+func ShutdownRequested() bool { return stopping.Load() }
 
 // Serialized by mux. A later configuration's activation must also wait for
 // earlier resets, since they can still touch the shared system resolver.
@@ -98,8 +113,11 @@ func ParseWithBytes(buf []byte) (*config.Config, error) {
 func ApplyConfig(cfg *config.Config, force bool) error {
 	mux.Lock()
 	defer mux.Unlock()
+	if ShutdownRequested() {
+		return ErrShuttingDown
+	}
 	wasManaged := transparentproxy.IsEnabled()
-	if err := beginTransparentProxyApply(filepath.Join(C.Path.HomeDir(), "transparent-proxy"), cfg.General.TransparentProxy, transparentProxyRuntime(cfg)); err != nil {
+	if err := beginTransparentProxyApply(cfg.General.TransparentProxy, transparentProxyRuntime(cfg)); err != nil {
 		return fmt.Errorf("apply transparent-proxy: %w", err)
 	}
 	startTransparentProxyRepairs()
@@ -674,8 +692,12 @@ func updateIPTables(cfg *config.Config) {
 }
 
 func Shutdown() error {
+	RequestShutdown()
 	mux.Lock()
 	defer mux.Unlock()
+	// Keep admission closed across cleanup retries and post-down execution.
+	// Releasing mux must never allow a queued controller request to recreate
+	// the TUN or its capture policy after graceful cleanup has completed.
 	return shutdownLocked()
 }
 
@@ -689,20 +711,26 @@ func shutdownLocked() error {
 }
 
 // A process replacement retains capture and blackhole protection until the
-// next process recovers the same ownership journal. Normal shutdown must not
+// next process verifies the owned kernel resources. Normal shutdown must not
 // use this path, because stopping the service should release its interception.
 func shutdownForRestartLocked() error {
 	if err := prepareTransparentRestart(); err != nil {
 		log.Errorln("Preserve running listeners: prepare transparent-proxy restart: %s", err)
 		return err
 	}
-	if err := shutdownBackendsLocked(); err != nil {
+	err := cleanupTunListener()
+	if err == nil {
+		// Original sysctl values live only in this process. Restore them after
+		// TUN close and before reexec, so the replacement samples a fresh base.
+		err = completeTransparentRestart()
+	}
+	if err != nil {
 		// The manager still owns its observer and namespace lease. Publish
 		// only the listeners that survived cleanup; missing ones recover
 		// through its existing backend repair requests.
 		return errors.Join(err, abortTransparentRestart(listener.TransparentProxyBackends()))
 	}
-	completeTransparentRestart()
+	shutdownBackgroundLocked()
 	return nil
 }
 
@@ -711,6 +739,11 @@ func shutdownBackendsLocked() error {
 		log.Errorln("Close TUN listener: %s", err)
 		return err
 	}
+	shutdownBackgroundLocked()
+	return nil
+}
+
+func shutdownBackgroundLocked() {
 	invalidateUpdateConfiguration()
 	updater.StopAutomaticUpdates()
 	tproxy.CleanupTProxyIPTables()
@@ -718,5 +751,4 @@ func shutdownBackendsLocked() error {
 	closeDNSResolvers()
 
 	log.Warnln("Mihomo shutting down")
-	return nil
 }

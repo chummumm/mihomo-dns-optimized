@@ -179,7 +179,11 @@ transparent-proxy:
 
 正常运行完全由 link / address / route / rule / NETCONF / nftables 事件驱动，**没有 `reconcile-interval` 配置或健康巡检定时器**；失败后的重订阅、事务及缺失后端恢复使用退避重试。IPv4 / IPv6 地址和前缀从实际接口学习，普通 WAN 前缀轮换不重建 TUN。
 
-启用后，旧 `tun.auto-route`、`tun.auto-redirect`、`iptables.enable` 在运行态规范化为关闭，避免两套管理器重复接管；磁盘 YAML 保留原文，关闭新模块后恢复旧字段语义。首次迁移需一次性去掉手写 nftables 接管表、systemd `ExecStartPost` / `ExecStop` 路由命令和更新前缀的 cron，并清理它们原来创建的规则；保留其他防火墙。模块遇到外部同编号资源会报明冲突，不会自动接管或删除。Linux 权限、完整迁移及恢复边界见上述文档。
+**不创建 `transparent-proxy/` 子目录、状态文件或额外恢复日志，也不把日志存进 nftables。** 只有实际工作的捕获规则、集合、路由和策略规则；启动按 YAML 与这些实际资源核对，运行时状态只在内存中保存。本模块不增加配置目录的写权限要求。
+
+**`systemctl stop mihomo` / SIGTERM 正常停止会先撤捕获，再清理自有策略规则、路由、nftables 链、集合和表，最后关闭 TUN。** 清理失败保留当次内存状态并重试；不会因忽略错误而提前成功退出。主动重启和内核自更新则保留交接期间的黑洞与阻断规则，由新进程接回。系统参数在正常停止、受控重启时按本次进程保存的原值条件恢复；异常退出后新进程以当前系统值为基线，不能追溯上个进程丢失的原值。
+
+启用后，旧 `tun.auto-route`、`tun.auto-redirect`、`iptables.enable` 在运行态规范化为关闭，避免两套管理器重复接管；磁盘 YAML 保留原文，关闭新模块后恢复旧字段语义。首次迁移需一次性去掉手写 nftables 接管表、systemd `ExecStartPost` / `ExecStop` 路由命令和更新前缀的 cron，并清理它们原来创建的规则；保留其他防火墙。固定的工作对象标识、专用路由协议及完整结构共同界定本模块资源；不匹配的外部资源保留，发生实际冲突时报错。Linux 权限、完整迁移及恢复边界见上述文档。
 
 ## 快速开始
 

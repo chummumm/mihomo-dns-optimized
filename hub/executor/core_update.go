@@ -7,10 +7,19 @@ import "fmt"
 func Restart(restart func()) error {
 	mux.Lock()
 	defer mux.Unlock()
+	if ShutdownRequested() {
+		return ErrShuttingDown
+	}
 	if err := shutdownForRestartLocked(); err != nil {
 		return err
 	}
+	if ShutdownRequested() {
+		return ErrShuttingDown
+	}
 	restart()
+	if ShutdownRequested() {
+		return ErrShuttingDown
+	}
 	return nil
 }
 
@@ -21,12 +30,24 @@ func Restart(restart func()) error {
 func ApplyUpdateAndRestart(commit func() error, restart func()) error {
 	mux.Lock()
 	defer mux.Unlock()
+	if ShutdownRequested() {
+		return ErrShuttingDown
+	}
 	if err := commit(); err != nil {
 		return err
+	}
+	if ShutdownRequested() {
+		return fmt.Errorf("core file installed but restart canceled by shutdown: %w", ErrShuttingDown)
 	}
 	if err := shutdownForRestartLocked(); err != nil {
 		return fmt.Errorf("core file installed but restart preparation failed; the current process is still running the previous core version: %w", err)
 	}
+	if ShutdownRequested() {
+		return fmt.Errorf("core file installed but restart canceled by shutdown: %w", ErrShuttingDown)
+	}
 	restart()
+	if ShutdownRequested() {
+		return fmt.Errorf("core file installed but restart canceled by shutdown: %w", ErrShuttingDown)
+	}
 	return nil
 }

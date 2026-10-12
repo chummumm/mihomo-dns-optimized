@@ -52,6 +52,14 @@ type routePolicy struct {
 	Ready    bool
 }
 
+// captureScope is read from an existing packet-classification rule. It is not
+// a separate recovery record; these are the actual marks used by the firewall.
+type captureScope struct {
+	Backend Mode
+	Mark    uint32
+	IPv6    bool
+}
+
 type networkInterface struct {
 	Index    int
 	Name     string
@@ -73,9 +81,9 @@ type networkState struct {
 type systemEvent struct{ Err error }
 
 type routeSystem interface {
-	Owner() string
 	Watch(context.Context) (<-chan systemEvent, io.Closer, error)
 	Snapshot(context.Context) (networkState, error)
+	RecoverRoutes(context.Context, []routePolicy, []captureScope) error
 	EnsureRoutes(context.Context, []routePolicy) error
 	PruneRoutes(context.Context, []routePolicy) error
 	QuiesceTUN(context.Context) error
@@ -111,6 +119,7 @@ type firewallState struct {
 }
 
 type firewall interface {
+	RecoverScopes(context.Context) ([]captureScope, bool, error)
 	Apply(context.Context, firewallState) error
 	Close(context.Context) error
 }

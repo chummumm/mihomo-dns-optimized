@@ -3,7 +3,6 @@ package executor
 import (
 	"errors"
 	"net/netip"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -17,6 +16,7 @@ import (
 
 func preserveTransparentProxyIntegration(t *testing.T) {
 	t.Helper()
+	preserveStopAdmission(t)
 	begin, finish := beginTransparentProxyApply, finishTransparentProxyApply
 	closePolicy, restartPolicy := closeTransparentProxy, prepareTransparentRestart
 	abort, complete, cleanup := abortTransparentRestart, completeTransparentRestart, cleanupTunListener
@@ -34,10 +34,7 @@ func TestTransparentApplyFailurePrecedesConfigurationSideEffects(t *testing.T) {
 	active := CurrentUpdateConfiguration()
 	previousLevel := log.Level()
 	rejected := errors.New("unable to commit route protection")
-	beginTransparentProxyApply = func(stateDir string, cfg transparentproxy.Config, runtime transparentproxy.Runtime) error {
-		if stateDir != filepath.Join(C.Path.HomeDir(), "transparent-proxy") {
-			t.Fatalf("ownership journal was not isolated to its module directory: %s", stateDir)
-		}
+	beginTransparentProxyApply = func(cfg transparentproxy.Config, runtime transparentproxy.Runtime) error {
 		if !cfg.Enable || !runtime.IPv6 {
 			t.Fatal("begin did not receive candidate policy and IPv6 intent")
 		}
@@ -98,6 +95,36 @@ func TestTransparentShutdownBarrierFailurePreservesLiveConfiguration(t *testing.
 	}
 }
 
+func TestNormalStopRemovesCaptureBeforeClosingBackendAndCancelingWork(t *testing.T) {
+	preserveTransparentProxyIntegration(t)
+	preserveUpdateConfiguration(t)
+	previousUI := updater.CurrentUIUpdater()
+	t.Cleanup(func() { updater.SetUIUpdater(previousUI) })
+	publishUpdateConfiguration(&config.Config{General: &config.General{}})
+	active := CurrentUpdateConfiguration()
+	var order []string
+	closeTransparentProxy = func() error {
+		if active.Context.Err() != nil {
+			t.Fatal("background work canceled before managed capture cleanup")
+		}
+		order = append(order, "remove capture and restore originals")
+		return nil
+	}
+	cleanupTunListener = func() error {
+		if active.Context.Err() != nil {
+			t.Fatal("background work canceled before TUN cleanup")
+		}
+		order = append(order, "close TUN")
+		return nil
+	}
+	if err := Shutdown(); err != nil {
+		t.Fatal(err)
+	}
+	if active.Context.Err() == nil || !reflect.DeepEqual(order, []string{"remove capture and restore originals", "close TUN"}) {
+		t.Fatalf("unsafe normal stop ordering: %v", order)
+	}
+}
+
 func TestControlledRestartProtectsBeforeCancelAndProcessReplacement(t *testing.T) {
 	preserveTransparentProxyIntegration(t)
 	preserveUpdateConfiguration(t)
@@ -107,7 +134,13 @@ func TestControlledRestartProtectsBeforeCancelAndProcessReplacement(t *testing.T
 	active := CurrentUpdateConfiguration()
 	var order []string
 	closeTransparentProxy = func() error { t.Fatal("controlled replacement removed capture"); return nil }
-	completeTransparentRestart = func() { order = append(order, "complete handoff") }
+	completeTransparentRestart = func() error {
+		if active.Context.Err() != nil {
+			t.Fatal("background work canceled before sysctl originals were restored")
+		}
+		order = append(order, "complete handoff")
+		return nil
+	}
 	prepareTransparentRestart = func() error {
 		if active.Context.Err() != nil {
 			t.Fatal("updates were canceled before restart protection succeeded")
@@ -154,7 +187,7 @@ func TestRestartCleanupFailureAbortsHandoffBeforeCancelingOtherWork(t *testing.T
 		order = append(order, "restore actual backends")
 		return nil
 	}
-	completeTransparentRestart = func() { order = append(order, "complete") }
+	completeTransparentRestart = func() error { order = append(order, "complete"); return nil }
 	restart := func() { order = append(order, "exec") }
 	if err := Restart(restart); !errors.Is(err, cleanupErr) {
 		t.Fatalf("cleanup failure was hidden: %v", err)
@@ -168,6 +201,34 @@ func TestRestartCleanupFailureAbortsHandoffBeforeCancelingOtherWork(t *testing.T
 	}
 	if active.Context.Err() == nil || !reflect.DeepEqual(order, []string{"prepare", "close TUN", "complete", "exec"}) {
 		t.Fatalf("retry bypassed the protection or final shutdown boundary: %v", order)
+	}
+}
+
+func TestRestartSysctlRestorationFailureAbortsBeforeCancelingOtherWork(t *testing.T) {
+	preserveTransparentProxyIntegration(t)
+	preserveUpdateConfiguration(t)
+	publishUpdateConfiguration(&config.Config{General: &config.General{}})
+	active := CurrentUpdateConfiguration()
+	restoreErr := errors.New("could not restore original sysctl")
+	var order []string
+	prepareTransparentRestart = func() error { order = append(order, "protect capture"); return nil }
+	cleanupTunListener = func() error { order = append(order, "close TUN"); return nil }
+	completeTransparentRestart = func() error {
+		if active.Context.Err() != nil {
+			t.Fatal("background work canceled before sysctl restoration")
+		}
+		order = append(order, "restore originals")
+		return restoreErr
+	}
+	abortTransparentRestart = func(transparentproxy.BackendState) error {
+		order = append(order, "recover backends")
+		return nil
+	}
+	if err := Restart(func() { t.Fatal("restart ignored sysctl restoration failure") }); !errors.Is(err, restoreErr) {
+		t.Fatalf("restoration failure was hidden: %v", err)
+	}
+	if active.Context.Err() != nil || !reflect.DeepEqual(order, []string{"protect capture", "close TUN", "restore originals", "recover backends"}) {
+		t.Fatalf("failed restoration abandoned the live configuration: %v", order)
 	}
 }
 

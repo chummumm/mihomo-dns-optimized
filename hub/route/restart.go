@@ -1,10 +1,12 @@
 package route
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"syscall"
 
 	"github.com/metacubex/mihomo/component/updater"
@@ -49,16 +51,37 @@ func restart(w http.ResponseWriter, r *http.Request) {
 }
 
 func restartAndRespond(w http.ResponseWriter, r *http.Request, execPath string) error {
-	return executor.Restart(func() {
-		render.JSON(w, r, render.M{"status": "ok"})
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
+	acknowledged := false
+	err := executor.Restart(func() {
+		writeRestartAcknowledgment(w)
+		acknowledged = true
 		restartProcess(execPath)
 	})
+	// A stop can supersede restart after the acknowledgment was flushed.
+	// The response is already complete; appending a second error would corrupt it.
+	if acknowledged && errors.Is(err, executor.ErrShuttingDown) {
+		return nil
+	}
+	return err
+}
+
+func writeRestartAcknowledgment(w http.ResponseWriter) {
+	const body = "{\"status\":\"ok\"}\n"
+	// Exec does not return through the HTTP handler. Without an explicit length,
+	// Flush starts a chunked response whose final chunk would never be written.
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(body))
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 func restartProcess(execPath string) {
+	if executor.ShutdownRequested() {
+		return
+	}
 	var err error
 	if runtime.GOOS == "windows" {
 		cmd := exec.Command(execPath, os.Args[1:]...)
@@ -66,6 +89,9 @@ func restartProcess(execPath string) {
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
+		if executor.ShutdownRequested() {
+			return
+		}
 		err = cmd.Start()
 		if err != nil {
 			log.Fatalln("restarting: %s", err)
@@ -75,6 +101,9 @@ func restartProcess(execPath string) {
 	}
 
 	log.Infoln("restarting: %q %q", execPath, os.Args[1:])
+	if executor.ShutdownRequested() {
+		return
+	}
 	err = syscall.Exec(execPath, os.Args, os.Environ())
 	if err != nil {
 		log.Fatalln("restarting: %s", err)

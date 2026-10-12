@@ -4,11 +4,11 @@ package transparentproxy
 
 import "errors"
 
-func newRouteSystem(string) (routeSystem, error) {
+func newRouteSystem() (routeSystem, error) {
 	return nil, errors.New("transparent-proxy is supported only on Linux")
 }
 
-func newFirewall(string) (firewall, error) {
+func newFirewall() (firewall, error) {
 	return nil, errors.New("transparent-proxy is supported only on Linux")
 }
 

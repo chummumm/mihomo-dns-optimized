@@ -17,6 +17,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// Linux UAPI enum nft_table_attributes; absent from the pinned x/sys version.
+const nftTableUserdata = 6
+
 type nftRuleState struct {
 	rule        *nftables.Rule
 	comment     string
@@ -37,6 +40,7 @@ type nftSetState struct {
 type nftSnapshot struct {
 	generation uint32
 	table      *nftables.Table
+	comment    string
 	chains     map[string]*nftChainState
 	sets       map[string]*nftSetState
 }
@@ -46,7 +50,7 @@ type nftSnapshot struct {
 // treating partial rule descriptions as equal (or endlessly rewriting them).
 // The paired writer uses the same nftables expression types with a generation
 // guard; wireConn owns transport completeness for both reads and writes.
-func readNFTSnapshot(ctx context.Context, owner string) (*nftSnapshot, error) {
+func readNFTSnapshot(ctx context.Context) (*nftSnapshot, error) {
 	connection, err := newWireConn(unix.NETLINK_NETFILTER, 0)
 	if err != nil {
 		return nil, err
@@ -81,6 +85,10 @@ func readNFTSnapshot(ctx context.Context, owner string) (*nftSnapshot, error) {
 		return nil, err
 	}
 	snapshot.table = &nftables.Table{Name: name, Family: nftables.TableFamilyINet, Flags: flags}
+	snapshot.comment, err = nftUserdataString(attributes[nftTableUserdata], byte(userdata.TypeComment))
+	if err != nil {
+		return nil, err
+	}
 
 	request = appendWireAttribute(nil, unix.NFTA_CHAIN_TABLE, []byte(nftTableName+"\x00"))
 	messages, err = nftQuery(ctx, connection, unix.NFT_MSG_GETCHAIN, unix.NLM_F_DUMP, request)
@@ -117,7 +125,7 @@ func readNFTSnapshot(ctx context.Context, owner string) (*nftSnapshot, error) {
 			return nil, errors.New("nftables returned a duplicate set")
 		}
 		snapshot.sets[set.set.Name] = set
-		if set.set.Name != "owner" && !strings.HasPrefix(set.set.Comment, nftOwner(owner)+"/set/") {
+		if !strings.HasPrefix(set.set.Comment, nftModule+"/set/") {
 			continue
 		}
 		request := appendWireAttribute(nil, unix.NFTA_SET_ELEM_LIST_TABLE, []byte(nftTableName+"\x00"))

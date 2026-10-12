@@ -43,15 +43,17 @@ func TestRoutesKernelBlackholeBarrier(t *testing.T) {
 		t.Fatal("refusing route integration in the parent namespace")
 	}
 	ctx := context.Background()
-	instance, err := newRouteSystem(t.TempDir())
+	instance, err := newRouteSystem()
 	if err != nil {
 		t.Fatal(err)
 	}
 	system := instance.(*linuxRouteSystem)
-	defer system.Close()
 	defer func() {
 		if err := system.CloseRoutes(ctx); err != nil {
 			t.Errorf("owned route cleanup: %v", err)
+		}
+		if err := system.Close(); err != nil {
+			t.Errorf("route transport cleanup: %v", err)
 		}
 	}()
 	for _, path := range []string{"net/ipv6/conf/all/disable_ipv6", "net/ipv6/conf/default/disable_ipv6"} {
@@ -179,13 +181,34 @@ func TestRoutesKernelBlackholeBarrier(t *testing.T) {
 	}
 	tunFD = -1
 	probe("closed-after-quiesce", false)
+	// A replacement core has no file, inherited descriptor or old Go state.
+	// It must discover these exact working blackholes and rules from the same
+	// YAML, keep packets blocked, then attach the new TUN's actual index.
+	if err := system.Close(); err != nil {
+		t.Fatal(err)
+	}
+	instance, err = newRouteSystem()
+	if err != nil {
+		t.Fatal(err)
+	}
+	system = instance.(*linuxRouteSystem)
+	for i := range policies {
+		policies[i].Ready, policies[i].IfIndex = false, 0
+	}
+	if err := system.RecoverRoutes(ctx, policies, nil); err != nil {
+		t.Fatalf("recover actual kernel protection without a journal: %v", err)
+	}
+	if err := system.EnsureRoutes(ctx, policies); err != nil {
+		t.Fatal(err)
+	}
+	probe("fresh-process-keeps-blackholes", false)
 	oldIndex := tunIndex
 	tunFD, tunIndex = openKernelTestTUN(t)
 	if tunIndex == oldIndex {
 		t.Fatal("replacement TUN did not get a new test interface index")
 	}
 	for i := range policies {
-		policies[i].IfIndex = tunIndex
+		policies[i].IfIndex, policies[i].Ready = tunIndex, true
 	}
 	if err := system.EnsureRoutes(ctx, policies); err != nil {
 		t.Fatal(err)

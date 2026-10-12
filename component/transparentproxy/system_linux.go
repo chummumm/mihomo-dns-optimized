@@ -3,11 +3,7 @@
 package transparentproxy
 
 import (
-	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,33 +19,32 @@ import (
 
 const linuxOwnerProtocol = 197
 
-type routeManifest struct {
-	Version   int
-	Namespace string
-	Owner     string
-	Policies  []routePolicy
-	Routes    []ownedRoute
-	Rules     []ownedRule
-	Sysctls   []ownedSysctl
+// routeState lives only in this process. A fresh process discovers working
+// routes from YAML and the actual capture rules; it never inherits sysctl
+// originals from a previous process or reads/writes an ownership file.
+type routeState struct {
+	Policies []routePolicy
+	Routes   []ownedRoute
+	Rules    []ownedRule
+	Sysctls  []ownedSysctl
 }
 
 type linuxRouteSystem struct {
 	mu        sync.Mutex
 	request   *wireConn
-	manifest  routeManifest
-	owner     string
-	statePath string
+	state     routeState
 	lease     int
 	closeOnce sync.Once
 	closeErr  error
-	// procRoot and writeState permit isolated filesystem/transaction tests.
-	procRoot   string
-	writeState func() error
+	// Tests use a private proc tree and can model kernel sysctl side effects.
+	procRoot          string
+	beforeSysctlWrite func(path, value string) error
 }
 
-func newRouteSystem(stateDir string) (routeSystem, error) {
+func newRouteSystem() (routeSystem, error) {
 	// Linux abstract Unix sockets are scoped to the network namespace. One
-	// fixed lease prevents two config homes from managing the same namespace.
+	// fixed lease prevents two config homes from managing the same namespace,
+	// without creating a filesystem socket or any other file.
 	lease, err := unix.Socket(unix.AF_UNIX, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
@@ -63,16 +58,8 @@ func newRouteSystem(stateDir string) (routeSystem, error) {
 		_ = unix.Close(lease)
 		return nil, err
 	}
-	s := &linuxRouteSystem{request: request, statePath: filepath.Join(stateDir, "state.json"), lease: lease, procRoot: "/proc/sys"}
-	if err := s.loadManifest(); err != nil {
-		_ = s.Close()
-		return nil, err
-	}
-	s.owner = s.manifest.Owner
-	return s, nil
+	return &linuxRouteSystem{request: request, lease: lease, procRoot: "/proc/sys"}, nil
 }
-
-func (s *linuxRouteSystem) Owner() string { return s.owner }
 
 func (s *linuxRouteSystem) Close() error {
 	s.closeOnce.Do(func() {
@@ -86,120 +73,24 @@ func (s *linuxRouteSystem) Close() error {
 	return s.closeErr
 }
 
-func (s *linuxRouteSystem) loadManifest() error {
-	var stat unix.Stat_t
-	if err := unix.Stat("/proc/self/ns/net", &stat); err != nil {
-		return err
-	}
-	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
-	if err != nil {
-		return err
-	}
-	bootID := strings.TrimSpace(string(boot))
-	if len(bootID) != 36 || strings.ContainsAny(bootID, "/\x00\n\r") {
-		return errors.New("invalid kernel boot identity")
-	}
-	// Namespace inodes can be reused after a reboot. A previous boot's journal
-	// must never authorize deletion of the new boot's identically numbered FIB.
-	namespace := fmt.Sprintf("%s:%x:%x", bootID, stat.Dev, stat.Ino)
-	if err := os.MkdirAll(filepath.Dir(s.statePath), 0o700); err != nil {
-		return err
-	}
-	info, err := os.Lstat(s.statePath)
-	if err == nil {
-		if !info.Mode().IsRegular() || info.Size() > 1<<20 {
-			return errors.New("invalid transparent proxy ownership file")
-		}
-		if info.Mode().Perm() != 0o600 {
-			return errors.New("transparent proxy ownership file must have mode 0600")
-		}
-		data, err := os.ReadFile(s.statePath)
-		if err != nil {
-			return err
-		}
-		decoder := json.NewDecoder(bytes.NewReader(data))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&s.manifest); err != nil {
-			return fmt.Errorf("invalid transparent proxy ownership: %w", err)
-		}
-		if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
-			return errors.New("trailing transparent proxy ownership data")
-		}
-		if s.manifest.Version != 1 {
-			return errors.New("unsupported transparent proxy ownership version")
-		}
-		if owner, err := hex.DecodeString(s.manifest.Owner); err != nil || len(owner) != 16 {
-			return errors.New("invalid transparent proxy owner")
-		}
-		if s.manifest.Namespace == namespace {
-			return validateRouteManifest(s.manifest)
-		}
-		// A record from another network namespace (including an earlier boot)
-		// authorizes no deletion or sysctl restoration in this namespace.
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	var owner [16]byte
-	if _, err := rand.Read(owner[:]); err != nil {
-		return err
-	}
-	s.manifest = routeManifest{Version: 1, Namespace: namespace, Owner: hex.EncodeToString(owner[:])}
-	return s.persistManifest()
-}
-
-func (s *linuxRouteSystem) persistManifest() error {
-	if s.writeState != nil {
-		return s.writeState()
-	}
-	data, err := json.MarshalIndent(s.manifest, "", "  ")
-	if err != nil {
-		return err
-	}
-	file, err := os.CreateTemp(filepath.Dir(s.statePath), ".state-")
-	if err != nil {
-		return err
-	}
-	name := file.Name()
-	defer os.Remove(name)
-	if _, err = file.Write(data); err == nil {
-		err = file.Sync()
-	}
-	err = errors.Join(err, file.Close())
-	if err != nil {
-		return err
-	}
-	if err := os.Rename(name, s.statePath); err != nil {
-		return err
-	}
-	directory, err := os.Open(filepath.Dir(s.statePath))
-	if err != nil {
-		return err
-	}
-	return errors.Join(directory.Sync(), directory.Close())
-}
-
-// Journal changes must reach disk before their corresponding kernel writes.
-// A failed write also restores the in-memory journal, so a later retry cannot
-// mistake unpersisted intent for ownership established by an earlier process.
-func (s *linuxRouteSystem) updateManifest(update func(*routeManifest)) error {
-	previous := s.manifest
+// Remember this process's exact resources before a kernel operation so a
+// partial failure can be retried or cleaned up by the same process. Nothing is
+// serialized or passed to a replacement process.
+func (s *linuxRouteSystem) updateState(update func(*routeState)) error {
+	previous := s.state
 	next := previous
 	next.Policies = slices.Clone(previous.Policies)
 	next.Routes = slices.Clone(previous.Routes)
 	next.Rules = slices.Clone(previous.Rules)
 	next.Sysctls = slices.Clone(previous.Sysctls)
 	update(&next)
-	if err := validateRouteManifest(next); err != nil {
+	if err := validateRouteState(next); err != nil {
 		return err
 	}
 	if slices.Equal(previous.Policies, next.Policies) && slices.Equal(previous.Routes, next.Routes) && slices.Equal(previous.Rules, next.Rules) && slices.Equal(previous.Sysctls, next.Sysctls) {
 		return nil
 	}
-	s.manifest = next
-	if err := s.persistManifest(); err != nil {
-		s.manifest = previous
-		return err
-	}
+	s.state = next
 	return nil
 }
 
