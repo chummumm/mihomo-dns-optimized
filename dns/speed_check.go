@@ -12,11 +12,13 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/log"
 	"github.com/metacubex/mihomo/tunnel"
 
 	D "github.com/miekg/dns"
@@ -30,6 +32,8 @@ const (
 	defaultSpeedCheckConcurrency = 16
 	maxSpeedCheckConcurrency     = 256
 	maxSpeedCheckCandidates      = 256
+	maxSpeedCheckModes           = 4
+	speedCheckStageInterval      = 100 * time.Millisecond
 )
 
 // DefaultMaxReplyIPNum matches SmartDNS's default upper bound for optimized
@@ -51,6 +55,17 @@ type SpeedCheckConfig struct {
 
 type speedCheckMode struct {
 	port uint16 // zero denotes ICMP echo
+	syn  bool
+}
+
+func (m speedCheckMode) String() string {
+	if m.port == 0 {
+		return "ping"
+	}
+	if m.syn {
+		return "tcp-syn:" + strconv.Itoa(int(m.port))
+	}
+	return "tcp:" + strconv.Itoa(int(m.port))
 }
 
 type speedCheckProbe func(context.Context, netip.Addr, speedCheckMode) (time.Duration, error)
@@ -65,6 +80,7 @@ type directSpeedChecker struct {
 	probe         speedCheckProbe
 	candidates    *dnsCandidateCache
 	pool          *dnsProbePool
+	synWarning    sync.Once
 }
 
 // ValidateSpeedCheckConfig also validates disabled configurations, so a typo
@@ -88,7 +104,7 @@ func newDirectSpeedChecker(config SpeedCheckConfig) (*directSpeedChecker, error)
 		return nil, fmt.Errorf("dns.max-reply-ip-num must be between 1 and %d (or 0 for default)", int64(math.MaxInt32))
 	}
 	var modes []speedCheckMode
-	seen := make(map[string]bool)
+	seen := make(map[speedCheckMode]bool)
 	for _, value := range config.Mode {
 		value = strings.TrimSpace(strings.ToLower(value))
 		if value == "none" {
@@ -97,22 +113,34 @@ func newDirectSpeedChecker(config SpeedCheckConfig) (*directSpeedChecker, error)
 			}
 			return nil, nil
 		}
-		if seen[value] {
-			continue
-		}
-		seen[value] = true
+		var mode speedCheckMode
 		switch {
 		case value == "ping":
-			modes = append(modes, speedCheckMode{})
-		case strings.HasPrefix(value, "tcp:"):
-			port, err := strconv.ParseUint(strings.TrimPrefix(value, "tcp:"), 10, 16)
+		case value == "tcp" || value == "tcp-syn" || strings.HasPrefix(value, "tcp:") || strings.HasPrefix(value, "tcp-syn:"):
+			name, portValue, hasPort := strings.Cut(value, ":")
+			if !hasPort {
+				portValue = "80"
+			}
+			port, err := strconv.ParseUint(portValue, 10, 16)
 			if err != nil || port == 0 {
 				return nil, fmt.Errorf("dns.speed-check-mode: invalid TCP port in %q", value)
 			}
-			modes = append(modes, speedCheckMode{port: uint16(port)})
+			if name == "tcp-syn" {
+				if err := validateTCPSYNPlatform(); err != nil {
+					return nil, err
+				}
+			}
+			mode = speedCheckMode{port: uint16(port), syn: name == "tcp-syn"}
 		default:
 			return nil, fmt.Errorf("dns.speed-check-mode: unsupported mode %q", value)
 		}
+		if !seen[mode] {
+			seen[mode] = true
+			modes = append(modes, mode)
+		}
+	}
+	if len(modes) > maxSpeedCheckModes {
+		return nil, fmt.Errorf("dns.speed-check-mode supports at most %d distinct stages", maxSpeedCheckModes)
 	}
 	if len(modes) == 0 {
 		return nil, nil
@@ -235,15 +263,10 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 			}
 		}()
 	}
-	probes := make(chan speedCheckResult, maxSpeedCheckCandidates)
-	var tickets []*dnsProbeTicket
-	releaseTickets := func() {
-		for _, ticket := range tickets {
-			ticket.Release()
-		}
-		tickets = nil
-	}
-	defer releaseTickets()
+	stages := newSpeedCheckStages(probeCtx, s, probe)
+	defer stages.close()
+	stageTimer := time.NewTicker(speedCheckStageInterval)
+	defer stageTimer.Stop()
 
 	var firstResponse *D.Msg
 	var firstAddressResponse *D.Msg
@@ -252,17 +275,14 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 	var best *speedCheckResult
 	var responses []*D.Msg
 	measurements := make(map[netip.Addr]time.Duration)
-	probeSkipped := false
-	seen := make(map[netip.Addr]bool)
-	remaining, pending := len(clients), 0
+	remaining := len(clients)
 	finish := func() (*D.Msg, bool, error) {
 		if best != nil {
 			answer := speedCheckAnswer(ctx, *best, query.Question[0], responses, measurements, s.maxReplyIPNum)
 			return answer, true, nil
 		}
 		if firstAddressResponse != nil {
-			answer := speedCheckLimitAnswer(firstAddressResponse, query.Question[0], s.maxReplyIPNum)
-			inheritDNSAnswerLifetime(ctx, answer, firstAddressResponse)
+			answer := speedCheckUnmeasuredAnswer(ctx, firstAddressResponse, query.Question[0], responses, s.maxReplyIPNum)
 			return answer, true, nil
 		}
 		if firstResponse != nil {
@@ -278,21 +298,39 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 		}
 		return nil, true, errors.New("all DNS requests failed")
 	}
-	recordProbe := func(result speedCheckResult) {
-		pending--
+	recordProbe := func(attempt speedCheckAttemptResult) {
+		result, waiting := stages.record(attempt)
+		if !waiting {
+			return
+		}
 		// A cached/shared result still belongs to this waiter's measurements.
-		// Skipped or failed probes never become zero-RTT/reachability evidence.
+		// Skipped and canceled attempts never become reachability evidence.
 		if measurements, ok := ctx.Value(dnsProbeMeasurementsKey{}).(*dualStackMeasurements); ok {
 			measurements.observe(result.candidate.ip, result.rtt, result.err)
 		}
+		if errors.Is(result.err, errTCPSYNUnavailable) {
+			s.synWarning.Do(func() { log.Warnln("[DNS] %v", result.err) })
+		}
 		if result.err == nil && result.rtt >= 0 {
-			measurements[result.candidate.ip] = result.rtt
+			if previous, exists := measurements[result.candidate.ip]; !exists || result.rtt < previous {
+				measurements[result.candidate.ip] = result.rtt
+			}
 			if best == nil || result.rtt < best.rtt || (result.rtt == best.rtt && result.candidate.ip.Less(best.candidate.ip)) {
 				best = &result
 			}
 		}
 	}
-	for remaining > 0 || pending > 0 {
+	drainProbes := func() {
+		for {
+			select {
+			case result := <-stages.results:
+				recordProbe(result)
+			default:
+				return
+			}
+		}
+	}
+	for remaining > 0 || len(stages.attempts) > 0 || (optimizing && stages.canAdvance()) {
 		if dnsQueryClosed(ctx) {
 			return nil, true, tunnel.ErrDNSNativeQueryClosed
 		}
@@ -301,18 +339,18 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 			return finish()
 		case <-probeDone:
 			optimizing, probeDone = false, nil
-			releaseTickets()
 			// Prefer any measurements already delivered when the timer fired.
-			for pending > 0 {
-				select {
-				case result := <-probes:
-					recordProbe(result)
-				default:
-					pending = 0
-				}
-			}
+			drainProbes()
+			stages.close()
 			if firstResponse != nil || policyRejected {
 				return finish()
+			}
+		case <-stageTimer.C:
+			if optimizing {
+				// A delivered success ends stage escalation, even if its channel
+				// became ready at exactly the same time as this tick.
+				drainProbes()
+				stages.advance()
 			}
 		case result := <-upstreams:
 			remaining--
@@ -367,36 +405,21 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 				firstAddressResponse = result.message
 			}
 			for _, candidate := range candidates {
-				if seen[candidate.ip] || len(seen) >= maxSpeedCheckCandidates {
-					continue
-				}
-				seen[candidate.ip] = true
-				candidate := candidate
-				ticket, err := s.pool.submit(probeCtx, dnsProbeScope(ctx, candidate.ip),
-					func(workCtx context.Context) (time.Duration, error) { return s.checkIP(workCtx, candidate.ip, probe) },
-					func(rtt time.Duration, err error) { probes <- speedCheckResult{candidate, rtt, err} })
-				if err != nil {
-					probeSkipped = true
-					continue
-				}
-				pending++
-				if ticket != nil {
-					tickets = append(tickets, ticket)
-				}
+				stages.add(candidate)
 			}
-		case result := <-probes:
+		case result := <-stages.results:
 			if optimizing {
 				recordProbe(result)
-				if !earlyOffered && mode == ResponseModeFirstPing && best != nil {
-					earlyOffered = true
-					answer, _, _ := finish()
-					if !deliverDNSEarlyResponse(ctx, answer) {
-						return answer, true, nil
-					}
-				}
 			}
 		}
-		if probeSkipped && pending == 0 && firstResponse != nil {
+		if !earlyOffered && mode == ResponseModeFirstPing && best != nil {
+			earlyOffered = true
+			answer, _, _ := finish()
+			if !deliverDNSEarlyResponse(ctx, answer) {
+				return answer, true, nil
+			}
+		}
+		if stages.skipped && len(stages.attempts) == 0 && !stages.canAdvance() && firstResponse != nil {
 			return finish()
 		}
 	}
@@ -404,7 +427,7 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 }
 
 func speedCheckQuestion(message *D.Msg) bool {
-	if message.CheckingDisabled || speedCheckProtected(message) {
+	if message.CheckingDisabled || speedCheckQueryProtected(message) {
 		return false
 	}
 	if opt := message.IsEdns0(); opt != nil && opt.Do() {
@@ -466,7 +489,17 @@ func speedCheckAddress(rr D.RR) (netip.Addr, bool) {
 }
 
 func speedCheckProtected(message *D.Msg) bool {
-	if message.AuthenticatedData || message.IsTsig() != nil {
+	return message != nil && (message.AuthenticatedData || speedCheckQueryProtected(message))
+}
+
+// AD in a query advertises that the client understands authenticated replies;
+// it does not authenticate the question. Actual message signatures remain an
+// end-to-end boundary for both questions and replies.
+func speedCheckQueryProtected(message *D.Msg) bool {
+	if message == nil {
+		return false
+	}
+	if message.IsTsig() != nil {
 		return true
 	}
 	for _, section := range [][]D.RR{message.Answer, message.Ns, message.Extra} {
@@ -479,52 +512,37 @@ func speedCheckProtected(message *D.Msg) bool {
 	return false
 }
 
-func (s *directSpeedChecker) checkIP(ctx context.Context, ip netip.Addr, probe speedCheckProbe) (time.Duration, error) {
+func (s *directSpeedChecker) checkMode(ctx context.Context, ip netip.Addr, mode speedCheckMode, probe speedCheckProbe) (time.Duration, error) {
 	if err := ctx.Err(); err != nil {
-		return 0, err
+		return 0, errDNSProbeNotStarted
 	}
 	select {
 	case s.slots <- struct{}{}:
 		defer func() { <-s.slots }()
 	case <-ctx.Done():
-		return 0, ctx.Err()
+		return 0, errDNSProbeNotStarted
 	default:
 		return 0, errDNSProbeBusy
 	}
-	var lastError error
-	for i, mode := range s.modes {
-		if err := ctx.Err(); err != nil {
-			return 0, err
-		}
-		deadline, _ := ctx.Deadline()
-		// Reserve a fair share for fallback modes: an unresponsive TCP port
-		// must not consume the entire budget and prevent TCP:80 or ping.
-		modeCtx, cancel := context.WithTimeout(ctx, time.Until(deadline)/time.Duration(len(s.modes)-i))
-		rtt, err := probe(modeCtx, ip, mode)
-		cancel()
-		if err == nil {
-			return rtt, nil
-		}
-		lastError = err
+	if ctx.Err() != nil {
+		return 0, errDNSProbeNotStarted
 	}
-	return 0, lastError
+	return probe(ctx, ip, mode)
 }
 
 func probeDirectIP(ctx context.Context, ip netip.Addr, mode speedCheckMode) (time.Duration, error) {
 	if mode.port == 0 {
 		return pingDirectIP(ctx, ip)
 	}
-	start := time.Now()
+	if mode.syn {
+		return probeTCPSYN(ctx, ip, mode.port)
+	}
 	// Numeric addresses avoid DNS recursion. The low-level dialer preserves
 	// Mihomo's socket/interface policy without entering tunnel rule matching
 	// or adding synthetic connection entries to the traffic panel.
-	conn, err := dialer.DialContext(ctx, "tcp", netip.AddrPortFrom(ip, mode.port).String())
-	if err != nil {
-		return 0, err
-	}
-	rtt := time.Since(start)
-	_ = conn.Close()
-	return rtt, nil
+	return measureTCPConnect(ctx, func(ctx context.Context) (net.Conn, error) {
+		return dialer.DialContext(ctx, "tcp", netip.AddrPortFrom(ip, mode.port).String(), dialer.WithTFO(false))
+	})
 }
 
 func pingDirectIP(ctx context.Context, ip netip.Addr, options ...dialer.Option) (time.Duration, error) {

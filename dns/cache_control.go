@@ -19,19 +19,13 @@ import (
 // A nil option preserves upstream behavior: expired answers have TTL 1, no
 // maximum stale age, and there is no proactive prefetch.
 type CacheOptions struct {
-	ServeExpired         bool
-	ServeExpiredTTL      time.Duration
-	ServeExpiredReplyTTL uint32
-	Prefetch             bool
+	ServeExpired             bool
+	ServeExpiredTTL          time.Duration
+	ServeExpiredReplyTTL     uint32
+	Prefetch                 bool
+	PrefetchMode             PrefetchMode
+	ServeExpiredPrefetchTime time.Duration
 }
-
-const (
-	cacheHotCapacity       = 1024
-	cacheHotThreshold      = 3
-	cacheHotWindow         = time.Minute
-	cacheRefreshMinPeriod  = time.Second
-	cacheRefreshRetryDelay = 10 * time.Second
-)
 
 // Shared by all resolver instances, including their separate upstream pools.
 // Admission is nonblocking: overload never creates an unbounded goroutine queue.
@@ -50,22 +44,15 @@ func cacheBackground(ctx context.Context) bool {
 	return value
 }
 
-type cacheHotEntry struct {
-	key                    string
-	ctx                    context.Context
-	query                  *D.Msg
-	window, lastSeen, next time.Time
-	expires                time.Time
-	hits                   int
-	element                *list.Element
-}
-
 type cacheRefreshJob struct {
 	key        string
 	ctx        context.Context
 	query      *D.Msg
 	generation uint64
 	lifetime   context.Context
+	prefetch   *cacheHotEntry
+	revision   uint64
+	demand     uint64
 }
 
 type cacheScheduler struct {
@@ -77,18 +64,26 @@ type cacheControl struct {
 	r       *Resolver
 	options CacheOptions
 
-	mu         sync.Mutex
-	generation uint64
-	epoch      uint64
-	lifetime   context.Context
-	cancel     context.CancelFunc
-	closed     bool
-	scheduler  *cacheScheduler
-	wg         sync.WaitGroup
-	hot        map[string]*cacheHotEntry
-	lru        list.List
-	inflight   map[string]uint64
-	selections map[string]*dnsResponseContinuation
+	mu               sync.Mutex
+	generation       uint64
+	epoch            uint64
+	lifetime         context.Context
+	cancel           context.CancelFunc
+	closed           bool
+	scheduler        *cacheScheduler
+	wg               sync.WaitGroup
+	hot              map[string]*cacheHotEntry
+	lru              list.List
+	ready            cachePrefetchQueue
+	hotBytes         int
+	hotBudget        int
+	sequence         uint64
+	inflight         map[string]uint64
+	pending          map[string]*cachePendingRefresh
+	pendingOrder     list.List
+	pendingBytes     int
+	selections       map[string]*dnsResponseContinuation
+	dualStackSamples *dnsFamilySampleCache
 
 	// One clock and one ticker per active control, never a timer per domain.
 	now       func() time.Time
@@ -101,12 +96,21 @@ func newCacheControl(r *Resolver, options *CacheOptions) *cacheControl {
 	if options != nil {
 		value = *options
 	}
+	if value.PrefetchMode == "" {
+		value.PrefetchMode = PrefetchModeProactive
+	}
+	if ValidatePrefetchMode(value.PrefetchMode) != nil || value.ServeExpiredPrefetchTime < 0 {
+		// Parsed configurations are validated; invalid programmatic options
+		// cannot silently start an unrecognized background policy.
+		value.Prefetch = false
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &cacheControl{
 		r: r, options: value, generation: 1, epoch: tunnel.DNSRoutingEpoch(),
 		lifetime: ctx, cancel: cancel,
 		hot: make(map[string]*cacheHotEntry), inflight: make(map[string]uint64),
-		now: time.Now, tickEvery: time.Second, fetch: r.exchangeWithoutCache,
+		hotBudget: cachePrefetchBudget,
+		now:       time.Now, tickEvery: time.Second, fetch: r.exchangeWithoutCache,
 	}
 }
 
@@ -149,51 +153,6 @@ func (c *cacheControl) ServeStale(expire, now time.Time) (bool, uint32) {
 	return true, c.options.ServeExpiredReplyTTL
 }
 
-// Observe counts foreground demand only, after prepareDNSRouting selected its
-// route/cache scope. Prefetch requires an actual source; infrastructure and
-// anonymous internal lookups may still use request-triggered stale refreshes.
-func (c *cacheControl) Observe(ctx context.Context, query *D.Msg, key string) {
-	if !c.options.Prefetch || cacheBackground(ctx) || icontext.DNSBootstrap(ctx) || !icontext.DNSRoutingInbound(ctx) || query == nil || len(query.Question) != 1 {
-		return
-	}
-	ctx, source := cacheRefreshContext(ctx)
-	if !source {
-		return
-	}
-	now := c.now()
-	ownedQuery := query.Copy()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.syncPolicyLocked()
-	if !c.validLocked(ctx) {
-		return
-	}
-	entry := c.hot[key]
-	if entry == nil {
-		if len(c.hot) >= cacheHotCapacity {
-			c.removeHotLocked(c.lru.Back().Value.(*cacheHotEntry))
-		}
-		entry = &cacheHotEntry{key: key, window: now}
-		entry.element = c.lru.PushFront(entry)
-		c.hot[key] = entry
-	} else {
-		c.lru.MoveToFront(entry.element)
-	}
-	if now.Sub(entry.window) >= cacheHotWindow {
-		entry.window, entry.hits = now, 0
-	}
-	if entry.hits < cacheHotThreshold {
-		entry.hits++
-	}
-	entry.ctx, entry.query, entry.lastSeen = ctx, ownedQuery, now
-	if entry.next.IsZero() && c.r.cache != nil {
-		if _, expires, ok := c.r.cache.GetWithExpire(key); ok {
-			c.scheduleLocked(entry, now, expires)
-		}
-	}
-	c.startLocked()
-}
-
 // Refresh admits one bounded request-triggered refresh, independently of the
 // Prefetch option. The old request's rule plan is never reused by the worker.
 func (c *cacheControl) Refresh(ctx context.Context, query *D.Msg, key string) {
@@ -207,7 +166,24 @@ func (c *cacheControl) Refresh(ctx context.Context, query *D.Msg, key string) {
 	if !c.validLocked(ctx) {
 		return
 	}
-	c.launchLocked(ctx, query, key)
+	if _, exists := c.inflight[key]; exists {
+		return
+	}
+	now := c.now()
+	if item := c.pending[key]; item != nil {
+		if now.Before(item.expires) {
+			c.launchPendingRefreshLocked(now)
+			c.stopIdleLocked()
+			return
+		}
+		// A newly arrived request must not disappear into an expired item
+		// merely because its controller's next periodic tick has not run yet.
+		c.removePendingRefreshLocked(item)
+	}
+	c.launchPendingRefreshLocked(now)
+	if !c.launchLocked(ctx, query, key) {
+		c.queueRefreshLocked(ctx, query, key)
+	}
 }
 
 // Freeze both known and unknown PROCESS results. A scheduled refresh must not
@@ -249,31 +225,13 @@ func (c *cacheControl) Store(ctx context.Context, key string, question D.Questio
 	} else {
 		putMsgToCacheWithExpiry(c.r.cache, key, question, message, expires)
 	}
-	if entry := c.hot[key]; entry != nil {
-		if _, expires, ok := c.r.cache.GetWithExpire(key); ok {
-			c.scheduleLocked(entry, c.now(), expires)
-		} else {
-			c.removeHotLocked(entry)
-			c.stopIdleLocked()
-		}
-	}
+	c.storeDualStackSampleLocked(ctx, key, question, message)
+	c.storedPrefetchLocked(ctx, key)
 	return true
 }
 
-func (c *cacheControl) scheduleLocked(entry *cacheHotEntry, now, expires time.Time) {
-	entry.expires = expires
-	delay := expires.Sub(now)
-	// DNS TTL is uint32 seconds; multiplying its duration by four can
-	// overflow time.Duration for large, otherwise representable TTLs.
-	delay -= delay / 5
-	if delay < cacheRefreshMinPeriod {
-		delay = cacheRefreshMinPeriod
-	}
-	entry.next = now.Add(delay)
-}
-
 func (c *cacheControl) startLocked() {
-	if c.scheduler != nil || c.closed || len(c.hot)+len(c.inflight) == 0 {
+	if c.scheduler != nil || c.closed || len(c.hot)+len(c.inflight)+len(c.pending) == 0 {
 		return
 	}
 	scheduler := &cacheScheduler{stop: make(chan struct{}), done: make(chan struct{})}
@@ -304,7 +262,7 @@ func (c *cacheControl) stopLocked() {
 }
 
 func (c *cacheControl) stopIdleLocked() {
-	if len(c.hot)+len(c.inflight) == 0 {
+	if len(c.hot)+len(c.inflight)+len(c.pending) == 0 {
 		c.stopLocked()
 	}
 }
@@ -328,30 +286,27 @@ func (c *cacheControl) tick(now time.Time) {
 func (c *cacheControl) tickLocked(now time.Time) {
 	c.syncPolicyLocked()
 	defer c.stopIdleLocked()
-	if c.closed || !c.options.Prefetch {
+	if c.closed {
 		return
 	}
-	for _, entry := range c.hot {
-		if now.Sub(entry.lastSeen) >= cacheHotWindow {
-			c.removeHotLocked(entry)
-			continue
-		}
-		if entry.hits < cacheHotThreshold || entry.next.IsZero() || now.Before(entry.next) {
-			continue
-		}
-		if c.launchLocked(entry.ctx, entry.query, entry.key) {
-			// Errors cannot create a tight retry loop. A successful Store sets
-			// a fresh deadline derived from the newly cached TTL instead.
-			entry.next = now.Add(cacheRefreshRetryDelay)
-		}
+	c.launchPendingRefreshLocked(now)
+	if c.options.Prefetch {
+		c.launchDuePrefetchLocked(now)
 	}
 }
 
 func (c *cacheControl) launchLocked(ctx context.Context, query *D.Msg, key string) bool {
+	return c.launchRefreshLocked(ctx, query, key, nil)
+}
+
+func (c *cacheControl) launchRefreshLocked(ctx context.Context, query *D.Msg, key string, prefetch *cacheHotEntry) bool {
 	if !c.validLocked(ctx) {
 		return false
 	}
 	if _, exists := c.inflight[key]; exists {
+		return false
+	}
+	if prefetch != nil && cachePendingRefreshCount.Load() != 0 {
 		return false
 	}
 	select {
@@ -359,7 +314,11 @@ func (c *cacheControl) launchLocked(ctx context.Context, query *D.Msg, key strin
 	default:
 		return false
 	}
-	job := cacheRefreshJob{key: key, ctx: ctx, query: query.Copy(), generation: c.generation, lifetime: c.lifetime}
+	job := cacheRefreshJob{key: key, ctx: ctx, query: query.Copy(), generation: c.generation, lifetime: c.lifetime, prefetch: prefetch}
+	if prefetch != nil {
+		c.beginPrefetchLocked(prefetch)
+		job.revision, job.demand = prefetch.revision, prefetch.demand
+	}
 	c.inflight[key] = job.generation
 	c.startLocked()
 	c.wg.Add(1)
@@ -369,16 +328,22 @@ func (c *cacheControl) launchLocked(ctx context.Context, query *D.Msg, key strin
 
 func (c *cacheControl) run(job cacheRefreshJob) {
 	defer c.wg.Done()
-	defer func() { <-cacheBackgroundSlots }()
 	defer func() {
 		c.mu.Lock()
+		<-cacheBackgroundSlots
+		c.syncPolicyLocked()
 		if c.inflight[job.key] == job.generation {
 			delete(c.inflight, job.key)
 		}
+		c.finishPrefetchLocked(job)
+		c.launchPendingRefreshLocked(c.now())
 		c.stopIdleLocked()
 		c.mu.Unlock()
 	}()
 	ctx, cancel := context.WithTimeout(context.WithValue(job.ctx, cacheBackgroundKey{}, true), resolver.DefaultDNSTimeout)
+	if job.prefetch != nil {
+		ctx = context.WithValue(ctx, cacheScheduledPrefetchKey{}, job.prefetch)
+	}
 	stop := contextutils.AfterFunc(job.lifetime, cancel)
 	defer stop()
 	defer cancel()
@@ -400,6 +365,13 @@ func (c *cacheControl) run(job cacheRefreshJob) {
 		// Re-arm the new scope only upon real demand. Never let an old route's
 		// hotness indefinitely drive queries in a newly selected policy scope.
 		c.removeJobHot(job)
+		if job.prefetch != nil {
+			return
+		}
+	}
+	if job.prefetch != nil && !c.r.directDNSQueryEligible(ctx, job.query) {
+		c.removeJobHot(job)
+		return
 	}
 	_, _ = c.fetch(ctx, job.query)
 }
@@ -416,14 +388,12 @@ func (c *cacheControl) removeJobHot(job cacheRefreshJob) {
 	defer c.mu.Unlock()
 	if c.generation == job.generation {
 		if entry := c.hot[job.key]; entry != nil {
+			if job.prefetch != nil && (entry != job.prefetch || entry.demand != job.demand) {
+				return
+			}
 			c.removeHotLocked(entry)
 		}
 	}
-}
-
-func (c *cacheControl) removeHotLocked(entry *cacheHotEntry) {
-	delete(c.hot, entry.key)
-	c.lru.Remove(entry.element)
 }
 
 func (c *cacheControl) syncPolicyLocked() {
@@ -439,8 +409,12 @@ func (c *cacheControl) resetLocked() {
 	c.lifetime, c.cancel = context.WithCancel(context.Background())
 	c.hot = make(map[string]*cacheHotEntry)
 	c.lru.Init()
+	c.ready = nil
+	c.hotBytes = 0
 	c.inflight = make(map[string]uint64)
+	c.clearPendingRefreshLocked()
 	c.selections = nil
+	c.clearDualStackSamplesLocked()
 	c.stopIdleLocked()
 }
 
@@ -463,7 +437,11 @@ func (c *cacheControl) Close() {
 		c.generation++
 		c.hot = make(map[string]*cacheHotEntry)
 		c.lru.Init()
+		c.ready = nil
+		c.hotBytes = 0
 		c.selections = nil
+		c.clearPendingRefreshLocked()
+		c.clearDualStackSamplesLocked()
 		c.stopLocked()
 	}
 	c.mu.Unlock()

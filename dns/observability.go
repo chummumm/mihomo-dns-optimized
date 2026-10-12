@@ -213,6 +213,7 @@ func finishDNSUpstream(attempt *dnsstats.Attempt, message *D.Msg, err error) {
 type dnsExchangeResult struct {
 	*D.Msg
 	local      bool
+	earlyReply bool
 	receivedAt time.Time
 	expires    time.Time
 }

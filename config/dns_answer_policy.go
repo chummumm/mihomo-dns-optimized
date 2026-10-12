@@ -86,6 +86,12 @@ func parseDNSForcedQtypes(values RawDNSQtypes) (*dns.ForcedQtypes, error) {
 
 func parseDNSAnswerPolicy(raw RawDNS) (dns.AnswerPolicy, error) {
 	var result dns.AnswerPolicy
+	if raw.MaxReplyIPNum != nil {
+		if *raw.MaxReplyIPNum < 1 || *raw.MaxReplyIPNum > math.MaxInt32 {
+			return result, fmt.Errorf("dns.max-reply-ip-num must be between 1 and %d", int64(math.MaxInt32))
+		}
+		result.ReplyIPLimit = int(*raw.MaxReplyIPNum)
+	}
 	for _, setting := range []struct {
 		name  string
 		value int64

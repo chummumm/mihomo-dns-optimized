@@ -196,11 +196,18 @@ func ageDNSAnswerAt(message *D.Msg, receivedAt, now time.Time) *D.Msg {
 		}
 	}
 	answer := message.Copy()
+	negative := dnsMessageIsNegative(answer)
 	for _, records := range [][]D.RR{answer.Answer, answer.Ns, answer.Extra} {
 		for _, rr := range records {
 			header := rr.Header()
 			if header.Rrtype == D.TypeOPT {
 				continue
+			}
+			if soa, ok := rr.(*D.SOA); ok && negative && soa.Minttl < header.Ttl {
+				// MINIMUM bounds a negative answer's lifetime. Normalize its
+				// header before aging; the SOA RDATA and RRSIG metadata retain
+				// their original values.
+				header.Ttl = soa.Minttl
 			}
 			if elapsed >= uint64(header.Ttl) {
 				header.Ttl = 0
@@ -234,7 +241,43 @@ func dnsMessageCacheTTL(msg *D.Msg) uint32 {
 		// If it does so it MUST NOT cache it for longer than five (5) minutes [...]
 		return serverFailureCacheTTL
 	}
-	return minimalTTL(lo.Concat(msg.Answer, msg.Ns, msg.Extra))
+	ttl := minimalTTL(lo.Concat(msg.Answer, msg.Ns, msg.Extra))
+	if dnsMessageIsNegative(msg) {
+		for _, rr := range msg.Ns {
+			if soa, ok := rr.(*D.SOA); ok && soa.Minttl < ttl {
+				ttl = soa.Minttl
+			}
+		}
+	}
+	return ttl
+}
+
+// A CNAME chain does not turn a terminal NODATA result into a positive answer.
+// Conversely, an SOA accompanying a real answer must not impose its negative
+// cache lifetime on that positive RRset.
+func dnsMessageIsNegative(message *D.Msg) bool {
+	if message == nil {
+		return false
+	}
+	if message.Rcode == D.RcodeNameError {
+		return true
+	}
+	if message.Rcode != D.RcodeSuccess || len(message.Question) != 1 {
+		return false
+	}
+	question := message.Question[0]
+	for _, rr := range message.Answer {
+		header := rr.Header()
+		if header.Class == question.Qclass && (header.Rrtype == question.Qtype || question.Qtype == D.TypeANY) {
+			return false
+		}
+	}
+	for _, rr := range message.Ns {
+		if rr.Header().Rrtype == D.TypeSOA && rr.Header().Class == question.Qclass {
+			return true
+		}
+	}
+	return false
 }
 
 func putMsgToCacheWithExpiry(c dnsCache, key string, q D.Question, msg *D.Msg, expires time.Time) {

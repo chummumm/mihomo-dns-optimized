@@ -31,10 +31,11 @@ type AnswerPolicy struct {
 	RRTTLMin      uint32
 	RRTTLMax      uint32
 	RRTTLReplyMax uint32
+	ReplyIPLimit  int
 }
 
 func (p AnswerPolicy) enabled() bool {
-	return p.ForceNoCNAME || p.RRTTL != 0 || p.RRTTLMin != 0 || p.RRTTLMax != 0 || p.RRTTLReplyMax != 0
+	return p.ForceNoCNAME || p.ForceAAAASOA || p.RRTTL != 0 || p.RRTTLMin != 0 || p.RRTTLMax != 0 || p.RRTTLReplyMax != 0 || p.ReplyIPLimit != 0
 }
 
 // Automatic QNAME routing already keys the complete wire question. Optional
@@ -57,7 +58,7 @@ func (r *Resolver) cacheKey(ctx context.Context, query *D.Msg) string {
 }
 
 func (p AnswerPolicy) apply(query, answer *D.Msg) *D.Msg {
-	if (!p.ForceNoCNAME && p.RRTTL == 0 && p.RRTTLMin == 0 && p.RRTTLMax == 0) || !answerPolicyCanRewrite(query, answer) {
+	if (!p.ForceNoCNAME && !p.ForceAAAASOA && p.RRTTL == 0 && p.RRTTLMin == 0 && p.RRTTLMax == 0 && p.ReplyIPLimit == 0) || !answerPolicyCanRewrite(query, answer) {
 		return answer
 	}
 	result := answer.Copy()
@@ -79,13 +80,16 @@ func (p AnswerPolicy) apply(query, answer *D.Msg) *D.Msg {
 	if p.ForceNoCNAME && result.Rcode == D.RcodeSuccess {
 		flattenAddressCNAME(result, query.Question[0])
 	}
-	return result
+	if p.ForceAAAASOA && result.Rcode == D.RcodeSuccess && query.Question[0].Qclass == D.ClassINET && query.Question[0].Qtype == D.TypeHTTPS {
+		removeHTTPSIPv6Hints(result)
+	}
+	return limitDNSAddressReply(query, result, p.ReplyIPLimit)
 }
 
 func answerPolicyCanRewrite(query, answer *D.Msg) bool {
 	if query == nil || answer == nil || len(query.Question) != 1 ||
 		query.Opcode != D.OpcodeQuery || !speedCheckResponseMatches(query, answer) ||
-		query.CheckingDisabled || answer.Truncated || speedCheckProtected(query) || speedCheckProtected(answer) {
+		query.CheckingDisabled || answer.Truncated || speedCheckQueryProtected(query) || speedCheckProtected(answer) {
 		return false
 	}
 	if opt := query.IsEdns0(); opt != nil && opt.Do() {
@@ -116,18 +120,17 @@ func (p AnswerPolicy) applyReply(query, answer *D.Msg) *D.Msg {
 	return result
 }
 
-// Hosts aliases can prepend CNAME records after the resolver has finished.
-// Reconcile the complete client reply without reapplying cache TTL policy.
+// Hosts can supply local addresses or prepend aliases after the resolver has
+// finished. Reconcile the complete reply without reapplying cache TTL policy.
 func (p AnswerPolicy) applyFinalReply(query, answer *D.Msg) *D.Msg {
 	result := p.applyReply(query, answer)
-	if !p.ForceNoCNAME || !answerPolicyCanRewrite(query, result) {
-		return result
+	if p.ForceNoCNAME && answerPolicyCanRewrite(query, result) {
+		if result == answer {
+			result = answer.Copy()
+		}
+		flattenAddressCNAME(result, query.Question[0])
 	}
-	if result == answer {
-		result = answer.Copy()
-	}
-	flattenAddressCNAME(result, query.Question[0])
-	return result
+	return limitDNSAddressReply(query, result, p.ReplyIPLimit)
 }
 
 func (p AnswerPolicy) clampTTL(ttl uint32) uint32 {
@@ -152,19 +155,53 @@ func (p AnswerPolicy) forcesQtype(qtype uint16) bool {
 
 func forcedSOAQuestion(ctx context.Context, query *D.Msg) bool {
 	if icontext.DNSBootstrap(ctx) || query == nil || len(query.Question) != 1 ||
-		query.Response || query.Opcode != D.OpcodeQuery || query.Question[0].Qclass != D.ClassINET || query.IsTsig() != nil {
+		query.Response || query.Opcode != D.OpcodeQuery || query.Question[0].Qclass != D.ClassINET || speedCheckQueryProtected(query) {
 		return false
 	}
-	// AD in a query advertises the client's DNSSEC capability; it does not
-	// authenticate this transaction and must not bypass an explicit local block.
-	for _, records := range [][]D.RR{query.Answer, query.Ns, query.Extra} {
-		for _, rr := range records {
-			if rr.Header().Rrtype == D.TypeRRSIG || rr.Header().Rrtype == D.TypeSIG {
-				return false
+	return true
+}
+
+// The dedicated AAAA policy also removes IPv6 addresses advertised by HTTPS
+// ServiceMode records. Keep every other SvcParam, including unknown extensions;
+// only remove the corresponding mandatory entry so the result stays usable.
+// Generic force-qtype-SOA 28 intentionally does not imply this record rewrite.
+func removeHTTPSIPv6Hints(message *D.Msg) {
+	for _, rr := range message.Answer {
+		https, ok := rr.(*D.HTTPS)
+		if !ok || https.Hdr.Class != D.ClassINET || https.Priority == 0 {
+			continue
+		}
+		hasIPv6 := false
+		for _, param := range https.Value {
+			if param.Key() == D.SVCB_IPV6HINT {
+				hasIPv6 = true
+				break
 			}
 		}
+		if !hasIPv6 {
+			continue
+		}
+		values := make([]D.SVCBKeyValue, 0, len(https.Value))
+		for _, param := range https.Value {
+			if param.Key() == D.SVCB_IPV6HINT {
+				continue
+			}
+			if mandatory, ok := param.(*D.SVCBMandatory); ok {
+				codes := make([]D.SVCBKey, 0, len(mandatory.Code))
+				for _, code := range mandatory.Code {
+					if code != D.SVCB_IPV6HINT {
+						codes = append(codes, code)
+					}
+				}
+				if len(codes) != 0 {
+					values = append(values, &D.SVCBMandatory{Code: codes})
+				}
+				continue
+			}
+			values = append(values, param)
+		}
+		https.Value = values
 	}
-	return true
 }
 
 // An explicit local query-type policy returns NOERROR/NODATA, not NXDOMAIN or

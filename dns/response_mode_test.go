@@ -122,6 +122,9 @@ func TestDNSResponseModeEarlyResultAndSameWorkCacheImprovement(t *testing.T) {
 				if got.Error != nil || msgToIP(got.Msg)[0].String() != "192.0.2.1" {
 					t.Fatalf("first DNS reply was not returned: %+v", got)
 				}
+				if ttl := minimalTTL(got.Msg.Answer); ttl != dnsEarlyReplyTTL {
+					t.Fatalf("early DNS reply TTL=%d, want %d", ttl, dnsEarlyReplyTTL)
+				}
 			}
 			responseModeReceive(t, firstProbeStarted)
 			if mode != ResponseModeFastestResponse {
@@ -139,6 +142,9 @@ func TestDNSResponseModeEarlyResultAndSameWorkCacheImprovement(t *testing.T) {
 				got := responseModeReceive(t, replies)
 				if got.Error != nil || msgToIP(got.Msg)[0].String() != "192.0.2.1" {
 					t.Fatalf("first successful probe was not returned: %+v", got)
+				}
+				if ttl := minimalTTL(got.Msg.Answer); ttl != dnsEarlyReplyTTL {
+					t.Fatalf("first-ping reply TTL=%d, want %d", ttl, dnsEarlyReplyTTL)
 				}
 			}
 			if mode == ResponseModeFastestIP {
@@ -168,6 +174,9 @@ func TestDNSResponseModeEarlyResultAndSameWorkCacheImprovement(t *testing.T) {
 			cached := routingTestExchange(t, r, ctx, query)
 			if msgToIP(cached)[0].String() != "192.0.2.2" || first.count(0) != 1 || second.count(0) != 1 {
 				t.Fatalf("improvement restarted DNS or missed cache: %v calls=%d/%d", cached, first.count(0), second.count(0))
+			}
+			if minimalTTL(cached.Answer) <= dnsEarlyReplyTTL || minimalTTL(final.Val.Answer) <= dnsEarlyReplyTTL {
+				t.Fatal("the early client renewal interval replaced the final cache lifetime")
 			}
 			if len(dnsNativeWorkSlots) != 0 || len(cacheBackgroundSlots) != 0 {
 				t.Fatal("completed selection leaked admission slots")
@@ -200,6 +209,9 @@ func TestDNSResponseModeBackgroundSaturationReturnsValidAnswer(t *testing.T) {
 	if len(msgToIP(answer)) != 1 || len(dnsNativeWorkSlots) != 0 {
 		t.Fatal("background saturation prevented a valid foreground answer")
 	}
+	if minimalTTL(answer.Answer) <= dnsEarlyReplyTTL {
+		t.Fatal("a completed answer without background continuation inherited the early TTL")
+	}
 	// Existing prefetch admission is independently bounded and cannot use up
 	// the 256 native foreground slots either.
 	prepared := responseModePreparedContext(t, r, ctx, query)
@@ -222,7 +234,7 @@ func TestDNSResponseModeLateJoinAgesAndCopiesEarlySnapshot(t *testing.T) {
 	answer := cacheTestReply(query, 10)
 	finish := make(chan struct{})
 	first := r.group.DoChanEarly(key, func(publish func(*dnsExchangeResult) bool) (*dnsExchangeResult, error) {
-		publish(&dnsExchangeResult{Msg: answer, receivedAt: time.Now().Add(-2500 * time.Millisecond)})
+		publish(&dnsExchangeResult{Msg: answer, receivedAt: time.Now().Add(-2500 * time.Millisecond), earlyReply: true})
 		<-finish
 		return &dnsExchangeResult{Msg: answer}, nil
 	})
@@ -231,7 +243,7 @@ func TestDNSResponseModeLateJoinAgesAndCopiesEarlySnapshot(t *testing.T) {
 	for _, id := range []uint16{42, 43} {
 		query.Id = id
 		got, err := r.exchangeWithoutCache(ctx, query.Copy())
-		if err != nil || got.Id != id || got.Answer[0].Header().Ttl != 8 {
+		if err != nil || got.Id != id || got.Answer[0].Header().Ttl != 3 {
 			t.Fatalf("late join renewed TTL or lost its ID: %v %v", got, err)
 		}
 		got.Answer[0].Header().Ttl = 99
@@ -241,6 +253,55 @@ func TestDNSResponseModeLateJoinAgesAndCopiesEarlySnapshot(t *testing.T) {
 	}
 	close(finish)
 	responseModeReceive(t, barrier)
+}
+
+func TestDNSEarlyReplyTTLBoundsAndProtection(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		ttl       uint32
+		elapsed   time.Duration
+		replyMax  uint32
+		protected string
+		want      uint32
+	}{
+		{"cap after waiting", 10, 2500 * time.Millisecond, 0, "", 3},
+		{"shorter remaining lifetime", 3, 2500 * time.Millisecond, 0, "", 1},
+		{"zero stays zero", 0, 0, 0, "", 0},
+		{"reply max wins", 10, 0, 2, "", 2},
+		{"query AD is capability", 10, 0, 0, "query-AD", 3},
+		{"DO protected", 10, 0, 0, "DO", 10},
+		{"CD protected", 10, 0, 0, "CD", 10},
+		{"response AD protected", 10, 0, 0, "response-AD", 10},
+		{"TSIG protected", 10, 0, 0, "TSIG", 10},
+		{"SOA not an early address answer", 10, 0, 0, "SOA", 10},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			query := new(D.Msg).SetQuestion("early.example.", D.TypeA)
+			answer := cacheTestReply(query, test.ttl)
+			switch test.protected {
+			case "query-AD":
+				query.AuthenticatedData = true
+			case "DO":
+				query.SetEdns0(1232, true)
+			case "CD":
+				query.CheckingDisabled = true
+			case "response-AD":
+				answer.AuthenticatedData = true
+			case "TSIG":
+				answer.SetTsig("key.example.", D.HmacSHA256, 300, time.Now().Unix())
+			case "SOA":
+				answer.Ns = negativePolicyReply(query, D.RcodeSuccess, 60, 30).Ns
+			}
+			before := answer.String()
+			received := time.Unix(1000, 0)
+			aged := ageDNSAnswerAt(answer, received, received.Add(test.elapsed))
+			reply := limitDNSEarlyReplyTTL(query, aged)
+			reply = (AnswerPolicy{RRTTLReplyMax: test.replyMax}).applyReply(query, reply)
+			if ttl := reply.Answer[0].Header().Ttl; ttl != test.want || answer.String() != before {
+				t.Fatalf("early reply TTL=%d want=%d, or shared snapshot changed", ttl, test.want)
+			}
+		})
+	}
 }
 
 func TestDNSResponseModeBackgroundLeaseInvalidation(t *testing.T) {

@@ -266,8 +266,10 @@ type RawDNS struct {
 	SpeedCheckConcurrency         int                                 `yaml:"speed-check-concurrency" json:"speed-check-concurrency"`
 	MaxReplyIPNum                 *int64                              `yaml:"max-reply-ip-num" json:"max-reply-ip-num"`
 	PrefetchDomain                bool                                `yaml:"prefetch-domain" json:"prefetch-domain"`
+	PrefetchMode                  string                              `yaml:"prefetch-mode" json:"prefetch-mode"`
 	ServeExpired                  *bool                               `yaml:"serve-expired" json:"serve-expired"`
 	ServeExpiredTTL               int64                               `yaml:"serve-expired-ttl" json:"serve-expired-ttl"`
+	ServeExpiredPrefetchTime      int64                               `yaml:"serve-expired-prefetch-time" json:"serve-expired-prefetch-time"`
 	ServeExpiredReplyTTL          *int64                              `yaml:"serve-expired-reply-ttl" json:"serve-expired-reply-ttl"`
 	ForceNoCNAME                  bool                                `yaml:"force-no-CNAME" json:"force-no-CNAME"`
 	ForceAAAASOA                  bool                                `yaml:"force-AAAA-SOA" json:"force-AAAA-SOA"`

@@ -274,13 +274,14 @@ dns:
   response-mode: first-ping
   speed-check-timeout: 1000
   speed-check-concurrency: 16
-  max-reply-ip-num: 8  # 优选回答的地址数量上限，不保证凑满。
+  max-reply-ip-num: 8  # 显式设置也限制普通 A/AAAA 答复；数量上限，不保证凑满。
   dualstack-ip-selection: true
   dualstack-ip-selection-threshold: 10
   dualstack-ip-allow-force-AAAA: false
 
   # 缓存和预取；以下 TTL 均为秒。
   prefetch-domain: true
+  prefetch-mode: proactive  # 只对实际 DIRECT 定时预取；本项不会单独开启预取。
   serve-expired: true
   serve-expired-ttl: 604800
   serve-expired-reply-ttl: 1
@@ -339,14 +340,14 @@ FakeIP 的 IPv6 与 HTTPS / SVCB 处理也保持原行为：应使用虚拟地�
 
 - 仅内置 DNS 已选 DIRECT / Compatible、所选上游集合全部支持自动传输的 A / AAAA 查询参与；代理路径不参与。原生 DoH / DoT / DoQ 及自定义端口同样按实际出口判定。
 - 显式 DNS 出口等传输例外不做本地测速；有效缓存命中直接返回，不为这次命中重复探测。
-- TCP 测握手耗时，ping 测 ICMP 往返。探测继承所选直连出口的接口 / mark，不重新匹配规则；ping 是否可用取决于平台与权限。
-- 按实测 RTT 排序并保留接近最快的地址，默认最多 8 个；允许合并完整 CNAME 路径一致的上游答案，不混合不同路径。重复地址去重并取保守 TTL；DNSSEC 等保护场景不改写。全部探测失败时保留有效上游顺序，并遵守优选回答数量上限。
+- TCP connect 测连接响应，连接拒绝也可提供 RTT；Linux 的 `tcp-syn` 使用真实 SYN / SYN-ACK 或 RST-ACK，不完成应用连接，需要原始套接字权限；ping 测 ICMP 往返。探测继承所选直连出口的接口 / mark，不重新匹配规则。多种测法按 100 毫秒间隔逐步启动，所有实际探测共用并发上限。
+- 按实测 RTT 排序并保留接近最快的地址，默认最多 8 个；允许合并完整 CNAME 路径一致的上游答案，不混合不同路径。重复地址去重并取保守 TTL；DNSSEC 等保护场景不改写。全部探测失败时，优先使用同一路径多个有效上游重复返回的地址；无共识时保留首个有效回答顺序，并执行数量上限，不制造 RTT。
 
 测速不代表下载带宽，也不保证所有域名都更快。预取和过期缓存刷新属于新的查询，满足条件时可以重新优选。
 
-开启测速后，可用 `response-mode` 选择首次回答的时机。默认 `first-ping` 在候选 IP 首次探测成功后回答；`fastest-ip` 在本轮预算内充分比较候选；`fastest-response` 在首个通过当前策略检查的 DNS 回答到达时回答，不等待 IP 探测。提前回答后，剩余比较仅在有后台名额时继续，沿用本轮期限，结果可以更新缓存。缓存命中直接回答，代理路径和关闭测速的配置保持原解析行为。具体边界见[响应模式](docs/dns-proxy.md#响应模式)。
+开启测速后，可用 `response-mode` 选择首次回答的时机。默认 `first-ping` 在候选 IP 首次探测成功后回答；`fastest-ip` 在本轮预算内充分比较候选；`fastest-response` 在首个通过当前策略检查的 DNS 回答到达时回答，不等待 IP 探测。提前回答后，剩余比较仅在有后台名额时继续，沿用本轮期限，结果可以更新缓存；这种提前发布的普通正向答案交给客户端时 TTL 最多 3 秒，内部缓存保留完整有效期。缓存命中直接回答，代理路径和关闭测速的配置保持原解析行为。具体边界见[响应模式](docs/dns-proxy.md#响应模式)。
 
-可选双栈优选复用这次已选直连出口和同一个超时预算。默认保留 IPv4；当 AAAA 查询同时取得两族可测速的回答，且 IPv4 比 IPv6 快至少所设阈值时，返回零 TTL 的 NOERROR / NODATA。代理查询不另查另一族、不探测；测速失败或受 DNSSEC 保护时保留原回答。该临时优选结论不缓存，避免被过期缓存长期延续。
+可选双栈优选复用这次已选直连出口和同一个超时预算。默认保留 IPv4；当 IPv4 比 IPv6 快至少所设阈值，或 IPv6 所有候选有真实不可达证据而 IPv4 可达时，可对 AAAA 返回零 TTL 的 NOERROR / NODATA。两族正常答案分别缓存，优先复用有效的另一族答案与测量；临时 SOA 不覆盖正常答案。后台刷新不额外查询另一族，代理不发辅助查询。取消、资源不足、权限或未知错误不充当不可达证据，DNSSEC 保护继续生效。
 
 ## DIRECT 保留客户端选择的 IP
 
@@ -367,11 +368,11 @@ FakeIP 的 IPv6 与 HTTPS / SVCB 处理也保持原行为：应使用虚拟地�
 
 | 测速字段 | 默认值 | 含义与单位 |
 | --- | --- | --- |
-| `speed-check-mode` | 空 / `[none]` | 关闭；可设 `tcp:端口`、`ping`；`none` 不能与其他项混用 |
+| `speed-check-mode` | 空 / `[none]` | 关闭；最多 4 个不同测法：`tcp:端口`、`tcp-syn:端口`、`ping`；裸 `tcp` / `tcp-syn` 使用 80 端口；`none` 不能混用 |
 | `response-mode` | `first-ping` | 开启测速时的首次回答策略；可选 `first-ping`、`fastest-ip`、`fastest-response` |
 | `speed-check-timeout` | 0 → 1000 | 毫秒；显式范围 1–5000，只限制本轮可选优选等待；无有效答复时，已发出的 DNS 继续使用正常解析期限 |
-| `speed-check-concurrency` | 0 → 16 | 最大 256；只限制活动 IP 探测，满额立即跳过新探测，不排队，不限制 DNS 上游请求；每轮最多 256 个候选 IP |
-| `max-reply-ip-num` | 8 | DIRECT 优选回答的地址数量上限；显式整数 1–2147483647；不会扩大 256 候选探测上限 |
+| `speed-check-concurrency` | 0 → 16 | 最大 256；限制所有实际活动探测，不限制 DNS 上游请求；新测法满额时释放本轮旧阶段占用后尝试，不无限排队；每轮最多 256 个候选 IP |
+| `max-reply-ip-num` | 优选时 8 | 显式整数 1–2147483647 也限制未测速或非 DIRECT 的普通 A/AAAA 及静态 hosts；省略时普通 Mihomo 答复不裁剪；不扩大候选上限 |
 | `dualstack-ip-selection` | `false` | 开启 DIRECT 双栈优选；仍需启用测速 |
 | `dualstack-ip-selection-threshold` | 10 | 毫秒；0–1000，另一族至少快多少才过滤当前族 |
 | `dualstack-ip-allow-force-AAAA` | `false` | 是否允许反向过滤 A、只保留更快的 IPv6；默认保留 IPv4 |
@@ -380,14 +381,16 @@ FakeIP 的 IPv6 与 HTTPS / SVCB 处理也保持原行为：应使用虚拟地�
 
 | 缓存字段 | 默认值 | 含义与单位 |
 | --- | --- | --- |
-| `prefetch-domain` | `false` | 为近期活跃的真实 DNS 来源预取 |
+| `prefetch-domain` | `false` | 只为实际 DIRECT / Compatible 的真实 DNS 来源定时预取 |
+| `prefetch-mode` | `proactive` | 按剩余 TTL 约 80% 刷新；`smartdns` 选择上游式计时规则，本项不单独开启预取 |
+| `serve-expired-prefetch-time` | 0 | 秒，0–2147483647；0 自动推导；非零只可配合 `prefetch-mode: smartdns` |
 | `serve-expired` | `true` | 允许返回过期缓存并触发有界后台更新 |
 | `serve-expired-ttl` | 0 | 秒；0 不限过期年龄，保留上游缺省行为；604800 表示最多过期 7 天 |
 | `serve-expired-reply-ttl` | 1 | 秒；过期回答交给客户端的 TTL，允许 0，不延长原记录过期时间 |
 
 `prefetch-domain: false` 关闭主动预取，`serve-expired: false` 停止返回过期缓存；正常未过期缓存仍可使用。这两个开关互不替代。
 
-预取要求真实 DNS 入站具有有效来源，同一作用域 1 分钟至少 3 次前台请求、最近 1 分钟仍活跃，按剩余 TTL 约 80% 安排刷新。每个 resolver 最多 1024 个热点，全局最多 16 个后台任务。
+第一次真实查询成功写入缓存即可激活预取，缓存命中补充热度但不延后已有刷新时间；不再受一分钟活跃窗口限制。没有新需求时最多两次定时尝试，后台自身不增加热度。每个 resolver 使用 16 MiB 候选记账预算，普通短查询通常约 1.2 万至 1.6 万项；所有 resolver 共用 16 个活动后台刷新任务。过期缓存命中触发的按需刷新优先调度，仍保留代理等原有出口行为。计时兼容模式、有限队列和切组边界见[缓存与预取](docs/dns-proxy.md#缓存预取与过期回答)。
 
 满足自动选路条件的正式答案缓存和预取热度可跨临时来源端口复用；在途查询合并仍按来源端口隔离。原有 `cache-algorithm` / `cache-max-size` 仍可使用，不承诺未经实测的命中率提升。
 

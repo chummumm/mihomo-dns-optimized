@@ -94,11 +94,16 @@ func TestDNSRuleRoutingFakeIPLocalAnswersPrecedeResolver(t *testing.T) {
 		t.Fatalf("fixture did not exercise real DNS and DIRECT probing: queries=%d probes=%d", queries, probes)
 	}
 	r.cacheControl.mu.Lock()
-	initialHits := 0
+	initialHeat, initialCandidates := 0, len(r.cacheControl.hot)
+	var initialDemand uint64
 	for _, hot := range r.cacheControl.hot {
-		initialHits += hot.hits
+		initialHeat += int(hot.heat)
+		initialDemand += hot.demand
 	}
 	r.cacheControl.mu.Unlock()
+	if initialCandidates != 1 || initialHeat != cachePrefetchInitialHeat || initialDemand != 1 {
+		t.Fatalf("successful real DIRECT answer did not activate one finite prefetch candidate: count=%d heat=%d demand=%d", initialCandidates, initialHeat, initialDemand)
+	}
 	enhancer := fakeIPRoutingTestEnhancer(t)
 	mapper := NewEnhancer(enhancer)
 	service := NewService(r, mapper)
@@ -125,12 +130,14 @@ func TestDNSRuleRoutingFakeIPLocalAnswersPrecedeResolver(t *testing.T) {
 		t.Fatal("FakeIP/local answers queried or probed an upstream")
 	}
 	r.cacheControl.mu.Lock()
-	finalHits := 0
+	finalHeat, finalCandidates := 0, len(r.cacheControl.hot)
+	var finalDemand uint64
 	for _, hot := range r.cacheControl.hot {
-		finalHits += hot.hits
+		finalHeat += int(hot.heat)
+		finalDemand += hot.demand
 	}
 	r.cacheControl.mu.Unlock()
-	if finalHits != initialHits {
+	if finalCandidates != initialCandidates || finalHeat != initialHeat || finalDemand != initialDemand {
 		t.Fatal("FakeIP answers contributed to real-answer prefetch activity")
 	}
 	if totals := manager.Stats().Totals; totals.Queries != 6 || totals.FakeIP != 4 || totals.Local != 2 || totals.CacheFresh != 0 || totals.Upstream != 0 {

@@ -2,6 +2,7 @@ package dns
 
 import (
 	"context"
+	"net"
 	"net/netip"
 	"time"
 
@@ -47,21 +48,19 @@ func (r *Resolver) exchangeBatch(ctx context.Context, clients []dnsClient, query
 	}
 	route := queryRoute(ctx)
 	probe := func(ctx context.Context, address netip.Addr, mode speedCheckMode) (time.Duration, error) {
-		if mode.port == 0 {
+		if mode.port == 0 || mode.syn {
 			options, err := route.plan.DirectProbeOptions()
 			if err != nil {
 				return 0, err
 			}
+			if mode.syn {
+				return probeTCPSYN(ctx, address, mode.port, options...)
+			}
 			return pingDirectIP(ctx, address, options...)
 		}
-		start := time.Now()
-		connection, err := route.plan.DialDirectProbe(ctx, address, mode.port)
-		if err != nil {
-			return 0, err
-		}
-		elapsed := time.Since(start)
-		_ = connection.Close()
-		return elapsed, nil
+		return measureTCPConnect(ctx, func(ctx context.Context) (net.Conn, error) {
+			return route.plan.DialDirectProbe(ctx, address, mode.port)
+		})
 	}
 	dualStack := r.dualStack
 	// IPv6 here is the effective global-and-DNS setting supplied by the

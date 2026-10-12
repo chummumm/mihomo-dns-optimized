@@ -9,10 +9,29 @@ import (
 )
 
 const (
-	ResponseModeFirstPing       = "first-ping"
-	ResponseModeFastestIP       = "fastest-ip"
-	ResponseModeFastestResponse = "fastest-response"
+	ResponseModeFirstPing              = "first-ping"
+	ResponseModeFastestIP              = "fastest-ip"
+	ResponseModeFastestResponse        = "fastest-response"
+	dnsEarlyReplyTTL            uint32 = 3
 )
+
+// Run only for an answer published while the same exchange keeps optimizing,
+// after each waiter's receipt-based aging. Cache snapshots retain their full
+// lifetime, and later ordinary cache hits do not inherit this renewal interval.
+func limitDNSEarlyReplyTTL(query, answer *D.Msg) *D.Msg {
+	if !answerPolicyCanRewrite(query, answer) || answer.Rcode != D.RcodeSuccess ||
+		query.Question[0].Qclass != D.ClassINET ||
+		(query.Question[0].Qtype != D.TypeA && query.Question[0].Qtype != D.TypeAAAA) ||
+		len(speedCheckCandidates(answer, query.Question[0])) == 0 {
+		return answer
+	}
+	for _, rr := range answer.Ns {
+		if rr.Header().Rrtype == D.TypeSOA {
+			return answer
+		}
+	}
+	return (AnswerPolicy{RRTTLReplyMax: dnsEarlyReplyTTL}).applyReply(query, answer)
+}
 
 func ValidateResponseMode(mode string) error {
 	switch mode {

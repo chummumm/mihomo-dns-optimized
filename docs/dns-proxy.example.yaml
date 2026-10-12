@@ -41,10 +41,11 @@ dns:
   # 以下为显式启用的可选优化；测速/双栈优选/预取缺省均关闭。
   # 仅 DIRECT/Compatible 的自动上游集合测速；代理与签名回答跳过。
   speed-check-mode: [tcp:443, tcp:80, ping]
+  # Linux 可显式用 [tcp-syn:443, ping]；真实 SYN 需要原始套接字权限。
   response-mode: first-ping
   speed-check-timeout: 1000       # 毫秒；0采用1000，最大5000
   speed-check-concurrency: 16    # 0采用16，最大256
-  max-reply-ip-num: 8            # 优选地址上限；不保证凑满
+  max-reply-ip-num: 8            # 显式设置也限制普通A/AAAA和hosts；不保证凑满
   dualstack-ip-selection: true
   dualstack-ip-selection-threshold: 10  # 毫秒；允许0–1000
   dualstack-ip-allow-force-AAAA: false   # 默认保留IPv4
@@ -56,6 +57,9 @@ dns:
   rr-ttl-min: 0                 # 不抬高原TTL
   rr-ttl-max: 3600              # 正常回答与缓存的TTL上限，秒
   prefetch-domain: true
+  prefetch-mode: proactive      # 仅实际DIRECT定时预取；首次真实成功查询即可激活
+  # 可选 smartdns 计时；serve-expired-prefetch-time 非零只能配合该模式。
+  # serve-expired-prefetch-time: 0  # 秒；0自动推导，不改变proactive的提前刷新
   serve-expired: true
   serve-expired-ttl: 604800      # 秒；示例最多使用过期7天的记录，0不限制
   serve-expired-reply-ttl: 1     # 返回过期回答的TTL，允许0

@@ -288,8 +288,8 @@ func TestDNSResponseModeEarlyAndFinalCacheKeepOriginalTTL(t *testing.T) {
 			query := routingTestQuery("early-lifetime.example", 54)
 			ctx := responseModePreparedContext(t, r, routingTestContext(newSelectionTestOutbound(), routingTestOrigin()), query)
 			answer := routingTestExchange(t, r, ctx, query)
-			if answer.Answer[0].Header().Ttl != 8 {
-				t.Fatalf("early answer did not clamp then age once: %v", answer)
+			if answer.Answer[0].Header().Ttl != dnsEarlyReplyTTL {
+				t.Fatalf("early client answer did not cap its aged lifetime: %v", answer)
 			}
 			barrier := responseModeBarrier(r, ctx, query)
 			close(late)
