@@ -27,8 +27,12 @@ func desiredState(cfg Config, runtime Runtime, network networkState, uids, marks
 		TProxyTCP6: runtime.TProxyPort != 0 && runtime.TProxyTCPIPv6 && runtime.IPv6 && network.IPv6Available,
 		TProxyUDP4: runtime.TProxyPort != 0 && runtime.TProxyUDP,
 		TProxyUDP6: runtime.TProxyPort != 0 && runtime.TProxyUDPIPv6 && runtime.IPv6 && network.IPv6Available,
+		RedirPort:  runtime.RedirPort,
+		Redir4:     runtime.RedirPort != 0 && runtime.RedirTCP,
+		Redir6:     runtime.RedirPort != 0 && runtime.RedirTCPIPv6 && runtime.IPv6 && network.IPv6Available,
 		BypassUIDs: slices.Clone(uids), BypassMarks: slices.Clone(marks),
-		BypassUDPPorts: slices.Clone(cfg.Local.BypassUDPPorts),
+		BypassUDPPorts: slices.Clone(cfg.Local.BypassPorts.UDP),
+		BypassTCPPorts: slices.Clone(cfg.Local.BypassPorts.TCP),
 		FakeIP:         normalizePrefixes(runtime.FakeIP),
 	}
 	if cfg.Local.Enable {
@@ -138,6 +142,9 @@ func needsBackendRepair(cfg Config, runtime Runtime, network networkState) bool 
 	if cfg.UDP == ModeTProxy && (!runtime.TProxyUDP || runtime.IPv6 && network.IPv6Available && !runtime.TProxyUDPIPv6) {
 		return true
 	}
+	if cfg.TCP == ModeRedir && (runtime.RedirPort == 0 || !runtime.RedirTCP || runtime.IPv6 && network.IPv6Available && !runtime.RedirTCPIPv6) {
+		return true
+	}
 	return false
 }
 
@@ -172,7 +179,7 @@ func resolveBypassUsers(names []string) ([]uint32, error) {
 		if err != nil {
 			account, lookupErr := user.Lookup(name)
 			if lookupErr != nil {
-				return nil, fmt.Errorf("transparent-proxy bypass user %q: %w", name, lookupErr)
+				return nil, fmt.Errorf("transparent-proxy.local.bypass-users: resolve Linux user %q: %w; create the service user or explicitly configure bypass-users: []", name, lookupErr)
 			}
 			value, err = strconv.ParseUint(account.Uid, 10, 32)
 			if err != nil {

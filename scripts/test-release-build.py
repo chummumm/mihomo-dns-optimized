@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -22,6 +23,75 @@ COMMIT = '123456789abcdef0123456789abcdef0123456789'
 TIME = '2026-10-09T02:00:00+00:00'
 
 
+class AccountFixture:
+    """Run the real hooks against account/filesystem commands confined to fixtures."""
+
+    def __init__(self, root):
+        root.mkdir()
+        self.root = root
+        self.state = root / 'accounts.json'
+        self.state.write_text(json.dumps({'passwd': None, 'group': None, 'calls': []}))
+        commands = root / 'commands'
+        commands.mkdir()
+        # No privileged command is ever run against the host. In particular,
+        # the chrootless dpkg migration below must redirect absolute chown paths.
+        mock = '''#!/usr/bin/python3
+import json, os, pathlib, sys
+path = pathlib.Path(os.environ['MIHOMO_ACCOUNT_FIXTURE'])
+state = json.loads(path.read_text())
+command = pathlib.Path(sys.argv[0]).name
+args = sys.argv[1:]
+state['calls'].append([command, *args])
+path.write_text(json.dumps(state))
+if os.environ.get('MIHOMO_ACCOUNT_FAIL') == command:
+    sys.exit(9)
+if command == 'getent':
+    assert args in [['passwd', 'mihomo'], ['group', 'mihomo']], args
+    entry = state[args[0]]
+    if entry is None:
+        sys.exit(2)
+    print(entry)
+elif command == 'groupadd':
+    assert state['group'] is None
+    state['group'] = 'mihomo:x:991:'
+elif command == 'useradd':
+    assert state['passwd'] is None
+    gid = state['group'].split(':')[2]
+    state['passwd'] = 'mihomo:x:990:' + gid + '::/nonexistent:/usr/sbin/nologin'
+elif command == 'id':
+    assert args == ['-g', 'mihomo'], args
+    print(state['passwd'].split(':')[3])
+elif command == 'chown':
+    assert args[0] in ['-hR', '-h'] and args[1] == '--', args
+    assert args[3] in ['/etc/mihomo', '/usr/bin/mihomo'], args
+else:
+    raise AssertionError(command)
+path.write_text(json.dumps(state))
+'''
+        for name in ['getent', 'groupadd', 'useradd', 'id', 'chown']:
+            command = commands / name
+            command.write_text(mock)
+            command.chmod(0o755)
+        self.env = dict(os.environ, MIHOMO_ACCOUNT_FIXTURE=str(self.state),
+                        PATH=str(commands) + os.pathsep + os.environ['PATH'])
+
+    def read(self):
+        return json.loads(self.state.read_text())
+
+    def replace(self, **fields):
+        state = self.read()
+        state.update(fields)
+        self.state.write_text(json.dumps(state))
+
+    def run(self, kind, argument=None):
+        script = self.root / ('postinstall-' + kind)
+        script.write_text(release.package_postinstall(kind))
+        if kind == 'archlinux':
+            return release.run('sh', '-c', '. "$1"; "$2"', '--', str(script),
+                               argument or 'post_install', env=self.env)
+        return release.run('sh', str(script), argument or ('configure' if kind == 'deb' else '1'), env=self.env)
+
+
 class ReleaseTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='mihomo-release-test-')
@@ -32,6 +102,68 @@ class ReleaseTests(unittest.TestCase):
         self.binary.chmod(0o755)
         self.out = self.root / 'dist'
         self.out.mkdir()
+
+    def test_package_hooks_create_nonlogin_account_and_migrate_resources(self):
+        for kind in ['deb', 'rpm', 'archlinux']:
+            with self.subTest(kind=kind):
+                fixture = AccountFixture(self.root / kind)
+                fixture.run(kind)
+                state = fixture.read()
+                self.assertEqual(state['passwd'], 'mihomo:x:990:991::/nonexistent:/usr/sbin/nologin')
+                self.assertIn(['groupadd', '--system', 'mihomo'], state['calls'])
+                self.assertIn(['useradd', '--system', '--gid', 'mihomo', '--home-dir', '/nonexistent',
+                               '--no-create-home', '--shell', '/usr/sbin/nologin', 'mihomo'], state['calls'])
+                self.assertEqual(state['calls'][-2:], [
+                    ['chown', '-hR', '--', 'mihomo:991', '/etc/mihomo'],
+                    ['chown', '-h', '--', 'mihomo:991', '/usr/bin/mihomo']])
+                fixture.replace(calls=[])
+                fixture.run(kind, 'post_upgrade' if kind == 'archlinux' else None)
+                again = fixture.read()
+                self.assertEqual(again['passwd'], state['passwd'])
+                self.assertFalse(any(call[0] in ['groupadd', 'useradd'] for call in again['calls']))
+                self.assertEqual(again['calls'][-2:], state['calls'][-2:])
+
+    def test_package_hooks_reuse_existing_user_and_primary_group(self):
+        original = 'mihomo:x:4321:5678:Existing account:/custom/home:/bin/bash'
+        for kind in ['deb', 'rpm', 'archlinux']:
+            with self.subTest(kind=kind):
+                fixture = AccountFixture(self.root / kind)
+                fixture.replace(passwd=original)
+                fixture.run(kind)
+                state = fixture.read()
+                self.assertEqual(state['passwd'], original)
+                self.assertIsNone(state['group'])
+                self.assertFalse(any(call[0] in ['groupadd', 'useradd'] for call in state['calls']))
+                self.assertEqual([call[3] for call in state['calls'] if call[0] == 'chown'],
+                                 ['mihomo:5678', 'mihomo:5678'])
+
+    def test_package_hooks_reuse_existing_group_and_surface_failure(self):
+        fixture = AccountFixture(self.root / 'account')
+        fixture.replace(group='mihomo:x:7654:')
+        fixture.run('deb')
+        self.assertEqual(fixture.read()['passwd'].split(':')[3], '7654')
+        self.assertFalse(any(call[0] == 'groupadd' for call in fixture.read()['calls']))
+        for kind in ['deb', 'rpm', 'archlinux']:
+            for command in ['groupadd', 'useradd', 'chown']:
+                with self.subTest(kind=kind, command=command):
+                    broken = AccountFixture(self.root / (kind + '-' + command))
+                    broken.env['MIHOMO_ACCOUNT_FAIL'] = command
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        broken.run(kind)
+                    self.assertEqual(broken.read()['calls'][-1][0], command)
+
+    def test_debian_abort_hook_does_not_change_accounts_or_resources(self):
+        fixture = AccountFixture(self.root / 'account')
+        for argument in ['abort-upgrade', 'abort-remove', 'abort-deconfigure']:
+            fixture.run('deb', argument)
+        self.assertEqual(fixture.read()['calls'], [])
+
+    def test_packaged_service_uses_mihomo_and_its_existing_primary_group(self):
+        import configparser
+        unit = configparser.ConfigParser(interpolation=None)
+        unit.read(release.ROOT / 'packaging/mihomo.service')
+        self.assertEqual(unit['Service']['User'], 'mihomo')
+        self.assertNotIn('Group', unit['Service'])
 
     def test_matrix_matches_promised_formats_and_cpu_baselines(self):
         rows = release.targets()
@@ -107,8 +239,8 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(old[1:], new[1:])
 
     def test_debian_rename_preserves_locally_modified_configuration(self):
-        # Exercise a real dpkg upgrade in a disposable root. No service hooks,
-        # host package database, installed binary or host configuration is used.
+        # Exercise real dpkg replacement/conffile behavior in a disposable root.
+        # Account and chown commands are fixtures, including for chrootless hooks.
         stage = self.root / 'old-package'
         (stage / 'DEBIAN').mkdir(parents=True)
         (stage / 'usr/bin').mkdir(parents=True)
@@ -124,17 +256,20 @@ class ReleaseTests(unittest.TestCase):
         root = self.root / 'installed-root'
         (root / 'var/lib/dpkg').mkdir(parents=True)
         (root / 'var/lib/dpkg/status').touch()
-        command = ['dpkg', '--root=' + str(root), '--force-not-root', '--force-bad-path', '--force-architecture', '--force-confold']
+        fixture = AccountFixture(self.root / 'account')
+        command = ['dpkg', '--root=' + str(root), '--force-not-root', '--force-bad-path',
+                   '--force-architecture', '--force-confold', '--force-script-chrootless', '--force-depends']
         if os.geteuid() != 0:
             self.assertIsNotNone(shutil.which('fakeroot'), 'Install fakeroot for the isolated dpkg migration test')
             command.insert(0, 'fakeroot')
-        release.run(*command, '--install', str(old_package))
+        release.run(*command, '--install', str(old_package), env=fixture.env)
         config = root / 'etc/mihomo/config.yaml'
         local_config = 'mixed-port: 8990\ncore-auto-update: true\n'
         config.write_text(local_config)
         row = dict(release.target('linux-amd64'), packages={'deb': 'amd64'})
         package, = release.package_binary(self.binary, row, VERSION, self.out, TIME, COMMIT, 'v1.19.32')
-        release.run(*command, '--install', str(package))
+        release.run(*command, '--install', str(package), env=fixture.env)
+        self.assertIsNotNone(fixture.read()['passwd'])
         self.assertEqual(config.read_text(), local_config)
         self.assertEqual((root / 'usr/bin/mihomo').read_bytes(), self.binary.read_bytes())
         status = release.run('dpkg-query', '--admindir=' + str(root / 'var/lib/dpkg'), '-W',

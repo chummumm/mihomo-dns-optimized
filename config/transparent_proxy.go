@@ -27,11 +27,14 @@ func validateTransparentProxy(raw *RawConfig) error {
 	if cfg.Uses(transparentproxy.ModeTProxy) && (raw.TProxyPort < 1 || raw.TProxyPort > 65535) {
 		return fmt.Errorf("transparent-proxy selects tproxy, which requires tproxy-port: 1..65535")
 	}
+	if cfg.Uses(transparentproxy.ModeRedir) && (raw.RedirPort < 1 || raw.RedirPort > 65535) {
+		return fmt.Errorf("transparent-proxy selects redir, which requires redir-port: 1..65535")
+	}
 	if raw.RoutingMark < 0 || uint64(raw.RoutingMark) > uint64(^uint32(0)) {
 		return fmt.Errorf("routing-mark must be a 32-bit unsigned integer when transparent-proxy is enabled")
 	}
 	mark := uint32(raw.RoutingMark)
-	if mark != 0 && ((cfg.Uses(transparentproxy.ModeTProxy) && mark == cfg.Routing.TProxy.Mark) ||
+	if mark == transparentproxy.RedirMark || mark != 0 && ((cfg.Uses(transparentproxy.ModeTProxy) && mark == cfg.Routing.TProxy.Mark) ||
 		(cfg.Uses(transparentproxy.ModeTUN) && mark == cfg.Routing.TUN.Mark)) {
 		return fmt.Errorf("routing-mark must differ from the transparent-proxy capture marks")
 	}

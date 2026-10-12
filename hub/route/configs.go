@@ -368,6 +368,14 @@ func patchConfigs(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusBadRequest
 			return fmt.Errorf("change transparent-proxy tcp/udp in YAML before disabling its selected tproxy-port")
 		}
+		if general.RedirPort != nil && (*general.RedirPort < 0 || *general.RedirPort > 65535) {
+			status = http.StatusBadRequest
+			return fmt.Errorf("redir-port must be 0..65535")
+		}
+		if policy.Uses(transparentproxy.ModeRedir) && general.RedirPort != nil && *general.RedirPort == 0 {
+			status = http.StatusBadRequest
+			return fmt.Errorf("change transparent-proxy tcp in YAML before disabling its selected redir-port")
+		}
 		if policy.Uses(transparentproxy.ModeTUN) && general.Tun != nil && general.Tun.Enable != nil && !*general.Tun.Enable {
 			status = http.StatusBadRequest
 			return fmt.Errorf("change transparent-proxy tcp/udp in YAML before disabling its selected tun listener")
@@ -409,8 +417,8 @@ func patchConfigs(w http.ResponseWriter, r *http.Request) {
 
 		listener.ReCreateHTTP(pointerOrDefault(general.Port, ports.Port), tunnel.Tunnel)
 		listener.ReCreateSocks(pointerOrDefault(general.SocksPort, ports.SocksPort), tunnel.Tunnel)
-		listener.ReCreateRedir(pointerOrDefault(general.RedirPort, ports.RedirPort), tunnel.Tunnel)
-		patchErr := listener.ReCreateTProxy(pointerOrDefault(general.TProxyPort, ports.TProxyPort), tunnel.Tunnel)
+		patchErr := listener.ReCreateRedir(pointerOrDefault(general.RedirPort, ports.RedirPort), tunnel.Tunnel)
+		patchErr = errors.Join(patchErr, listener.ReCreateTProxy(pointerOrDefault(general.TProxyPort, ports.TProxyPort), tunnel.Tunnel))
 		listener.ReCreateMixed(pointerOrDefault(general.MixedPort, ports.MixedPort), tunnel.Tunnel)
 		patchErr = errors.Join(patchErr, listener.ReCreateTun(pointerOrDefaultTun(general.Tun, listener.GetLastTunConf()), tunnel.Tunnel))
 		listener.ReCreateShadowSocks(pointerOrDefault(general.ShadowSocksConfig, ports.ShadowSocksConfig), tunnel.Tunnel)

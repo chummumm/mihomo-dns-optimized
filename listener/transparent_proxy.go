@@ -11,6 +11,7 @@ import (
 	"github.com/metacubex/mihomo/component/transparentproxy"
 	C "github.com/metacubex/mihomo/constant"
 	LC "github.com/metacubex/mihomo/listener/config"
+	"github.com/metacubex/mihomo/listener/redir"
 	"github.com/metacubex/mihomo/listener/sing_tun"
 	"github.com/metacubex/mihomo/listener/tproxy"
 	"github.com/metacubex/mihomo/log"
@@ -20,7 +21,7 @@ import (
 // manager never calls back into listeners while this lock is held.
 var transparentListenersMu sync.Mutex
 
-var lastTProxyPort int
+var lastTProxyPort, lastRedirPort int
 
 type tunListener interface {
 	Config() LC.Tun
@@ -32,6 +33,26 @@ type tunListener interface {
 }
 
 var (
+	newRedirListener = func(addr string, tunnel C.Tunnel) (C.Listener, error) {
+		var listener *redir.Listener
+		var err error
+		if transparentConfig().Uses(transparentproxy.ModeRedir) {
+			listener, err = redir.NewManaged(addr, tunnel)
+		} else {
+			listener, err = redir.New(addr, tunnel)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return listener, nil
+	}
+	newRedirUDPListener = func(addr string, tunnel C.Tunnel) (C.Listener, error) {
+		listener, err := tproxy.NewUDP(addr, tunnel)
+		if err != nil {
+			return nil, err
+		}
+		return listener, nil
+	}
 	newTunListener = func(cfg LC.Tun, tunnel C.Tunnel) (tunListener, error) {
 		l, err := sing_tun.New(cfg, tunnel)
 		if err != nil {
@@ -66,6 +87,7 @@ var (
 		return l, nil
 	}
 	beforeTunClose           = transparentproxy.BeforeTunClose
+	beforeRedirClose         = transparentproxy.BeforeRedirClose
 	notifyBackends           = transparentproxy.NotifyBackends
 	tunInterfaceByName       = lookupTunInterface
 	transparentConfig        = transparentproxy.CurrentConfig
@@ -192,6 +214,71 @@ func ReCreateTProxy(port int, tunnel C.Tunnel) (err error) {
 	return recreateTProxyLocked(port, tunnel, false)
 }
 
+func ReCreateRedir(port int, tunnel C.Tunnel) (err error) {
+	transparentListenersMu.Lock()
+	defer transparentListenersMu.Unlock()
+	defer func() {
+		err = errors.Join(err, notifyBackends(transparentBackendsLocked()))
+		if err != nil {
+			log.Errorln("Start Redir server error: %s", err)
+		}
+	}()
+	lastRedirPort = port
+	return recreateRedirLocked(port, tunnel, false)
+}
+
+func recreateRedirLocked(port int, tunnel C.Tunnel, repairIPv6 bool) (err error) {
+	cfg := transparentConfig()
+	addr := genAddr(bindAddress, port, allowLan)
+	if cfg.Uses(transparentproxy.ModeRedir) {
+		addr = net.JoinHostPort("", strconv.Itoa(port))
+	}
+	_, ipv6 := tproxyFamilies(redirListener)
+	if redirListener != nil && (redirListener.RawAddress() != addr || repairIPv6 && !ipv6) {
+		if err := closeRedirListenerLocked(); err != nil {
+			return err
+		}
+	}
+	// Preserve the existing manually configured UDP TProxy sidecar. Managed
+	// UDP never selects this socket and always uses its requested backend.
+	udpAddr := genAddr(bindAddress, port, allowLan)
+	if redirUDPListener != nil && redirUDPListener.RawAddress() != udpAddr {
+		err = redirUDPListener.Close()
+		redirUDPListener = nil
+	}
+	if portIsZero(addr) {
+		return err
+	}
+	if redirListener == nil {
+		var listenErr error
+		redirListener, listenErr = newRedirListener(addr, tunnel)
+		if listenErr != nil {
+			return errors.Join(err, listenErr)
+		}
+		log.Infoln("Redirect proxy listening at: %s", redirListener.Address())
+	}
+	if redirUDPListener == nil {
+		var udpErr error
+		redirUDPListener, udpErr = newRedirUDPListener(udpAddr, tunnel)
+		if udpErr != nil {
+			log.Warnln("Failed to start Redir UDP Listener: %s", udpErr)
+		}
+	}
+	return err
+}
+
+func closeRedirListenerLocked() error {
+	if redirListener == nil {
+		return nil
+	}
+	if err := beforeRedirClose(); err != nil {
+		return err
+	}
+	err := redirListener.Close()
+	redirListener = nil
+	return err
+}
+
 func recreateTProxyLocked(port int, tunnel C.Tunnel, repairIPv6 bool) (err error) {
 	cfg := transparentConfig()
 	addr := genAddr(bindAddress, port, allowLan)
@@ -246,9 +333,10 @@ func TransparentProxyBackends() transparentproxy.BackendState {
 }
 
 func transparentBackendsLocked() transparentproxy.BackendState {
-	state := transparentproxy.BackendState{TProxyPort: tproxyPortLocked()}
+	state := transparentproxy.BackendState{TProxyPort: tproxyPortLocked(), RedirPort: listenerPort(redirListener)}
 	state.TProxyTCP, state.TProxyTCPIPv6 = tproxyFamilies(tproxyListener)
 	state.TProxyUDP, state.TProxyUDPIPv6 = tproxyFamilies(tproxyUDPListener)
+	state.RedirTCP, state.RedirTCPIPv6 = tproxyFamilies(redirListener)
 	if tunLister != nil {
 		state.TunName = tunLister.DeviceName()
 		state.TunIndex = tunLister.DeviceIndex()
@@ -308,6 +396,9 @@ func RepairTransparentBackends(tunnel C.Tunnel) (err error) {
 	if cfg.Uses(transparentproxy.ModeTProxy) && lastTProxyPort > 0 {
 		err = recreateTProxyLocked(lastTProxyPort, tunnel, ipv6Available)
 	}
+	if cfg.Uses(transparentproxy.ModeRedir) && lastRedirPort > 0 {
+		err = errors.Join(err, recreateRedirLocked(lastRedirPort, tunnel, ipv6Available))
+	}
 	if cfg.Uses(transparentproxy.ModeTUN) && LastTunConf.Enable {
 		state := transparentBackendsLocked()
 		needsIPv6 := ipv6Available && len(LastTunConf.Inet6Address) != 0
@@ -320,12 +411,19 @@ func RepairTransparentBackends(tunnel C.Tunnel) (err error) {
 
 func tproxyPortLocked() uint16 {
 	for _, l := range []C.Listener{tproxyListener, tproxyUDPListener} {
-		if l != nil {
-			_, port, err := net.SplitHostPort(l.Address())
-			if err == nil {
-				value, _ := strconv.ParseUint(port, 10, 16)
-				return uint16(value)
-			}
+		if port := listenerPort(l); port != 0 {
+			return port
+		}
+	}
+	return 0
+}
+
+func listenerPort(l C.Listener) uint16 {
+	if l != nil {
+		_, port, err := net.SplitHostPort(l.Address())
+		if err == nil {
+			value, _ := strconv.ParseUint(port, 10, 16)
+			return uint16(value)
 		}
 	}
 	return 0
@@ -334,6 +432,6 @@ func tproxyPortLocked() uint16 {
 func Cleanup() error {
 	transparentListenersMu.Lock()
 	defer transparentListenersMu.Unlock()
-	err := closeTunListenerLocked()
+	err := errors.Join(closeTunListenerLocked(), closeRedirListenerLocked())
 	return errors.Join(err, notifyBackends(transparentBackendsLocked()))
 }

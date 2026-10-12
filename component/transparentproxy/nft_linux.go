@@ -324,13 +324,15 @@ func managedNFTChain(name string) bool {
 	switch name {
 	case "prerouting", "output", "pre4", "pre6", "out4", "out6", "tproxy4", "tproxy6", "mark_tproxy4", "mark_tproxy6", "tun4", "tun6":
 		return true
+	case "redir4", "redir6", "redir_nat_pre", "redir_nat_out", "redir_guard_pre", "redir_guard_out", "redir_check4", "redir_check6":
+		return true
 	}
 	return false
 }
 
 func managedNFTSet(name string) bool {
 	switch name {
-	case "local4", "local6", "gateway", "bypass_uids", "bypass_marks", "bypass_udp_ports", "local_types", "fake4", "fake6", "bypass4", "bypass6":
+	case "local4", "local6", "gateway", "bypass_uids", "bypass_marks", "bypass_udp_ports", "bypass_tcp_ports", "local_types", "fake4", "fake6", "bypass4", "bypass6":
 		return true
 	}
 	return false

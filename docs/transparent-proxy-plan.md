@@ -2,6 +2,8 @@
 
 从 **`mihomo-optimized-v1.0.6`** 起，Linux 可通过顶层 `transparent-proxy` 分别选择 TCP / UDP 入口，由内核管理对应 nftables 捕获、策略规则和路由，并通过系统事件恢复缺失的自有资源。默认关闭；旧版本不识别此配置。后端选择不改变 mihomo 的业务分流规则。
 
+`1.0.7` 增加 TCP `redir`、按协议划分的 `bypass-ports`、默认 `mihomo` 用户旁路，并收紧 RA 事件合并和原生 TUN 的 DNS 连接重置条件。下面采用新格式。
+
 ## YAML 入口
 
 沿用已有 TUN 与 TProxy 监听设置，新增一个顶层入口统一拥有防火墙、策略规则和路由。下面对应 TCP 走 TProxy、UDP 走 TUN 的现有部署：
@@ -19,7 +21,7 @@ tun:
 
 transparent-proxy:
   enable: true
-  tcp: tproxy # tproxy | tun | "off"
+  tcp: tproxy # tproxy | tun | redir | "off"
   udp: tun   # tproxy | tun | "off"
 
   routing:
@@ -36,7 +38,9 @@ transparent-proxy:
     enable: true
     interfaces: [eth0]
     bypass-users: [mihomo]
-    bypass-udp-ports: [123]
+    bypass-ports:
+      udp: [123]
+      tcp: []
 
   gateway:
     enable: true
@@ -50,12 +54,13 @@ transparent-proxy:
 
 `mark`、`table`、`priority` 分别控制 fwmark、路由表编号和策略规则优先级。mark 使用完整 32 位精确匹配，内核显式写入 `0xffffffff` 掩码；没有额外 mask 字段。数字支持 YAML 整数和 `0x` 十六进制，不接受数字字符串、小数、负数或溢出值。
 
-每个后端使用 **`priority` 的查表规则和 `priority + 1` 的终止黑洞规则**。后者防止查表规则或表内转发路由单独丢失时，已标记流量继续落到系统 `main` 表。`priority` 可取 `1..32764`，两组优先级不能重叠；保留系统优先级 `0` 的 local 查找，并在通常的 `32766` main 查找之前完成处理。更早的外部策略会改变这个保证，因此启用前会检查冲突。
+TProxy 与 TUN 各自使用 **`priority` 的查表规则和 `priority + 1` 的终止黑洞规则**。后者防止查表规则或表内转发路由单独丢失时，已标记流量继续落到系统 `main` 表。`priority` 可取 `1..32764`，两组优先级不能重叠；保留系统优先级 `0` 的 local 查找，并在通常的 `32766` main 查找之前完成处理。更早的外部策略会改变这个保证，因此启用前会检查冲突。
 
 | 后端 | 示例标记 / 表 | IPv4 路由 | IPv6 路由 |
 | --- | --- | --- | --- |
 | TProxy | `0x1` / `100` | `local 0.0.0.0/0 dev lo` | `local ::/0 dev lo` |
 | TUN | `0x162` / `101` | `default dev <实际 TUN>` | `default dev <实际 TUN>` |
+| REDIRECT | 内部 `0x4d485244`，无专用路由表 | NAT 到 `redir-port` | NAT 到 `redir-port` |
 
 `lo` 与 TUN 设备绑定从后端推导。TUN 路由使用监听器创建时记录的真实 ifindex，不能把外部新建的同名设备当成原监听器。表内正常路由的 metric 为 `100`，另有 metric 为 `1073741824` 的常驻 blackhole 默认路由；该黑洞不依赖 TUN 设备。IPv4 与 IPv6 各自管理相同编号的表和规则。
 
@@ -68,20 +73,34 @@ transparent-proxy:
 | 配置 | 默认值 / 约束 |
 | --- | --- |
 | `enable` | `false`；仅 Linux 可启用 |
-| `tcp` / `udp` | `tproxy` / `tun`，分别支持 `tproxy`、`tun`、`"off"` |
+| `tcp` | `tproxy`；支持 `tproxy`、`tun`、`redir`、`"off"` |
+| `udp` | `tun`；支持 `tproxy`、`tun`、`"off"` |
 | `routing.tproxy` | mark `0x1`、table `100`、priority `1000`（同时占用 `1001`） |
 | `routing.tun` | mark `0x162`、table `101`、priority `1010`（同时占用 `1011`） |
 | `local.enable` / `local.interfaces` | `true` / `[auto]`；`auto` 按地址族选择当前出口，`["*"]` 表示全部接口，空列表不接管本机流量 |
-| `local.bypass-users` | `[]`；接受用户名或十进制 UID，不默认排除 root |
-| `local.bypass-udp-ports` | `[123]`；只影响本机普通 UDP，FakeIP 优先 |
+| `local.bypass-users` | `[mihomo]`；接受用户名或十进制 UID；显式 `[]` 关闭用户旁路 |
+| `local.bypass-ports.udp` | `[123]`；仅本机普通 UDP 目的端口，FakeIP 优先 |
+| `local.bypass-ports.tcp` | `[]`；仅本机普通 TCP 目的端口，FakeIP 优先 |
 | `gateway.enable` / `gateway.interfaces` | `false` / `["*"]`；只在显式开启后接管网关入站 |
 | `bypass.reserved-addresses` | `true`，静态范围见下表 |
 | `bypass.interface-prefixes` | `[auto]`；也可指定真实 LAN/WAN 接口列表，`["*"]` 学习所有适用接口 |
 | `bypass.extra-addresses` | `[]`；IPv4 / IPv6 CIDR，不接受默认路由前缀 |
 
-选择 TUN 时要求 `tun.enable: true`，选择 TProxy 时要求有效 `tproxy-port`。托管 TProxy 使用通配地址监听原始目的地址，不受 HTTP / SOCKS 的 `allow-lan` 绑定限制。需要 Linux 的网络管理权限及 nftables TProxy/socket 内核支持；运行用户仍可使用 `mihomo`。不需要安装命令行 `nft` 或 `ip` 来执行后台维护。
+选择 TUN 时要求 `tun.enable: true`，选择 TProxy 时要求有效 `tproxy-port`，TCP 选择 `redir` 时要求有效 `redir-port`。托管 TProxy / REDIRECT 使用通配地址监听，不受 HTTP / SOCKS 的 `allow-lan` 绑定限制。需要 Linux 的网络管理权限及所选后端对应的 nftables 内核支持。不需要安装命令行 `nft` 或 `ip` 来执行后台维护。
 
-不创建 `transparent-proxy/` 子目录或 `state.json`，不需要为本模块给 `-d` 数据目录增加写权限；配置文件可以继续由 root 持有并保持只读。也不增加保存恢复日志的 nftables 集合、映射、额外表或跨进程内存文件。实际工作的 nftables 对象带固定模块注释，路由与策略规则带专用协议标识；这些都是工作资源自身的属性，没有另存配置副本或操作历史。
+`local.bypass-users` 只排除本机 OUTPUT，不排除网关设备的流量。原生包创建或复用 `mihomo` 账号，并由它运行服务；手工安装二进制时，需要准备该账号或显式填写实际用户 / UID。不存在的用户名会在启用时明确报错。
+
+`bypass-ports` 的 TCP / UDP 列表分别生效；端口范围为 `1..65535`，可用 `[]` 清空。旧的 `bypass-udp-ports` 仍作为只读入的兼容别名接受，输出配置采用新结构；同一 `local` 中同时出现新旧键会报错，避免优先级不明确。
+
+### TCP REDIRECT 与其他入站
+
+可将上述示例的 TCP 改为 `tcp: redir`，并在顶层增加 `redir-port: 7892`，UDP 继续按自己的配置选择后端。HTTP、SOCKS、mixed 等入口需要客户端使用对应代理协议；它们仍可按 Mihomo 原有方式启用，但不能作为本模块对原始 TCP / UDP 报文的透明转送目标。Mihomo 的 [端口配置文档](https://wiki.metacubex.one/config/inbound/port/) 也将 redir 标为仅 TCP。
+
+REDIRECT 的 NAT 只为新连接创建映射，因此每个包仍经过 NAT 前分类，并在 NAT 后验证受管 conntrack 标记、DNAT 状态、当前监听端口及本地目的地址。内部 `0x4d485244` 同时标识此次捕获和实际 NAT 会话，不能与用户出站或 TProxy / TUN 标记冲突；不覆盖外部非零 conntrack mark，也不接管外部已有 DNAT。保护检查失败时阻断该连接。
+
+切换后端、修改 redir 端口或更新旁路条件后，不兼容的旧 NAT 会话需要客户端重新连接；不会清空整个系统的 conntrack。监听器关闭、重建和受控重启前同样先设保护。正常 stop 撤销本模块规则及 NAT hooks，已有连接可能需要重新建立，已有 conntrack 记录按 Linux 的生命周期结束。这些连接状态是实际转发资源，不是额外的恢复记录。
+
+本模块不创建 `transparent-proxy/` 子目录或 `state.json`，也不增加保存恢复日志的 nftables 集合、映射、额外表或跨进程内存文件。实际工作的 nftables 对象带固定模块注释，路由与策略规则带专用协议标识；这些都是工作资源自身的属性，没有另存配置副本或操作历史。原生包的数据目录归属及面板 / 内核更新写权限见[安装说明](releases.md)。
 
 未知字段会报错，包括已经决定不提供的 `reconcile-interval`。这些配置通过完整 YAML 重载应用；控制器的局部 PATCH 不用于改变整套透明代理策略。
 
@@ -119,7 +138,9 @@ TUN / TProxy 监听实现和现有拨号层继续复用。TCP、UDP 都选 TUN �
 | nftables table / chain / rule / set / element 事务 | 核对并恢复本模块的规则或集合 |
 | 成功重载配置、后端启停 | 根据最新配置及监听器就绪状态重新计算期望状态 |
 
-进程启动、配置重载、重新建立事件订阅后需要完整读取当前状态；这属于初始化或恢复。事件可在短时间内合并，但没有事件时不产生下一轮工作。错误后的退避重连、失败事务重试可以使用定时器，不把它们变成日常巡检周期。
+进程启动、配置重载、重新建立事件订阅后需要完整读取当前状态；这属于初始化或恢复。普通相关事件使用 **50 ms 静默窗口、从首条事件起最多 250 ms** 的合并：持续 RA 也不能无限推迟处理。接口 down / 删除、地址失效 / 删除、自有或外部策略资源变化、nftables 事务及观察错误立即进入核对 / 保护路径。没有事件时不产生下一轮工作；失败恢复沿用退避定时器。
+
+连续通知中仅有效地址寿命刷新、默认 RA 路由剩余寿命倒计时变化，或无语义差异的 link 更新会被过滤。main 表中不覆盖实际出口探测地址的非默认路由不触发扫描，包含常见 ULA RIO；不能把所有 `proto ra` 路由一概忽略。默认出口的网关、metric、偏好、地址有效性发生变化仍会处理。相关网络变化只重新计算必要资源，不调用完整 YAML 重载或内核重启。
 
 ```mermaid
 flowchart TD
@@ -146,6 +167,8 @@ flowchart TD
 
 自己的写操作也会产生事件；通过规范化后的期望 / 实际比较结束反馈，不能用“写完忽略一秒事件”丢弃外部变化。计数器、时间戳和地址剩余寿命不作为必须重写的差异。
 
+原生 TUN 的 `auto-detect-interface` 继续刷新接口缓存，但 DNS 连接池仅在实际接口身份 / 关键链路状态 / MTU 变化、旧 IPv4 源地址丢失、公网 IPv6 前缀丢失或枚举到的单播地址族消失时重置。新增地址、同前缀隐私地址轮换及仍有 IPv6 单播源时的 ULA 变化不反复重置连接池；公网 IPv6 消失、仅剩 ULA 时仍会重置。该监视器的地址接口不提供 DAD、valid lifetime 等完整状态，也不能识别每条加密 DNS 连接具体绑定的已退役 IPv6 临时地址；它比较地址 / 前缀的存在情况，单连接失效继续由原有传输错误重连处理。托管路由组件仍独立处理完整 netlink 地址状态。关闭监听器后不再发起新的监视回调重置。
+
 ## IPv4 / IPv6 与前缀变化
 
 动态前缀从指定接口的实际地址与掩码获得，不假定 IPv4 是 `/24`、IPv6 是 `/64`。同一前缀存在多个有效地址时合并贡献；最后一个有效地址消失后才删除前缀。读取成功但地址集合为空需要移除旧动态前缀；读取失败保留上一次完整状态并恢复观察，不能把失败当作确认删除。
@@ -171,9 +194,9 @@ WAN 地址、隐私地址轮换、接口重连、默认路由变化按 IPv4 / IP
 
 本机流量先排除内核自己的出站，再处理捕获；范围包含 DNS、代理连接、GeoData / rule-provider / UI / core 下载和其他后台连接。在真实 socket 的 Control 阶段注册并设置 SO_MARK，用户明确配置的节点 mark / `routing-mark` 保留完整值，没有指定时使用内部 `0x4d484d4f`。新显式 mark 的排除规则提交成功后才允许 socket 发送。
 
-启用和完成重载时还会检查本进程已经打开的 IPv4 / IPv6 socket；修改前固定描述符身份，失败可回退原 mark，避免正在复用的 DNS/HTTP 连接被重新捕获。入站服务回复通过 OUTPUT 的连接跟踪 reply 方向排除。`bypass-users: [mihomo]` 是额外排除，不会因为内核以 root 运行就放过所有 root 应用流量。
+启用和完成重载时还会检查本进程已经打开的 IPv4 / IPv6 socket；修改前固定描述符身份，失败可回退原 mark，避免正在复用的 DNS/HTTP 连接被重新捕获。入站服务回复通过 OUTPUT 的连接跟踪 reply 方向排除。默认 `bypass-users: [mihomo]` 提供额外的用户排除；显式用 root 运行内核时，仍只对内核自己的 socket 设置防环标记，不把全部 root 应用作为默认旁路。
 
-处理顺序为：自身出站与 TUN 回流防环 → 已标记的 TProxy 本机回流 → 接管接口范围 → FakeIP → 本地 / 特殊 / 动态前缀排除 → 本机端口排除 → 其余选中流量。不能一概排除 `lo`，因为 TProxy 本机 OUTPUT 流量正是经 local 路由回到 PREROUTING；`bypass-udp-ports: [123]` 保持仅本机生效，且不抢在 FakeIP 之前。
+处理顺序为：自身出站与 TUN 回流防环 → 已标记的 TProxy 本机回流 → 接管接口范围 → FakeIP → 本地 / 特殊 / 动态前缀排除 → 本机端口排除 → 其余选中流量。不能一概排除 `lo`，因为 TProxy 本机 OUTPUT 流量正是经 local 路由回到 PREROUTING；`bypass-ports.udp` 和 `bypass-ports.tcp` 保持仅本机生效，且不抢在 FakeIP 之前。
 
 网关模式配置所需转发、rp_filter 和 IPv6 RA 接收。IPv4 对需要转发的接口设置 forwarding，避免全局 `ip_forward` 切换的额外重置；IPv6 所需的全局 forwarding 改动及默认/接口副作用，在写入前把原值保存在本进程内存中。原本接受 RA 的出口在转发期间使用 `accept_ra=2`，明确配置为 `0` 的接口保持不接受。退出只在当前值仍等于本模块写入值、接口身份也匹配时恢复原值。
 
@@ -213,7 +236,7 @@ WAN 地址、隐私地址轮换、接口重连、默认路由变化按 IPv4 / IP
 
 ## 验证范围
 
-Go 行为回归检查配置语义、协议/地址族就绪、前缀增删、TUN 身份、同步关闭屏障、错误传播、观察丢失重订阅和清理重试。Linux CI 另设必须通过的隔离 network namespace 检查：真实安装/读回 nftables、删除对象恢复、外部对象保留，以及 TUN 黑洞期间的实际 IPv4 / IPv6 已标记报文。实际内核进程还须通过直接 SIGTERM、控制器重启后的 SIGTERM，以及 systemd 临时单元的 `systemctl stop` 回归；退出后核对没有自有 nftables/策略规则/路由残留、外部哨兵仍在、本次系统参数已恢复且没有新增状态目录。无特权环境只运行普通回归，不把跳过内核测试算成完成验证。
+Go 行为回归检查配置语义、协议/地址族就绪、前缀增删、TUN 身份、同步关闭屏障、错误传播、观察丢失重订阅和清理重试。Linux CI 另设必须通过的隔离 network namespace 检查：真实安装/读回 nftables、删除对象恢复、外部对象保留，以及 TUN 黑洞期间的实际 IPv4 / IPv6 已标记报文。REDIRECT 以本机和 veth 网关来源分别发送 IPv4 / IPv6 TCP，检查真实原目的地址、旧直连 / 旧端口会话阻断、新连接恢复与 stop 后新流量直连。实际内核进程还须通过直接 SIGTERM、控制器重启后的 SIGTERM，以及 systemd 临时单元的 `systemctl stop` 回归；退出后核对没有自有 nftables/策略规则/路由残留、外部哨兵仍在、本次系统参数已恢复且没有新增状态目录。无特权环境只运行普通回归，不把跳过内核测试算成完成验证。
 
 ## 依据
 

@@ -134,7 +134,7 @@ geo-update-interval: 24 # 整数小时，默认 24，范围 1..2562047
 
 ## Linux 透明代理与自动路由恢复
 
-从内核 `1.0.6` 起，新增默认关闭的顶层 `transparent-proxy`。TCP、UDP 可分别选择 `tproxy`、`tun` 或 `"off"`；内核维护 IPv4 / IPv6 捕获、fwmark 规则、路由与动态接口前缀。以下示例对应 **TCP 走 TProxy、UDP 走 TUN**，沿用已有 DNS、节点与业务规则：
+从内核 `1.0.6` 起，新增默认关闭的顶层 `transparent-proxy`。TCP、UDP 可分别选择 `tproxy`、`tun` 或 `"off"`；`1.0.7` 另支持 TCP `redir`。内核维护 IPv4 / IPv6 捕获、fwmark 规则、路由与动态接口前缀。以下示例对应 **TCP 走 TProxy、UDP 走 TUN**，沿用已有 DNS、节点与业务规则：
 
 ```yaml
 ipv6: true
@@ -162,8 +162,10 @@ transparent-proxy:
   local:
     enable: true
     interfaces: [eth0] # [auto] 按 IPv4 / IPv6 分别选择当前出口
-    bypass-users: [mihomo] # 额外排除；不默认排除 root
-    bypass-udp-ports: [123]
+    bypass-users: [mihomo] # 默认值；接受用户名或 UID
+    bypass-ports:
+      udp: [123]
+      tcp: []
   gateway:
     enable: true
     interfaces: ["*"]
@@ -174,6 +176,8 @@ transparent-proxy:
 ```
 
 表号与 mark 均可自定义，两个后端使用独立资源。mark 为完整 32 位精确匹配；priority 明确设置且每组保留后一位。TProxy 保留 Linux 官方示例的 `local 0/0 dev lo`，TUN 使用实际设备的默认路由；捕获链使用标准 `mangle` 优先级和 OUTPUT route 链。详细默认值、官方依据和冲突处理见[透明代理与路由托管](docs/transparent-proxy-plan.md)。
+
+原生安装包默认以 `mihomo` 用户运行：用户不存在时创建非登录系统账号，已有用户直接复用。安装和升级把 `/etc/mihomo` 的配置、数据、缓存及面板和 `/usr/bin/mihomo` 交给该用户及其主组，保留文件访问模式。内核自更新只替换可执行文件；从旧版迁移默认用户与资源归属时，需先升级一次安装包，见[安装与更新](docs/releases.md)。
 
 **TUN 重建前先同步确认已启用地址族的黑洞保护，成功后才关闭旧设备；保护失败会中止重建。** 开启 IPv6 时同时保护双栈。常驻黑洞不依赖 TUN，设备意外消失或单条查表规则被删时，也阻止已标记流量回落到 main 表。新设备与监听器实际就绪后才恢复转发。相同有效配置重载继续复用 TUN。
 

@@ -71,6 +71,9 @@ func TestTransparentProxyDependenciesFailBeforeParsingResources(t *testing.T) {
 		{"TUN capture mark", "capture marks", func(raw *RawConfig) { raw.RoutingMark = 0x162 }},
 		{"TProxy capture mark", "capture marks", func(raw *RawConfig) { raw.RoutingMark = 1 }},
 		{"negative global mark", "32-bit", func(raw *RawConfig) { raw.RoutingMark = -1 }},
+		{"reserved REDIRECT mark", "capture marks", func(raw *RawConfig) { raw.RoutingMark = int(transparentproxy.RedirMark) }},
+		{"missing REDIRECT", "redir-port", func(raw *RawConfig) { raw.TransparentProxy.TCP = transparentproxy.ModeRedir; raw.RedirPort = 0 }},
+		{"overflow REDIRECT", "redir-port", func(raw *RawConfig) { raw.TransparentProxy.TCP = transparentproxy.ModeRedir; raw.RedirPort = 65536 }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			raw := DefaultRawConfig()
@@ -98,6 +101,19 @@ func TestTransparentProxyDependenciesFailBeforeParsingResources(t *testing.T) {
 		if _, err := parseGeneral(raw); err != nil {
 			t.Fatalf("inactive backend dependency was still required for %s: %v", mode, err)
 		}
+	}
+}
+
+func TestTransparentProxyRedirOnlyRequiresItsOwnTCPListener(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("managed capture is Linux-only")
+	}
+	raw := DefaultRawConfig()
+	raw.TransparentProxy.Enable = true
+	raw.TransparentProxy.TCP, raw.TransparentProxy.UDP = transparentproxy.ModeRedir, transparentproxy.ModeOff
+	raw.RedirPort = 7892
+	if _, err := parseGeneral(raw); err != nil {
+		t.Fatalf("TCP REDIRECT required an unrelated backend: %v", err)
 	}
 }
 

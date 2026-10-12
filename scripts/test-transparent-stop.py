@@ -17,6 +17,7 @@ import configparser
 import json
 import os
 from pathlib import Path
+import pwd
 import select
 import shutil
 import signal
@@ -34,6 +35,7 @@ CONTROLLER = "http://127.0.0.1:19091"
 SECRET = "isolated-stop-test"
 INTERFACES = ("lo", "wan0", "wan-peer", "lan0", "lan-peer")
 STOP_TIMEOUT = 35
+SERVICE_USER = "nobody"  # Existing CI account; never create/alter host accounts.
 
 
 class Failure(RuntimeError):
@@ -259,6 +261,7 @@ transparent-proxy:
   local:
     enable: true
     interfaces: [wan0]
+    bypass-users: [{SERVICE_USER}]
   gateway:
     enable: true
     interfaces: [lan0]
@@ -276,12 +279,12 @@ def service_properties() -> list[str]:
     unit.optionxform = str
     unit.read(ROOT / "packaging" / "mihomo.service")
     section = unit["Service"]
-    if section.get("Type") != "simple" or "ExecStop" in section:
+    if section.get("Type") != "simple" or section.get("User") != "mihomo" or "ExecStop" in section:
         raise Failure("packaged service lifecycle changed; adapt the stop fixture to its actual unit")
-    # Use the shipped capabilities, restart policy and kill behavior. Only its
-    # command, log destination and isolated namespace are fixture-specific.
+    # Use the shipped capabilities, restart policy and kill behavior under an
+    # existing non-root fixture user, with exclusively temporary resources.
     return [f"--property={name}={value}" for name, value in section.items()
-            if name not in {"ExecStart", "ExecReload"}]
+            if name not in {"ExecStart", "ExecReload", "User"}] + [f"--property=User={SERVICE_USER}"]
 
 
 class Core:
@@ -317,7 +320,7 @@ class Core:
                         pass  # StartTransientUnit has not published the unit yet.
                     time.sleep(0.1)
                 else:
-                    raise Failure("systemd did not start the transient core service")
+                    raise Failure(f"systemd did not start the transient core service:\n{self.diagnostics()}")
             except BaseException:
                 self.close()
                 raise
@@ -372,6 +375,18 @@ class Core:
 
     def diagnostics(self) -> str:
         texts = [path.read_text(errors="replace") for path in (self.log, self.wait_log) if path.exists()]
+        if self.unit:
+            # Capture the first failure before close() stops and resets the
+            # transient unit. A constructor failure leaves the caller without
+            # a Core instance from which to collect these diagnostics later.
+            for argv in (
+                ["systemctl", "show", self.unit, "--property=MainPID,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,NRestarts"],
+                ["journalctl", "--no-pager", "--output=short-monotonic", "--lines=40", f"--unit={self.unit}"],
+            ):
+                try:
+                    texts.append(run(argv, timeout=5))
+                except (Failure, OSError, subprocess.TimeoutExpired) as error:
+                    texts.append(str(error))
         return "\n".join(texts)[-16000:] or "no core log was created"
 
     def close(self) -> None:
@@ -470,8 +485,24 @@ def test_case(binary: Path, label: str, *, reexec: bool = False, systemd: bool =
             configure_namespace(ns)
             baseline = network_snapshot(ns)
             write_config(directory)
+            if systemd:
+                account = pwd.getpwnam(SERVICE_USER)
+                if account.pw_uid == 0:
+                    raise Failure("service fixture must use an unprivileged account")
+                # Package installs give this user both the binary and data.
+                # Avoid depending on traversal permissions in RUNNER_TEMP.
+                installed_binary = directory / "mihomo"
+                shutil.copy2(binary, installed_binary)
+                binary = installed_binary.resolve(strict=True)
+                for path in [directory, *directory.rglob("*")]:
+                    os.chown(path, account.pw_uid, account.pw_gid)
             core = Core(ns, binary, directory, systemd)
             instance = await_ready(core, baseline)
+            if systemd:
+                status = Path(f"/proc/{core.pid()}/status").read_text().splitlines()
+                ids = next(line.split()[1:] for line in status if line.startswith("Uid:"))
+                if any(int(value) != account.pw_uid for value in ids):
+                    raise Failure("systemd core did not adopt the requested service UID")
             if reexec:
                 if request(ns, "/restart", "POST").get("status") != "ok":
                     raise Failure("controller did not acknowledge a prepared restart")

@@ -146,14 +146,14 @@ jobs:
       - name: Read the checked release matrix
         id: matrix
         run: printf 'matrix=%s\n' "$(python3 scripts/release-build.py matrix)" >> "$GITHUB_OUTPUT"
-      - name: Verify transparent capture and TUN blackholes in isolated namespaces
+      - name: Verify transparent capture, REDIRECT traffic and TUN blackholes in isolated namespaces
         run: |
           set -euo pipefail
           network_test_binary="$RUNNER_TEMP/transparent-proxy.test"
           trap 'rm -f "$network_test_binary"' EXIT
           CGO_ENABLED=0 go test -tags with_gvisor -c -o "$network_test_binary" ./component/transparentproxy
           sudo -n env MIHOMO_TRANSPARENT_PROXY_INTEGRATION=1 TMPDIR=/tmp \
-            "$network_test_binary" -test.run '^(TestNFTKernelRoundTrip|TestRoutesKernelBlackholeBarrier)$' -test.v -test.timeout 3m
+            "$network_test_binary" -test.run '^(TestNFTKernelRoundTrip|TestNFTRedirKernelTraffic|TestRoutesKernelBlackholeBarrier)$' -test.v -test.timeout 3m
       - name: Verify actual core SIGTERM and systemd stop cleanup
         run: |
           set -euo pipefail
@@ -315,6 +315,9 @@ jobs:
             {
               printf 'mihomo-optimized `%s`\n\n' "$BUILD_VERSION"
               printf 'Source commit: `%s`\n\n' "$BUILD_SHA"
+              printf 'Core 1.0.7 adds TCP REDIRECT through redir-port and protocol-specific local.bypass-ports.udp/tcp (defaults [123]/[]). local.bypass-users now defaults to [mihomo]; explicit [] disables UID bypass. The old bypass-udp-ports remains a parse-only alias, and mixing both keys is rejected. REDIRECT validates real IPv4/IPv6 listeners and guards existing conntrack sessions across port/backend changes and restarts. HTTP/SOCKS/mixed remain explicit proxy protocols.\n\n'
+              printf 'Native DEB/RPM/Arch packages now run the service as mihomo, create a non-login system account only when absent, and assign /etc/mihomo recursively plus /usr/bin/mihomo to that user and its existing primary group. Account attributes are preserved when the user already exists. Packages do not start/restart services. Upgrade the native package once, daemon-reload and restart to migrate the service user and resource ownership; core self-update replaces only the executable.\n\n'
+              printf 'Repeated positive RA lifetimes, unchanged link/address state and irrelevant main-table ULA routes no longer drive repeated reconciliation. Ordinary events coalesce for 50 ms with a 250 ms bound, while protection/observation failures remain urgent. Native TUN address additions, ULA churn and same-prefix IPv6 privacy rotation refresh caches without resetting every DNS pool; actual interface, IPv4 source and public IPv6 prefix loss still invalidate transports. CI requires real local/gateway IPv4/IPv6 REDIRECT sessions and non-root systemd lifecycle checks.\n\n'
               printf 'Core 1.0.6 adds opt-in Linux transparent-proxy YAML configuration: independent TCP/UDP tproxy, tun or off; configurable exact marks, tables and unique policy priorities; separate local/gateway scopes; real IPv4/IPv6 interface-prefix tracking. Healthy operation is driven by kernel events, with bounded retries only for faults. The managed nftables chains use mangle priority -150.\n\n'
               printf 'Before closing an existing TUN, the core synchronously installs and verifies blackhole route protection. Permanent blackholes and terminal policy guards prevent marked packets falling through to main when the device or lookup rule disappears. Controlled restarts and self-updates retain working blocked capture and blackholes across process replacement, then restore forwarding only after the new backends are ready. No state directory, state file or extra recovery-log objects are created. A committed binary replacement whose restart fails is reported truthfully as installed but not yet restarted.\n\n'
               printf 'Normal SIGTERM and systemd stop remove owned nftables rules, sets, chains, tables and policy routes before closing TUN; cleanup errors retain process-local state for retry. Sysctl restoration uses this process baseline; a cold start after a crash cannot recover a lost earlier value. Transparent routing stays opt-in and replaces native auto-route/auto-redirect and legacy iptables management at runtime without rewriting YAML. Remove former hand-written capture, systemd route commands and prefix cron once. Required Linux CI verifies actual nftables, marked IPv4/IPv6 TUN packets, real core restarts, SIGTERM and systemctl stop in isolated network namespaces. Companion panel remains 0.4.7.\n\n'

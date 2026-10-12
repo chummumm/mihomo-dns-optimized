@@ -15,7 +15,6 @@ import (
 
 	"github.com/metacubex/mihomo/adapter/inbound"
 	"github.com/metacubex/mihomo/component/dialer"
-	"github.com/metacubex/mihomo/component/iface"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
@@ -26,7 +25,6 @@ import (
 
 	tun "github.com/metacubex/sing-tun"
 	"github.com/metacubex/sing/common"
-	"github.com/metacubex/sing/common/control"
 	E "github.com/metacubex/sing/common/exceptions"
 	F "github.com/metacubex/sing/common/format"
 	"github.com/metacubex/sing/common/ranges"
@@ -52,6 +50,7 @@ type Listener struct {
 
 	networkUpdateMonitor    tun.NetworkUpdateMonitor
 	defaultInterfaceMonitor tun.DefaultInterfaceMonitor
+	interfaceChangeHandler  *defaultInterfaceChangeHandler
 	packageManager          tun.PackageManager
 	autoRedirect            tun.AutoRedirect
 	autoRedirectOutputMark  int32
@@ -358,15 +357,8 @@ func New(options LC.Tun, tunnel C.Tunnel, additions ...inbound.Addition) (l *Lis
 			return
 		}
 		l.defaultInterfaceMonitor = defaultInterfaceMonitor
-		defaultInterfaceMonitor.RegisterCallback(func(defaultInterface *control.Interface, event int) {
-			if defaultInterface != nil {
-				log.Warnln("[TUN] default interface changed by monitor, => %s", defaultInterface.Name)
-			} else {
-				log.Errorln("[TUN] default interface lost by monitor")
-			}
-			iface.FlushCache()
-			resolver.ResetConnection() // reset resolver's connection after default interface changed
-		})
+		l.interfaceChangeHandler = newDefaultInterfaceChangeHandler()
+		defaultInterfaceMonitor.RegisterCallback(l.interfaceChangeHandler.Update)
 		err = defaultInterfaceMonitor.Start()
 		if err != nil {
 			err = E.Cause(err, "start DefaultInterfaceMonitor")
@@ -672,6 +664,9 @@ func parseRange[T constraints.Integer](uidRanges []ranges.Range[T], rangeList []
 }
 
 func (l *Listener) Close() error {
+	// The upstream monitor may still have a delayed callback queued after Close.
+	// Stop its resolver side effects before dismantling this listener's network.
+	l.interfaceChangeHandler.Close()
 	l.closed = true
 	resolver.RemoveSystemDnsBlacklist(l.dnsServerIp...)
 	if l.autoRedirectOutputMark != 0 {

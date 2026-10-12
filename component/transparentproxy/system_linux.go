@@ -264,10 +264,10 @@ func decodeNetworkAddress(data []byte) (int, netip.Prefix, bool, error) {
 func (s *linuxRouteSystem) defaultInterface(ctx context.Context, ipv6 bool, links []networkInterface) (string, error) {
 	// A route lookup asks the kernel's policy-routing engine, rather than
 	// assuming the first default route in the main table is the active exit.
-	destination := netip.MustParseAddr("1.1.1.1")
+	destination := defaultRouteProbe(ipv6)
 	family := byte(unix.AF_INET)
 	if ipv6 {
-		destination, family = netip.MustParseAddr("2606:4700:4700::1111"), unix.AF_INET6
+		family = unix.AF_INET6
 	}
 	data := make([]byte, 12)
 	data[0], data[1] = family, byte(destination.BitLen())
@@ -332,41 +332,36 @@ func (s *linuxRouteSystem) Watch(ctx context.Context) (<-chan systemEvent, io.Cl
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	watch := &linuxSystemWatch{cancel: cancel, done: make(chan struct{})}
-	events := make(chan systemEvent, 1)
-	dirty := make(chan struct{}, 1)
-	failed := make(chan error, 2)
+	queue := newSystemEventQueue()
 	var readers sync.WaitGroup
 	readers.Add(2)
 	read := func(connection *wireConn, nftables bool) {
 		defer readers.Done()
+		var filter systemNotificationFilter
+		fail := func(err error) {
+			if ctx.Err() == nil {
+				queue.publish(systemEvent{Err: err})
+			}
+			cancel()
+		}
 		for {
 			packets, err := connection.receive(ctx)
 			if err != nil {
-				if ctx.Err() == nil {
-					select {
-					case failed <- err:
-					case <-ctx.Done():
-					}
-				}
+				fail(err)
 				return
 			}
-			changed := false
+			changed, urgent := false, false
 			for _, packet := range packets {
-				change, err := validateSystemNotification(packet, nftables)
+				change, immediate, err := filter.notification(packet, nftables)
 				if err != nil {
-					select {
-					case failed <- err:
-					case <-ctx.Done():
-					}
+					fail(err)
 					return
 				}
 				changed = changed || change
+				urgent = urgent || immediate
 			}
 			if changed {
-				select {
-				case dirty <- struct{}{}:
-				default:
-				}
+				queue.publish(systemEvent{Urgent: urgent})
 			}
 		}
 	}
@@ -374,35 +369,13 @@ func (s *linuxRouteSystem) Watch(ctx context.Context) (<-chan systemEvent, io.Cl
 	go read(nft, true)
 	go func() {
 		defer close(watch.done)
-		defer close(events)
-		defer func() { cancel(); _ = routes.Close(); _ = nft.Close(); readers.Wait() }()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case err := <-failed:
-				// Deliver the fault even when an ordinary invalidation was queued.
-				// The consumer must reopen subscriptions before trusting a dump.
-				select {
-				case <-events:
-				default:
-				}
-				select {
-				case events <- systemEvent{Err: err}:
-				case <-ctx.Done():
-				}
-				return
-			case <-dirty:
-				// Coalescing is lossless: an event means reread the whole state,
-				// never apply a partial delta from this bounded notification queue.
-				select {
-				case events <- systemEvent{}:
-				default:
-				}
-			}
-		}
+		defer close(queue.events)
+		<-ctx.Done()
+		_ = routes.Close()
+		_ = nft.Close()
+		readers.Wait()
 	}()
-	return events, watch, nil
+	return queue.events, watch, nil
 }
 
 func validateSystemNotification(packet wirePacket, nftables bool) (bool, error) {

@@ -25,6 +25,9 @@ type Runtime struct {
 	TProxyUDP        bool
 	TProxyTCPIPv6    bool
 	TProxyUDPIPv6    bool
+	RedirPort        uint16
+	RedirTCP         bool
+	RedirTCPIPv6     bool
 	FakeIP           []netip.Prefix
 }
 
@@ -40,6 +43,9 @@ type BackendState struct {
 	TProxyUDP     bool
 	TProxyTCPIPv6 bool
 	TProxyUDPIPv6 bool
+	RedirPort     uint16
+	RedirTCP      bool
+	RedirTCPIPv6  bool
 }
 
 type routePolicy struct {
@@ -78,7 +84,12 @@ type networkState struct {
 	IPv6Available bool
 }
 
-type systemEvent struct{ Err error }
+// Events invalidate a complete observation. Urgent events bypass the normal
+// burst window; Err also requires a fresh subscription before capture resumes.
+type systemEvent struct {
+	Err    error
+	Urgent bool
+}
 
 type routeSystem interface {
 	Watch(context.Context) (<-chan systemEvent, io.Closer, error)
@@ -105,6 +116,9 @@ type firewallState struct {
 	TProxyTCP6     bool
 	TProxyUDP4     bool
 	TProxyUDP6     bool
+	RedirPort      uint16
+	Redir4         bool
+	Redir6         bool
 	Tun4           bool
 	Tun6           bool
 	TunName        string
@@ -116,6 +130,7 @@ type firewallState struct {
 	FakeIP         []netip.Prefix
 	Bypass         []netip.Prefix
 	BypassUDPPorts []uint16
+	BypassTCPPorts []uint16
 }
 
 type firewall interface {

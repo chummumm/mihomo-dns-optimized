@@ -175,6 +175,9 @@ def stage_payload(binary, directory, timestamp):
         "mihomo-optimized\n\n"
         "Binary: /usr/bin/mihomo\nConfiguration: /etc/mihomo/config.yaml\n"
         "Service: mihomo.service\n\n"
+        "The service runs as mihomo. Installation creates a non-login system\n"
+        "account only if absent, and assigns /etc/mihomo (recursively) and\n"
+        "/usr/bin/mihomo to that account and its primary group, retaining modes.\n"
         "This package does not start, enable or restart any service.\n"
         "Review your configuration, then run:\n"
         "  mihomo -t -d /etc/mihomo\n"
@@ -207,21 +210,36 @@ def pack_tar(root, timestamp):
     return buffer.getvalue()
 
 
+def package_postinstall(kind):
+    script = (ROOT / "packaging/postinstall.sh").read_text()
+    if kind == "deb":
+        # Only configure installs/upgrades own resources. Abort hooks do not.
+        return script.replace("set -eu\n", 'set -eu\n[ "$1" = configure ] || exit 0\n', 1)
+    if kind == "rpm":
+        return script
+    if kind == "archlinux":
+        # A subshell keeps set -e scoped to our hook in pacman's shell.
+        return "post_install() (\n" + script + ")\n\npost_upgrade() {\n    post_install\n}\n"
+    raise ValueError("unknown package format")
+
+
 def inspect_package(path, kind, architecture, binary, versions):
     with tempfile.TemporaryDirectory(prefix="mihomo-package-inspect-") as temp:
         extracted = Path(temp)
         if kind == "deb":
-            fields = run("dpkg-deb", "-f", str(path), "Package", "Architecture", "Version", "Provides", "Conflicts", "Replaces")
+            fields = run("dpkg-deb", "-f", str(path), "Package", "Architecture", "Version", "Provides", "Conflicts", "Replaces", "Depends")
             required = [f"Package: {PACKAGE}", f"Architecture: {architecture}", f"Version: {versions['deb']}",
-                        f"Provides: mihomo, {LEGACY_PACKAGE}", f"Conflicts: mihomo, {LEGACY_PACKAGE}", f"Replaces: mihomo, {LEGACY_PACKAGE}"]
+                        f"Provides: mihomo, {LEGACY_PACKAGE}", f"Conflicts: mihomo, {LEGACY_PACKAGE}", f"Replaces: mihomo, {LEGACY_PACKAGE}", "Depends: passwd"]
             if any(value not in fields for value in required):
                 raise ValueError(f"unexpected Debian metadata: {fields}")
             control = extracted / "control"
             run("dpkg-deb", "-e", str(path), str(control))
             if (control / "conffiles").read_text().splitlines() != ["/etc/mihomo/config.yaml"]:
                 raise ValueError("Debian package lost conffile preservation")
-            if set(p.name for p in control.iterdir()) != {"control", "conffiles"}:
+            if set(p.name for p in control.iterdir()) != {"control", "conffiles", "postinst"}:
                 raise ValueError("unexpected package lifecycle scripts")
+            if (control / "postinst").read_text() != package_postinstall(kind) or (control / "postinst").stat().st_mode & 0o777 != 0o755:
+                raise ValueError("incorrect Debian account/resource installation hook")
             shutil.rmtree(control)
             payload = run("dpkg-deb", "--fsys-tarfile", str(path), binary=True)
             with tarfile.open(fileobj=io.BytesIO(payload)) as archive:
@@ -235,11 +253,23 @@ def inspect_package(path, kind, architecture, binary, versions):
             ownership = run("rpm", "-qp", "--qf", "[%{FILEUSERNAME}:%{FILEGROUPNAME}\n]", str(path)).splitlines()
             if any(owner != "root:root" for owner in ownership):
                 raise ValueError("RPM payload must be owned by root")
+            verify = run("rpm", "-qp", "--qf", "[%{FILENAMES} %{FILEVERIFYFLAGS}\\n]", str(path)).splitlines()
+            for entry in verify:
+                name, mask = entry.rsplit(" ", 1)
+                dynamic_owner = name in {"/usr/bin/mihomo", "/etc/mihomo/config.yaml"}
+                # RPMVERIFY_USER | RPMVERIFY_GROUP; every other check remains.
+                if int(mask) & 0x18 != (0 if dynamic_owner else 0x18):
+                    raise ValueError("incorrect RPM ownership verification policy: " + name)
             flags = run("rpm", "-qp", "--qf", "[%{FILENAMES} %{FILEFLAGS}\n]", str(path))
             if "/etc/mihomo/config.yaml 17\n" not in flags:
                 raise ValueError("RPM package lost config(noreplace)")
-            if run("rpm", "-qp", "--scripts", str(path)).strip():
-                raise ValueError("unexpected RPM lifecycle scripts")
+            if run("rpm", "-qp", "--qf", "%{POSTIN}", str(path)).strip() != package_postinstall(kind).strip():
+                raise ValueError("incorrect RPM account/resource installation hook")
+            for hook in ["PREIN", "PREUN", "POSTUN", "PRETRANS", "POSTTRANS", "VERIFYSCRIPT"]:
+                if run("rpm", "-qp", "--qf", f"%{{{hook}}}", str(path)).strip() != "(none)":
+                    raise ValueError("unexpected RPM lifecycle script: " + hook)
+            if "shadow-utils" not in run("rpm", "-qp", "--requires", str(path)).splitlines():
+                raise ValueError("RPM package lost account creation dependency")
             for relation in ["--conflicts", "--obsoletes"]:
                 if not {"mihomo", LEGACY_PACKAGE}.issubset(set(run("rpm", "-qp", relation, str(path)).splitlines())):
                     raise ValueError("RPM package lost official/legacy package replacement")
@@ -257,10 +287,13 @@ def inspect_package(path, kind, architecture, binary, versions):
             info = (extracted / ".PKGINFO").read_text()
             for field in [f"pkgname = {PACKAGE}", f"arch = {architecture}", f"pkgver = {versions['archlinux']}",
                           "backup = etc/mihomo/config.yaml", "conflict = mihomo", "replaces = mihomo",
-                          f"conflict = {LEGACY_PACKAGE}", f"replaces = {LEGACY_PACKAGE}"]:
+                          f"conflict = {LEGACY_PACKAGE}", f"replaces = {LEGACY_PACKAGE}", "depend = shadow"]:
                 if field not in info.splitlines():
                     raise ValueError(f"Arch package missing metadata: {field}")
             (extracted / ".PKGINFO").unlink()
+            if (extracted / ".INSTALL").read_text() != package_postinstall(kind):
+                raise ValueError("incorrect Arch account/resource installation hook")
+            (extracted / ".INSTALL").unlink()
         else:
             raise ValueError("unknown package format")
         actual = {p.relative_to(extracted).as_posix() for p in extracted.rglob("*") if p.is_file()}
@@ -273,6 +306,8 @@ def inspect_package(path, kind, architecture, binary, versions):
             raise ValueError("package binary differs from the tested build")
         if (extracted / "etc/mihomo/config.yaml").read_bytes() != (ROOT / "packaging/config.yaml").read_bytes():
             raise ValueError("package contains an unexpected configuration")
+        if (extracted / "usr/lib/systemd/system/mihomo.service").read_bytes() != (ROOT / "packaging/mihomo.service").read_bytes():
+            raise ValueError("package contains an unexpected service unit")
 
 
 def package_binary(binary, row, version, output, build_time, commit, upstream):
@@ -291,12 +326,15 @@ def package_binary(binary, row, version, output, build_time, commit, upstream):
                 (control / "control").write_text(
                     f"Package: {PACKAGE}\nVersion: {versions['deb']}\nArchitecture: {architecture}\n"
                     "Maintainer: chummumm <chummumm@users.noreply.github.com>\n"
+                    "Depends: passwd\n"
                     f"Section: net\nPriority: optional\nProvides: mihomo, {LEGACY_PACKAGE}\nConflicts: mihomo, {LEGACY_PACKAGE}\nReplaces: mihomo, {LEGACY_PACKAGE}\n"
                     f"Installed-Size: {sum((stage / p).stat().st_size for p in PAYLOAD) // 1024 + 1}\n"
                     "Homepage: https://github.com/chummumm/mihomo-optimized\n"
                     "Description: mihomo-optimized core with shared DNS transports and managed updates\n"
                 )
                 (control / "conffiles").write_text("/etc/mihomo/config.yaml\n")
+                (control / "postinst").write_text(package_postinstall(kind))
+                (control / "postinst").chmod(0o755)
                 env = dict(os.environ, SOURCE_DATE_EPOCH=str(timestamp))
                 run("dpkg-deb", "--root-owner-group", "-Zgzip", "-z6", "--build", str(stage), str(path), env=env)
                 shutil.rmtree(control)
@@ -305,7 +343,10 @@ def package_binary(binary, row, version, output, build_time, commit, upstream):
                 for sub in ["BUILD", "RPMS", "SOURCES", "SPECS", "SRPMS"]:
                     (top / sub).mkdir(parents=True, exist_ok=True)
                 spec = top / "SPECS/mihomo.spec"
-                files = "\n".join(("%config(noreplace) " if name.startswith("etc/") else "%license " if "/licenses/" in name else "") + "/" + name for name in PAYLOAD)
+                files = "\n".join(
+                    ("%verify(not user group) " if name in {"usr/bin/mihomo", "etc/mihomo/config.yaml"} else "") +
+                    ("%config(noreplace) " if name.startswith("etc/") else "%license " if "/licenses/" in name else "") +
+                    "/" + name for name in PAYLOAD)
                 spec.write_text(f"""Name: {PACKAGE}
 Epoch: {versions['rpm_epoch']}
 Version: {versions['rpm_version']}
@@ -318,6 +359,7 @@ Provides: mihomo = %{{epoch}}:%{{version}}-%{{release}}
 Provides: {LEGACY_PACKAGE}
 Conflicts: mihomo, {LEGACY_PACKAGE}
 Obsoletes: mihomo, {LEGACY_PACKAGE}
+Requires(post): shadow-utils, /usr/bin/getent, coreutils
 %global debug_package %{{nil}}
 %global __os_install_post %{{nil}}
 %description
@@ -326,6 +368,8 @@ Configuration is preserved. Services are never started by the package.
 %install
 mkdir -p %{{buildroot}}
 cp -a {shlex.quote(str(stage))}/. %{{buildroot}}/
+%post
+{package_postinstall(kind)}
 %files
 %defattr(-,root,root)
 {files}
@@ -345,11 +389,16 @@ cp -a {shlex.quote(str(stage))}/. %{{buildroot}}/
                     "url = https://github.com/chummumm/mihomo-optimized\n"
                     f"builddate = {timestamp}\npackager = chummumm\nsize = {sum((stage / p).stat().st_size for p in PAYLOAD)}\n"
                     f"arch = {architecture}\nlicense = GPL-3.0-or-later\nprovides = mihomo\n"
+                    "depend = shadow\n"
                     f"provides = {LEGACY_PACKAGE}\nconflict = mihomo\nreplaces = mihomo\nconflict = {LEGACY_PACKAGE}\nreplaces = {LEGACY_PACKAGE}\nbackup = etc/mihomo/config.yaml\n"
                 )
+                install = stage / ".INSTALL"
+                install.write_text(package_postinstall(kind))
+                install.chmod(0o644)
                 with path.open("wb") as destination:
                     subprocess.run(["zstd", "-q", "-T0", "-10", "-c"], input=pack_tar(stage, timestamp), stdout=destination, check=True)
                 info.unlink()
+                install.unlink()
             inspect_package(path, kind, architecture, binary, versions)
             built.append(path)
     return built

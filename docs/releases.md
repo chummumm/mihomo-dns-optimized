@@ -85,6 +85,12 @@ sudo systemctl enable --now mihomo
 
 包没有启动、启用或重启服务的安装脚本。使用包管理器更换二进制后，自行安排 `sudo systemctl restart mihomo`；删除包前自行停止服务。内核自动更新成功后的重启由内核完成。
 
+从 `1.0.7` 起，systemd unit 设置 `User=mihomo`。DEB / RPM / Arch 的安装和升级钩子只处理账号及文件归属：系统中没有 `mihomo` 时创建非登录系统账号，home 为 `/nonexistent` 且不创建 home，shell 为 `/usr/sbin/nologin`；已有用户直接复用，保留 UID、主组、home 与 shell。新用户复用已有同名组，组也不存在时创建系统组。
+
+安装完成后，`/etc/mihomo` 整个默认数据目录（配置、Geo 数据、provider 缓存、面板等）和 `/usr/bin/mihomo` 都归属 `mihomo` 及该用户的主组。迁移已有资源时保留普通读写执行位与 ACL，不跟随目录中的符号链接修改外部目标；特殊 set-ID 位由 `chown` 按系统语义处理。后续由该服务生成或下载的资源自然归属运行用户。系统级目录与 unit 仍由包管理器管理；自定义到默认目录之外的资源需给予同一运行用户相应权限。
+
+从旧包迁移时，先升级一次原生安装包，再执行 `sudo systemctl daemon-reload` 和 `sudo systemctl restart mihomo`；已启动的旧进程不会因为磁盘 unit 改动自动切换用户。可用 `systemctl show mihomo -p User -p MainPID` 及 `ps -o user,group,args -p "$(systemctl show mihomo -p MainPID --value)"` 核对实际进程。已自行配置的 systemd drop-in 仍参与 systemd 的最终配置。
+
 ### 包内版本与实际内核版本
 
 下载文件名固定，包内仍保留包管理器要求的版本信息。新系列永久使用 epoch `1`，让独立 `1.0.0` 排在历史 `1.19.32+dns...` 之后：
@@ -97,7 +103,9 @@ sudo systemctl enable --now mihomo
 
 安装包负责首次安装、配置归属和卸载。安装后可启用内核自更新，无需每次下载新 deb/rpm/pkg。自更新只替换可执行文件，不改系统包管理器数据库，所以 `dpkg`/`rpm`/`pacman` 仍显示当初安装包的版本。实际版本以 `mihomo -v`、控制器 `/version` 或面板显示的内核版本为准。
 
-以后重新安装某个 native 包，会安装该包携带的二进制；选择与当前运行版本一致或更高的包。配置文件仍由包管理器保护。自动更新需要运行用户有权写入二进制所在目录；默认 systemd unit 沿用现有 root 运行方式。
+以后重新安装某个 native 包，会安装该包携带的二进制；选择与当前运行版本一致或更高的包。配置文件仍由包管理器保护。默认 unit 的 `CAP_DAC_OVERRIDE` 等现有 capabilities 保留，让 `mihomo` 在 `/usr/bin` 中完成内核文件的原子替换；只修改文件 owner 并不能代替父目录的替换权限。配置、面板及其他默认资源通过自身 owner 权限写入。
+
+内核自更新不会安装 systemd unit、创建系统账号或批量迁移文件归属，因此不能完成上述 `1.0.7` 的服务用户迁移。若仅手工替换二进制，启用透明代理前需要准备 `mihomo` 账号与资源权限，或在 `local.bypass-users` 显式填写已有服务用户 / UID；显式 `[]` 可关闭用户旁路。
 
 ## 项目版本与构建
 
@@ -107,9 +115,9 @@ sudo systemctl enable --now mihomo
 
 已有版本不能用于不同源码。CI 在构建前与发布时检查同名 tag 的目标提交，并核对全部附件；旧版本保留原样。仅 Markdown、MDX、reStructuredText、AsciiDoc、`docs/**`、`Meta.png` 和 issue/PR 模板变化时不自动构建；与源码、`packaging/**`、依赖、脚本或工作流混合修改时照常执行。
 
-构建脚本检查每个 native 包的架构、版本、配置保护、文件清单/权限、无安装脚本，以及其二进制与对应归档完全一致。回归还在隔离 dpkg 根目录执行旧包到新包的真实迁移，验证本地修改的配置保留与文件归属。Linux amd64 产物实际执行 `-v`、`-t` 和本地模拟上游的 DNS 端到端回归；不会安装或启动测试宿主机已有的 mihomo 服务。stop 回归只创建使用隔离网络命名空间的临时 systemd 测试单元，并在结束时撤销。
+构建脚本检查每个 native 包的架构、版本、配置保护、文件清单/权限、账号工具依赖及唯一预期安装钩子，以及其二进制与对应归档完全一致。钩子行为测试覆盖新账号、已有用户 / 主组复用、重复升级和失败传播；账号及 chown 命令被限定到测试夹具。回归还在隔离 dpkg 根目录执行旧包到新包的真实迁移，验证本地修改的配置保留与文件归属。Linux amd64 产物实际执行 `-v`、`-t` 和本地模拟上游的 DNS 端到端回归；不会安装或启动测试宿主机已有的 mihomo 服务。stop 回归以现有非 root 测试账号创建使用隔离网络命名空间的临时 systemd 单元，使用该账号持有的临时资源，并在结束时撤销。
 
-开发者可运行 `python3 scripts/release-build.py matrix` 查看 37 目标矩阵，或 `bash scripts/ci-check.sh build <target> <绝对输出目录> mihomo-optimized-v1.0.6 <ISO时间>` 构建单个目标；版本参数须与当前 `PROJECT_VERSION` 一致，`amd64` / `arm64` 是 Linux 别名。依赖 `dpkg-deb`、`rpm`/`rpmbuild`/`rpm2cpio`、`cpio`、`zstd`、`fakeroot`、Python 3.12 和 MetaCubeX Go；Android 还需矩阵指定的固定 NDK。
+开发者可运行 `python3 scripts/release-build.py matrix` 查看 37 目标矩阵，或 `bash scripts/ci-check.sh build <target> <绝对输出目录> mihomo-optimized-v1.0.7 <ISO时间>` 构建单个目标；版本参数须与当前 `PROJECT_VERSION` 一致，`amd64` / `arm64` 是 Linux 别名。依赖 `dpkg-deb`、`rpm`/`rpmbuild`/`rpm2cpio`、`cpio`、`zstd`、`fakeroot`、Python 3.12 和 MetaCubeX Go；Android 还需矩阵指定的固定 NDK。
 
 ## 内核自动更新
 
