@@ -98,9 +98,9 @@ export function UpdateCheck ({ client, kernelVersion }: { client: Client, kernel
     useEffect(() => {
         if (task.restart && currentCore?.current_version) {
             const version = currentCore.current_version
-            setVersion(previous => previous.version === version ? previous : { ...previous, version })
+            setVersion(client, previous => previous.version === version ? previous : { ...previous, version })
         }
-    }, [task.restart, currentCore?.current_version, setVersion])
+    }, [client, task.restart, currentCore?.current_version, setVersion])
     const completedCore: UpdateItem = task.restart === 'verified' ? { ...core, current_version: currentCore?.current_version, status: 'updated' } : core
     const geodata = items.filter(item => item.kind === 'geodata')
     const providers = items.filter(item => item.kind === 'rule-provider')

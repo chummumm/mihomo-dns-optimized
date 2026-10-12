@@ -90,7 +90,7 @@ export default function Settings () {
             success(t('messages.reloadOk'))
             // Reload already succeeded; a failed read must not report that the
             // configuration was rejected. SWR keeps its previous snapshot.
-            await fetchGeneral().catch(() => undefined)
+            void fetchGeneral().catch(() => undefined)
         } catch (reason) {
             if (request.signal.aborted) return
             const detail = axios.isAxiosError<{ message?: string }>(reason)
