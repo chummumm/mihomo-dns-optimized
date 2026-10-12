@@ -143,9 +143,21 @@ jobs:
           cache: true
       - name: Install package inspection and network test tools
         run: sudo apt-get update && sudo apt-get install -y rpm cpio zstd fakeroot iproute2 nftables
-      - name: Read the checked release matrix
+      - name: Select the checked build matrix
         id: matrix
-        run: printf 'matrix=%s\n' "$(python3 scripts/release-build.py matrix)" >> "$GITHUB_OUTPUT"
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BUILD_REF: ${{ inputs.ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          matrix_args=()
+          if [[ "$EVENT_NAME" == pull_request && -z "$BUILD_REF" ]]; then
+            matrix_args=(--profile pr --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA")
+          fi
+          build_matrix_json=$(python3 scripts/release-build.py matrix "${matrix_args[@]}")
+          printf 'matrix=%s\n' "$build_matrix_json" >> "$GITHUB_OUTPUT"
       - name: Verify transparent capture, REDIRECT traffic and TUN blackholes in isolated namespaces
         run: |
           set -euo pipefail
@@ -315,6 +327,7 @@ jobs:
             {
               printf 'mihomo-optimized `%s`\n\n' "$BUILD_VERSION"
               printf 'Source commit: `%s`\n\n' "$BUILD_SHA"
+              printf 'Core 1.0.8 reduces ordinary pull-request packaging to seven representative targets: Linux amd64/arm64/386, Windows amd64, macOS arm64, FreeBSD amd64 and Android arm64-v8. Toolchain, dependency, platform-specific, build-constraint and packaging/workflow changes retain all 37 targets; uncertain PR diffs also fall back to the full matrix. Existing functional, race, network-namespace, non-root systemd and native updater tests remain required. Main, tag, manual and upstream-sync builds still produce the complete release matrix once, and publication verifies and uploads artifacts from that same run.\n\n'
               printf 'Core 1.0.7 adds TCP REDIRECT through redir-port and protocol-specific local.bypass-ports.udp/tcp (defaults [123]/[]). local.bypass-users now defaults to [mihomo]; explicit [] disables UID bypass. The old bypass-udp-ports remains a parse-only alias, and mixing both keys is rejected. REDIRECT validates real IPv4/IPv6 listeners and guards existing conntrack sessions across port/backend changes and restarts. HTTP/SOCKS/mixed remain explicit proxy protocols.\n\n'
               printf 'Native DEB/RPM/Arch packages now run the service as mihomo, create a non-login system account only when absent, and assign /etc/mihomo recursively plus /usr/bin/mihomo to that user and its existing primary group. Account attributes are preserved when the user already exists. Packages do not start/restart services. Upgrade the native package once, daemon-reload and restart to migrate the service user and resource ownership; core self-update replaces only the executable.\n\n'
               printf 'Repeated positive RA lifetimes, unchanged link/address state and irrelevant main-table ULA routes no longer drive repeated reconciliation. Ordinary events coalesce for 50 ms with a 250 ms bound, while protection/observation failures remain urgent. Native TUN address additions, ULA churn and same-prefix IPv6 privacy rotation refresh caches without resetting every DNS pool; actual interface, IPv4 source and public IPv6 prefix loss still invalidate transports. CI requires real local/gateway IPv4/IPv6 REDIRECT sessions and non-root systemd lifecycle checks.\n\n'

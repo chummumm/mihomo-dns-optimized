@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Verify release identities, package metadata and payloads without installation."""
+import contextlib
 import gzip
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -10,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 sys.dont_write_bytecode = True
@@ -90,6 +93,203 @@ path.write_text(json.dumps(state))
             return release.run('sh', '-c', '. "$1"; "$2"', '--', str(script),
                                argument or 'post_install', env=self.env)
         return release.run('sh', str(script), argument or ('configure' if kind == 'deb' else '1'), env=self.env)
+
+
+class MatrixTests(unittest.TestCase):
+    """Select CI coverage from real committed PR changes, without package tools."""
+
+    representatives = ['linux-amd64', 'linux-arm64', 'linux-386', 'windows-amd64',
+                       'darwin-arm64', 'freebsd-amd64', 'android-arm64-v8']
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix='mihomo-matrix-test-')
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.write('packaging/targets.json', (release.ROOT / 'packaging/targets.json').read_bytes())
+        self.write('scripts/release-build.py', Path(release.__file__).read_bytes())
+        self.write('component/service.go', 'package component\n')
+        self.write('PROJECT_VERSION', '1.0.7\n')
+        self.git('init', '-b', 'main')
+        self.base = self.commit()
+
+    def git(self, *args):
+        result = subprocess.run(['git', '-c', 'user.name=Matrix Fixture',
+                                 '-c', 'user.email=matrix@example.invalid',
+                                 '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', *args],
+                                cwd=self.root, check=True, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return result.stdout.strip()
+
+    def write(self, name, content):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content.encode() if isinstance(content, str) else content)
+
+    def commit(self):
+        self.git('add', '--all')
+        self.git('commit', '--allow-empty', '-m', 'matrix fixture')
+        return self.git('rev-parse', 'HEAD')
+
+    def matrix(self, *args):
+        diagnostics = io.StringIO()
+        with mock.patch.object(release, 'ROOT', self.root), contextlib.redirect_stderr(diagnostics):
+            result = release.release_matrix(*args)
+        return result, diagnostics.getvalue()
+
+    def assert_profile(self, profile, base, head):
+        result, diagnostics = self.matrix('pr', base, head)
+        expected = self.representatives if profile == 'pr' else [row['id'] for row in release.targets()]
+        self.assertEqual([row['target'] for row in result['include']], expected, diagnostics)
+        self.assertIn(f'profile={profile}; targets={len(expected)};', diagnostics)
+        return diagnostics
+
+    def cli(self, *args):
+        result = subprocess.run([sys.executable, '-B', str(self.root / 'scripts/release-build.py'),
+                                 'matrix', *args], cwd=self.root, check=True, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(len(result.stdout.splitlines()), 1)
+        return json.loads(result.stdout), result.stderr
+
+    def test_default_and_explicit_full_keep_every_target_without_git(self):
+        with mock.patch.object(release, 'run', side_effect=AssertionError('full must not inspect Git')):
+            default, diagnostics = self.matrix()
+            explicit, _ = self.matrix('full', 'invalid', 'invalid')
+        cli, cli_diagnostics = self.cli()
+        self.assertEqual(default, explicit)
+        self.assertEqual(default, cli)
+        self.assertEqual(len(default['include']), 37)
+        self.assertIn('profile=full; targets=37;', diagnostics)
+        self.assertIn('profile=full; targets=37;', cli_diagnostics)
+        self.assertTrue(all(set(row) == {'target', 'android', 'packages'} for row in cli['include']))
+
+    def test_ordinary_go_and_project_version_use_seven_representatives(self):
+        self.write('component/service.go', 'package component\nconst Value = 2\n')
+        self.write('PROJECT_VERSION', '1.0.8\n')
+        head = self.commit()
+        self.assert_profile('pr', self.base, head)
+        cli, diagnostics = self.cli('--profile', 'pr', '--base', self.base, '--head', head)
+        self.assertEqual([row['target'] for row in cli['include']], self.representatives)
+        self.assertIn('profile=pr; targets=7;', diagnostics)
+        self.assertEqual([row['target'] for row in cli['include'] if row['android']], ['android-arm64-v8'])
+        self.assertEqual([row['target'] for row in cli['include'] if row['packages']], self.representatives[:3])
+
+    def test_each_build_dependency_and_platform_path_requires_full(self):
+        paths = [
+            'go.mod', 'go.sum', 'go.work', 'go.work.sum', 'UPSTREAM_VERSION', 'UPSTREAM_COMMIT',
+            '.go-version', '.tool-versions', '.mise.toml', 'GO_VERSION', 'NDK_VERSION', 'toolchain.txt',
+            'packaging/config.yaml', 'scripts/helper.py', '.github/workflows/ci.yml', 'vendor/pkg/source.go',
+            'Makefile', 'nested/Makefile', '.goreleaser.yml', 'Dockerfile',
+            'component/source_linux.go', 'component/source_windows_amd64_test.go',
+            'component/source_arm64_test.go', 'component/linux/source.go', 'component/unix/source.go',
+            'component/arch/source.go', 'component/netlink/source.go',
+            'component/helper.c', 'component/helper.C', 'component/helper.cpp', 'component/helper.h',
+            'component/helper.s', 'component/helper.S', 'component/helper.asm', 'component/helper.syso',
+        ]
+        base = self.base
+        for path in paths:
+            with self.subTest(path=path):
+                self.write(path, 'fixture\n')
+                head = self.commit()
+                self.assert_profile('full', base, head)
+                base = head
+
+    def test_new_and_removed_go_constraints_and_platform_code_require_full(self):
+        sources = [
+            '//go:build with_gvisor\n\npackage component\n',
+            '// +build linux\n\npackage component\n',
+            '\ufeff//go:build linux\n\npackage component\n',
+            'package component\nimport "runtime"\nvar platform = runtime.GOOS\n',
+            'package component\nimport machine "runtime"\nvar arch = machine.GOARCH\n',
+            'package component\nimport "C"\n',
+            'package component\nimport (\n"C"\n)\n',
+            'package component\nimport /* comment */ "C"\n',
+            'package component\nimport /* comment */ (\n/* ) */ "C"\n)\n',
+            'package component\nimport `C`\n',
+        ]
+        base = self.base
+        for source in sources:
+            with self.subTest(source=source):
+                self.write('component/service.go', source)
+                added = self.commit()
+                self.assert_profile('full', base, added)
+                self.write('component/service.go', 'package component\n')
+                removed = self.commit()
+                self.assert_profile('full', added, removed)
+                base = removed
+
+    def test_deleted_and_renamed_platform_files_retain_old_path_and_blob(self):
+        self.write('component/source_linux.go', 'package component\n')
+        base = self.commit()
+        self.git('mv', 'component/source_linux.go', 'component/portable.go')
+        self.assert_profile('full', base, self.commit())
+        self.write('component/tagged.go', '//go:build linux\n\npackage component\n')
+        base = self.commit()
+        self.git('rm', 'component/tagged.go')
+        self.assert_profile('full', base, self.commit())
+        self.write('UPSTREAM_COMMIT', 'upstream\n')
+        base = self.commit()
+        self.git('rm', 'UPSTREAM_COMMIT')
+        self.assert_profile('full', base, self.commit())
+
+    def test_unusual_paths_are_read_without_splitting_or_revision_interpretation(self):
+        path = 'component/space : with\nnewline\tname.go'
+        self.write(path, 'package component\n')
+        base = self.commit()
+        self.assert_profile('pr', self.base, base)
+        self.write(path, '//go:build linux\n\npackage component\n')
+        self.assert_profile('full', base, self.commit())
+
+    def test_true_pr_range_excludes_later_base_branch_and_worktree_changes(self):
+        self.git('checkout', '-b', 'pr')
+        self.write('component/service.go', 'package component\nconst Value = 2\n')
+        head = self.commit()
+        self.git('checkout', 'main')
+        self.write('packaging/base-only.txt', 'base branch change\n')
+        base = self.commit()
+        self.write('component/service.go', '//go:build linux\n\npackage component\n')
+        self.assert_profile('pr', base, head)
+
+    def test_missing_or_invalid_diff_context_falls_back_with_diagnostic(self):
+        for base, head in [(None, None), ('main', self.base), (self.base, '--help'),
+                           ('0' * 40, self.base), (self.base, 'f' * 40)]:
+            with self.subTest(base=base, head=head):
+                self.assertIn('cannot inspect PR diff:', self.assert_profile('full', base, head))
+        result, diagnostics = self.cli('--profile', 'pr')
+        self.assertEqual(len(result['include']), 37)
+        self.assertIn('cannot inspect PR diff:', diagnostics)
+
+    def test_unavailable_git_and_failed_diff_do_not_reduce_coverage(self):
+        errors = [FileNotFoundError('git unavailable'), subprocess.TimeoutExpired('git', 15)]
+        for error in errors:
+            with self.subTest(error=type(error).__name__), mock.patch.object(release, 'run', side_effect=error):
+                self.assertIn('cannot inspect PR diff:', self.assert_profile('full', self.base, self.base))
+        # The merge base can succeed while the subsequent diff is unavailable.
+        failure = subprocess.CalledProcessError(128, ['git', 'diff'])
+        with mock.patch.object(release, 'run', side_effect=[self.base + '\n', failure]):
+            self.assertIn('cannot inspect PR diff:', self.assert_profile('full', self.base, self.base))
+        with mock.patch.object(release, 'run', return_value=self.base + '\n' + 'f' * 40 + '\n'):
+            self.assertIn('one known merge base', self.assert_profile('full', self.base, self.base))
+
+    def test_missing_committed_blob_requires_full(self):
+        self.write('component/service.go', 'package component\nconst Value = 123\n')
+        head = self.commit()
+        blob = self.git('rev-parse', head + ':component/service.go')
+        (self.root / '.git/objects' / blob[:2] / blob[2:]).unlink()
+        self.assertIn('cannot inspect PR diff:', self.assert_profile('full', self.base, head))
+
+    def test_unreadable_go_content_and_type_changes_require_full(self):
+        self.write('component/service.go', b'package component\n//\xff\n')
+        invalid = self.commit()
+        self.assertIn('cannot inspect PR diff:', self.assert_profile('full', self.base, invalid))
+        (self.root / 'component/service.go').unlink()
+        (self.root / 'component/service.go').symlink_to('elsewhere')
+        self.assertIn('type change', self.assert_profile('full', invalid, self.commit()))
+
+    def test_unrelated_history_requires_full(self):
+        self.git('checkout', '--orphan', 'unrelated')
+        self.write('unrelated.txt', 'independent root commit\n')
+        head = self.commit()
+        self.assertIn('cannot inspect PR diff:', self.assert_profile('full', self.base, head))
 
 
 class ReleaseTests(unittest.TestCase):
