@@ -3,6 +3,8 @@ package transport
 import (
 	"fmt"
 	"net"
+	"net/netip"
+	"syscall"
 	"time"
 
 	"github.com/metacubex/mihomo/transport/hysteria/conns/faketcp"
@@ -47,7 +49,15 @@ func (ct *ClientTransport) quicPacketConn(proto string, rAddr net.Addr, serverPo
 		return wechat.NewObfsWeChatUDPConn(conn, obfs), nil
 	} else if proto == "faketcp" {
 		var conn *faketcp.TCPConn
-		conn, err := faketcp.Dial("tcp", server)
+		var control func(string, string, syscall.RawConn) error
+		if policy, ok := dialer.(interface {
+			SocketControl(netip.Addr) func(string, string, syscall.RawConn) error
+		}); ok {
+			if destination, parseErr := netip.ParseAddrPort(server); parseErr == nil {
+				control = policy.SocketControl(destination.Addr().Unmap())
+			}
+		}
+		conn, err := faketcp.DialContext(dialer.Context(), "tcp", server, control)
 		if err != nil {
 			return nil, err
 		}

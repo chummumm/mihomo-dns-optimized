@@ -156,6 +156,16 @@ jobs:
           CGO_ENABLED=0 go test -tags with_gvisor -c -o "$permission_test_binary" ./hub/route
           sudo -n env MIHOMO_CONFIG_FILE_PERMISSION_REQUIRED=1 TMPDIR=/tmp \
             "$permission_test_binary" -test.run '^TestConfigFileUnprivilegedPermissions$' -test.v -test.timeout 2m
+      - name: Install Linux network namespace test tools
+        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables
+      - name: Verify transparent capture and TUN blackholes in isolated namespaces
+        run: |
+          set -euo pipefail
+          network_test_binary="$RUNNER_TEMP/transparent-proxy.test"
+          trap 'rm -f "$network_test_binary"' EXIT
+          CGO_ENABLED=0 go test -tags with_gvisor -c -o "$network_test_binary" ./component/transparentproxy
+          sudo -n env MIHOMO_TRANSPARENT_PROXY_INTEGRATION=1 TMPDIR=/tmp \
+            "$network_test_binary" -test.run '^(TestNFTKernelRoundTrip|TestRoutesKernelBlackholeBarrier)$' -test.v -test.timeout 3m
 
   build:
     name: ${{ matrix.target }}
@@ -300,6 +310,9 @@ jobs:
             {
               printf 'mihomo-optimized `%s`\n\n' "$BUILD_VERSION"
               printf 'Source commit: `%s`\n\n' "$BUILD_SHA"
+              printf 'Core 1.0.6 adds opt-in Linux transparent-proxy YAML configuration: independent TCP/UDP tproxy, tun or off; configurable exact marks, tables and unique policy priorities; separate local/gateway scopes; real IPv4/IPv6 interface-prefix tracking. Healthy operation is driven by kernel events, with bounded retries only for faults. The managed nftables chains use mangle priority -150.\n\n'
+              printf 'Before closing an existing TUN, the core synchronously installs and verifies blackhole route protection. Permanent blackholes and terminal policy guards prevent marked packets falling through to main when the device or lookup rule disappears. Controlled restarts and self-updates preserve blocked capture and the ownership journal across process replacement, then restore forwarding only after the new backends are ready. Failed preparation keeps the old process; a committed binary replacement is reported truthfully as installed but not yet restarted.\n\n'
+              printf 'Transparent routing remains disabled by default. Enabling it replaces native auto-route/auto-redirect and legacy iptables management at runtime without rewriting YAML. First migration must remove old hand-written capture rules, systemd route commands and prefix cron jobs; foreign objects are never silently adopted or removed. Required Linux CI exercises actual nftables ownership/recovery and marked IPv4/IPv6 packets through isolated TUN lifecycle tests. Companion panel remains 0.4.7.\n\n'
               printf 'Core 1.0.5 fixes GeoData automatic scheduling across configuration reloads: enable/disable and interval changes now control the live worker; missing files and initial failures no longer permanently stop future checks. The interval accepts integer hours from 1 through 2562047, preventing time.Duration overflow. Only databases used by the applied configuration participate in startup age checks.\n\n'
               printf 'Companion panel 0.4.7 bounds configuration reload requests to 30 seconds, preserves saved files when the reload result is uncertain, and does not block completion on the follow-up settings refresh. Proxy, provider, rule and core-version state is scoped to the current controller so delayed responses cannot overwrite another controller.\n\n'
               printf 'The independent mihomo-optimized version series started at mihomo-optimized-v1.0.0. Tags, release titles, version.txt and the running core use mihomo-optimized-vX.Y.Z. UPSTREAM_VERSION and UPSTREAM_COMMIT separately record the MetaCubeX base. Existing v1.19.32-optimized-N and earlier binaries require one manual migration because their compiled updater cannot parse the new version format. Published historical releases remain unchanged.\n\n'
@@ -316,6 +329,7 @@ jobs:
               printf 'Required Go/race, release identity, isolated Debian migration, all native package payload/metadata checks and controlled Linux amd64 binary DNS regressions run in CI. Cross-compilation does not imply tests on every physical platform. Packages never start or enable services automatically.\n\n'
               printf 'Installation and migration: https://github.com/%s/blob/%s/docs/releases.md\n' "$GITHUB_REPOSITORY" "$BUILD_SHA"
               printf 'Core/panel configuration: https://github.com/%s/blob/%s/docs/dashboard-management.md\n' "$GITHUB_REPOSITORY" "$BUILD_SHA"
+              printf 'Linux transparent routing and migration: https://github.com/%s/blob/%s/docs/transparent-proxy-plan.md\n' "$GITHUB_REPOSITORY" "$BUILD_SHA"
             } > "$RUNNER_TEMP/release-notes.txt"
             verify_release_tag "$RELEASE_TAG" "$BUILD_SHA" true
             gh release create "$RELEASE_TAG" \

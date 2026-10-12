@@ -52,12 +52,11 @@ func upgradeCore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	render.JSON(w, r, render.M{"status": "ok"})
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
+	if err := restartAndRespond(w, r, execPath); err != nil {
+		log.Warnln("core file installed but restart preparation failed: %s", err)
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, newError(fmt.Sprintf("core file installed but restart preparation failed; the current process is still running the previous core version: %s", err)))
 	}
-
-	go restartExecutable(execPath)
 }
 
 func getUIUpdateStatus(w http.ResponseWriter, r *http.Request) {

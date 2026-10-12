@@ -2,10 +2,12 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync"
@@ -28,6 +30,7 @@ import (
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/resource"
 	"github.com/metacubex/mihomo/component/sniffer"
+	"github.com/metacubex/mihomo/component/transparentproxy"
 	"github.com/metacubex/mihomo/component/trie"
 	"github.com/metacubex/mihomo/component/updater"
 	"github.com/metacubex/mihomo/config"
@@ -92,11 +95,19 @@ func ParseWithBytes(buf []byte) (*config.Config, error) {
 }
 
 // ApplyConfig dispatch configure to all parts without ExternalController
-func ApplyConfig(cfg *config.Config, force bool) {
+func ApplyConfig(cfg *config.Config, force bool) error {
 	mux.Lock()
 	defer mux.Unlock()
+	wasManaged := transparentproxy.IsEnabled()
+	if err := beginTransparentProxyApply(filepath.Join(C.Path.HomeDir(), "transparent-proxy"), cfg.General.TransparentProxy, transparentProxyRuntime(cfg)); err != nil {
+		return fmt.Errorf("apply transparent-proxy: %w", err)
+	}
+	startTransparentProxyRepairs()
 	invalidateUpdateConfiguration()
 	log.SetLevel(cfg.General.LogLevel)
+	if cfg.General.TransparentProxy.Enable {
+		log.Infoln("[Transparent Proxy] managed capture enabled; effective tun.auto-route, tun.auto-redirect and iptables.enable are false")
+	}
 	finishUpdates := updateUpdater(cfg)
 
 	tunnel.OnSuspend()
@@ -130,8 +141,8 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	}
 	updateDNS(cfg.DNS, cfg.General.IPv6)
 	updateNTP(cfg.NTP) // initialize NTP after DNS because an NTP server may be a hostname.
-	updateListeners(cfg.General, cfg.Listeners, force)
-	updateTun(cfg.General) // tun should not care "force"
+	applyErr := updateListeners(cfg.General, cfg.Listeners, force, wasManaged)
+	applyErr = errors.Join(applyErr, updateTun(cfg.General)) // tun should not care "force"
 	updateIPTables(cfg)
 	updateTunnels(cfg.Tunnels)
 
@@ -143,8 +154,10 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	loadProvider(cfg.RuleProviders)
 	runtime.GC()
 	tunnel.OnRunning()
+	applyErr = errors.Join(applyErr, finishTransparentProxyApply(transparentProxyRuntime(cfg)))
 	publishUpdateConfiguration(cfg)
 	finishUpdates()
+	return applyErr
 }
 
 func initInnerTcp() {
@@ -181,13 +194,14 @@ func GetGeneral() *config.General {
 			InboundTfo:        inbound.Tfo(),
 			InboundMPTCP:      inbound.MPTCP(),
 		},
-		DNSRuleRouting: tunnel.DNSRuleRoutingEnabled(),
-		Mode:           tunnel.Mode(),
-		UnifiedDelay:   adapter.UnifiedDelay.Load(),
-		LogLevel:       log.Level(),
-		IPv6:           !resolver.DisableIPv6,
-		Interface:      dialer.DefaultInterface.Load(),
-		RoutingMark:    int(dialer.DefaultRoutingMark.Load()),
+		DNSRuleRouting:   tunnel.DNSRuleRoutingEnabled(),
+		Mode:             tunnel.Mode(),
+		UnifiedDelay:     adapter.UnifiedDelay.Load(),
+		LogLevel:         log.Level(),
+		IPv6:             !resolver.DisableIPv6,
+		Interface:        dialer.DefaultInterface.Load(),
+		RoutingMark:      int(dialer.DefaultRoutingMark.Load()),
+		TransparentProxy: transparentproxy.CurrentConfig(),
 		GeoXUrl: config.GeoXUrl{
 			GeoIp:   geodata.GeoIpUrl(),
 			Mmdb:    geodata.MmdbUrl(),
@@ -212,14 +226,24 @@ func GetGeneral() *config.General {
 		KeepAliveIdle:            int(keepalive.KeepAliveIdle() / time.Second),
 		DisableKeepAlive:         keepalive.DisableKeepAlive(),
 	}
+	if applied := CurrentUpdateConfiguration(); applied != nil {
+		general.IPTables = applied.General.IPTables
+		general.IPTables.Bypass = append([]string(nil), general.IPTables.Bypass...)
+	}
 
 	return general
 }
 
-func updateListeners(general *config.General, listeners map[string]C.InboundListener, force bool) {
+func updateListeners(general *config.General, listeners map[string]C.InboundListener, force, wasManaged bool) error {
 	listener.PatchInboundListeners(listeners, tunnel.Tunnel, true)
 	if !force {
-		return
+		if general.TransparentProxy.Enable {
+			return listener.ReCreateTProxy(general.TProxyPort, tunnel.Tunnel)
+		}
+		if wasManaged {
+			return listener.ReCreateTProxy(listener.GetPorts().TProxyPort, tunnel.Tunnel)
+		}
+		return nil
 	}
 
 	allowLan := general.AllowLan
@@ -233,15 +257,16 @@ func updateListeners(general *config.General, listeners map[string]C.InboundList
 	listener.ReCreateHTTP(general.Port, tunnel.Tunnel)
 	listener.ReCreateSocks(general.SocksPort, tunnel.Tunnel)
 	listener.ReCreateRedir(general.RedirPort, tunnel.Tunnel)
-	listener.ReCreateTProxy(general.TProxyPort, tunnel.Tunnel)
+	err := listener.ReCreateTProxy(general.TProxyPort, tunnel.Tunnel)
 	listener.ReCreateMixed(general.MixedPort, tunnel.Tunnel)
 	listener.ReCreateShadowSocks(general.ShadowSocksConfig, tunnel.Tunnel)
 	listener.ReCreateVmess(general.VmessConfig, tunnel.Tunnel)
 	listener.ReCreateTuic(general.TuicServer, tunnel.Tunnel)
+	return err
 }
 
-func updateTun(general *config.General) {
-	listener.ReCreateTun(general.Tun, tunnel.Tunnel)
+func updateTun(general *config.General) error {
+	return listener.ReCreateTun(general.Tun, tunnel.Tunnel)
 }
 
 func updateExperimental(c *config.Experimental) {
@@ -648,19 +673,50 @@ func updateIPTables(cfg *config.Config) {
 	log.Infoln("[IPTABLES] Setting iptables completed")
 }
 
-func Shutdown() {
+func Shutdown() error {
 	mux.Lock()
 	defer mux.Unlock()
-	shutdownLocked()
+	return shutdownLocked()
 }
 
-func shutdownLocked() {
+func shutdownLocked() error {
+	// An explicit stop removes capture before any managed backend disappears.
+	if err := closeTransparentProxy(); err != nil {
+		log.Errorln("Preserve running listeners: stop transparent-proxy: %s", err)
+		return err
+	}
+	return shutdownBackendsLocked()
+}
+
+// A process replacement retains capture and blackhole protection until the
+// next process recovers the same ownership journal. Normal shutdown must not
+// use this path, because stopping the service should release its interception.
+func shutdownForRestartLocked() error {
+	if err := prepareTransparentRestart(); err != nil {
+		log.Errorln("Preserve running listeners: prepare transparent-proxy restart: %s", err)
+		return err
+	}
+	if err := shutdownBackendsLocked(); err != nil {
+		// The manager still owns its observer and namespace lease. Publish
+		// only the listeners that survived cleanup; missing ones recover
+		// through its existing backend repair requests.
+		return errors.Join(err, abortTransparentRestart(listener.TransparentProxyBackends()))
+	}
+	completeTransparentRestart()
+	return nil
+}
+
+func shutdownBackendsLocked() error {
+	if err := cleanupTunListener(); err != nil {
+		log.Errorln("Close TUN listener: %s", err)
+		return err
+	}
 	invalidateUpdateConfiguration()
 	updater.StopAutomaticUpdates()
-	listener.Cleanup()
 	tproxy.CleanupTProxyIPTables()
 	resolver.StoreFakePoolState()
 	closeDNSResolvers()
 
 	log.Warnln("Mihomo shutting down")
+	return nil
 }

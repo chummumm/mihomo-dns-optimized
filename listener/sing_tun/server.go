@@ -40,11 +40,12 @@ var InterfaceName = "Meta"
 var EnforceBindInterface = false
 
 type Listener struct {
-	closed  bool
-	options LC.Tun
-	handler *ListenerHandler
-	tunName string
-	addrStr string
+	closed   bool
+	options  LC.Tun
+	handler  *ListenerHandler
+	tunName  string
+	tunIndex int
+	addrStr  string
 
 	tunIf    tun.Tun
 	tunStack tun.Stack
@@ -501,6 +502,9 @@ func New(options LC.Tun, tunnel C.Tunnel, additions ...inbound.Addition) (l *Lis
 		EnforceBindInterface:   EnforceBindInterface,
 	}
 	l.tunIf = tunIf
+	if device, lookupErr := net.InterfaceByName(tunName); lookupErr == nil {
+		l.tunIndex = device.Index
+	}
 
 	tunStack, err := tun.NewStack(strings.ToLower(options.Stack.String()), stackOptions)
 	if err != nil {
@@ -688,8 +692,18 @@ func (l *Listener) Close() error {
 }
 
 func (l *Listener) Config() LC.Tun {
-	return l.options
+	return l.options.Clone()
 }
+
+// DeviceName returns the actual kernel interface name, including when the
+// listener was created from a file descriptor or an automatically chosen name.
+func (l *Listener) DeviceName() string {
+	return l.tunName
+}
+
+// DeviceIndex fixes the identity captured at construction. A later device that
+// reuses the same name must never be treated as this listener's original TUN.
+func (l *Listener) DeviceIndex() int { return l.tunIndex }
 
 func (l *Listener) Address() string {
 	return l.addrStr

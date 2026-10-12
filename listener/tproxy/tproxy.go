@@ -15,7 +15,13 @@ type Listener struct {
 	listener net.Listener
 	addr     string
 	closed   bool
+	ipv4     bool
+	ipv6     bool
 }
+
+// TransparentFamilies reports which wildcard destination families the actual
+// socket accepts. Merely having a listener on 127.0.0.1 is not TProxy readiness.
+func (l *Listener) TransparentFamilies() (bool, bool) { return l.ipv4, l.ipv6 }
 
 // RawAddress implements C.Listener
 func (l *Listener) RawAddress() string {
@@ -42,6 +48,14 @@ func (l *Listener) handleTProxy(conn net.Conn, tunnel C.Tunnel, additions ...inb
 }
 
 func New(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
+	return newListener(addr, tunnel, false, additions...)
+}
+
+func NewManaged(addr string, tunnel C.Tunnel) (*Listener, error) {
+	return newListener(addr, tunnel, true)
+}
+
+func newListener(addr string, tunnel C.Tunnel, managed bool, additions ...inbound.Addition) (*Listener, error) {
 	if len(additions) == 0 {
 		additions = []inbound.Addition{
 			inbound.WithInName("DEFAULT-TPROXY"),
@@ -52,7 +66,13 @@ func New(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener
 	// This can cause tproxy to malfunction on certain Linux kernel versions, so we force to disable mptcp for tproxy.
 	lc := net.ListenConfig{}
 	mptcp.SetNetListenConfig(&lc, false)
-	l, err := lc.Listen(context.Background(), "tcp", addr)
+	var l net.Listener
+	var err error
+	if managed {
+		l, err = listenManagedTCP(lc, addr)
+	} else {
+		l, err = lc.Listen(context.Background(), "tcp", addr)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -60,11 +80,13 @@ func New(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener
 	tl := l.(*net.TCPListener)
 	rc, err := tl.SyscallConn()
 	if err != nil {
+		l.Close()
 		return nil, err
 	}
 
 	err = setsockopt(rc, addr)
 	if err != nil {
+		l.Close()
 		return nil, err
 	}
 
@@ -72,6 +94,7 @@ func New(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener
 		listener: l,
 		addr:     addr,
 	}
+	rl.ipv4, rl.ipv6 = transparentFamilies(l.Addr(), rc)
 
 	go func() {
 		for {

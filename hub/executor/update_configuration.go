@@ -15,7 +15,8 @@ import (
 
 var ErrUpdateConfigurationChanged = errors.New("update configuration changed")
 
-// UpdateConfiguration is published only after a successful ApplyConfig. Its
+// UpdateConfiguration is published after ApplyConfig resumes the applied
+// routing, DNS and updater configuration (listener errors are reported apart). Its
 // immutable resource identities never observe a candidate parser's temporary
 // GeoData URLs or a half-applied provider map. Networking uses Context; only
 // final file/strategy transactions use Commit.

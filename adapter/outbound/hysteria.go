@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/metacubex/mihomo/common/utils"
@@ -73,6 +74,9 @@ func (h *Hysteria) ListenPacketContext(ctx context.Context, metadata *C.Metadata
 func (h *Hysteria) genHdc(ctx context.Context) hyUtils.PacketDialer {
 	return &hyDialerWithContext{
 		ctx: context.Background(),
+		socketControl: func(destination netip.Addr) func(string, string, syscall.RawConn) error {
+			return dialer.SocketControlWithOptions(destination, h.DialOptions()...)
+		},
 		hyDialer: func(network string, rAddr net.Addr) (net.PacketConn, error) {
 			rAddrPort, _ := netip.ParseAddrPort(rAddr.String())
 			return h.dialer.ListenPacket(ctx, network, "", rAddrPort)
@@ -305,9 +309,17 @@ func (c *hyPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 }
 
 type hyDialerWithContext struct {
-	hyDialer   func(network string, rAddr net.Addr) (net.PacketConn, error)
-	ctx        context.Context
-	remoteAddr func(host string) (net.Addr, error)
+	hyDialer      func(network string, rAddr net.Addr) (net.PacketConn, error)
+	ctx           context.Context
+	remoteAddr    func(host string) (net.Addr, error)
+	socketControl func(netip.Addr) func(string, string, syscall.RawConn) error
+}
+
+func (h *hyDialerWithContext) SocketControl(destination netip.Addr) func(string, string, syscall.RawConn) error {
+	if h.socketControl != nil {
+		return h.socketControl(destination)
+	}
+	return dialer.SocketControlWithOptions(destination)
 }
 
 func (h *hyDialerWithContext) ListenPacket(rAddr net.Addr) (net.PacketConn, error) {

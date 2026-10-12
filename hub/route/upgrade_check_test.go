@@ -212,6 +212,33 @@ func TestUnifiedUpgradeRestartStatusSurvivesReturningBridge(t *testing.T) {
 	}
 }
 
+func TestUnifiedUpgradeInstalledCoreRestartFailureRemainsActionable(t *testing.T) {
+	for _, cause := range []error{errors.New("blackhole acknowledgement failed"), context.DeadlineExceeded} {
+		current, installed := "mihomo-optimized-v1.0.5", "mihomo-optimized-v1.1.0"
+		item := upgradeCheckItem{ID: "kernel", Kind: "kernel", Status: "pending", CurrentVersion: current}
+		manager := newUpgradeCheckManager(func() (*upgradeCheckPlan, error) {
+			return &upgradeCheckPlan{ctx: context.Background(), items: []upgradeCheckItem{item}, cleanup: func() {}, steps: []upgradeCheckStep{{ids: []string{"kernel"}, run: func(_ context.Context, report func(upgradeCheckItem)) {
+				report(coreUpgradeOutcome(item, updater.CoreCheckResult{CurrentVersion: current, LatestVersion: installed, Updated: true}, cause))
+			}}}}, nil
+		}, func() []upgradeCheckItem { return []upgradeCheckItem{item} })
+		if _, err := manager.start(); err != nil {
+			t.Fatal(err)
+		}
+		snapshot := waitUpgradeTask(t, manager, "partial")
+		got := snapshot.Items[0]
+		if got.Status != "error" || got.Error != "installed_restart_failed" || !got.PendingRestart || got.InstalledVersion != installed || got.CurrentVersion != current || snapshot.FinishedAt == "" {
+			t.Fatalf("installed executable was mistaken for active code or a running restart: %+v", snapshot)
+		}
+		if refreshed := manager.status().Items[0]; refreshed.InstalledVersion != installed || !refreshed.PendingRestart || refreshed.CurrentVersion != current {
+			t.Fatalf("GET lost the distinct installed/running state: %+v", refreshed)
+		}
+	}
+	item := coreUpgradeOutcome(upgradeCheckItem{Kind: "kernel"}, updater.CoreCheckResult{CurrentVersion: "old", LatestVersion: "new"}, context.DeadlineExceeded)
+	if item.Error != "timeout" || item.PendingRestart || item.InstalledVersion != "" {
+		t.Fatalf("pre-install failure incorrectly claimed installed bytes: %+v", item)
+	}
+}
+
 func TestUnifiedUpgradeStableErrorCodes(t *testing.T) {
 	for _, test := range []struct {
 		err  error

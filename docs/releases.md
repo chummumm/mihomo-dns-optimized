@@ -2,6 +2,16 @@
 
 项目使用独立版本 **`mihomo-optimized-vX.Y.Z`**，首版为 `mihomo-optimized-v1.0.0`。`main` 的源码、依赖或构建配置变更在全部测试和完整编译成功后生成固定提交的 GitHub Release。Latest 仅在该构建仍对应当前 `main` 时更新；PR 只生成 Actions artifacts。纯文档变更不消耗版本号，也不触发自动发布。
 
+## 1.0.6：Linux 透明代理与路由托管
+
+`mihomo-optimized-v1.0.6` 新增默认关闭的 `transparent-proxy` YAML 配置。TCP、UDP 可分别选择 `tproxy`、`tun` 或 `"off"`；两种后端的 mark、路由表与策略优先级均可配置。本机出站与网关转发分别声明范围。健康状态依靠 Linux 的接口、地址、路由、策略规则与 nftables 事件更新，没有周期核对配置项。
+
+路由使用显式且不重叠的优先级、完整 32 位 mark 匹配和常驻黑洞兜底。需要重建 TUN 时，在关闭旧设备前同步安装并读回验证保护；保护失败就保留旧后端。控制器重启和内核自更新会保留阻断状态跨越进程替换，由新进程按所有权记录接回，避免中间阶段直出。IPv4 / IPv6 后端按实际 socket、设备身份和地址分别判断就绪。
+
+这是可选的新托管模式。启用时替代运行态的 `tun.auto-route`、`tun.auto-redirect` 和旧 `iptables` 自动接管，保留 YAML 原文。首次迁移需一次性移除原来手写的 nftables 接管表、systemd 路由增删命令与动态前缀 cron；模块不会接管或删除不属于自己的同名资源。配置示例、官方资料依据与 IPv6 边界见 [Linux 透明代理与路由托管](transparent-proxy-plan.md)。现有面板保持 `0.4.7`，无需新增开关。
+
+该版本的 Linux CI 增加隔离网络命名空间回归：真实 nftables 安装/读回与所有权恢复，以及正常 TUN、同步关闭、意外设备删除、单独删除查表规则和新设备恢复时的双栈报文验证。测试环境缺少必要能力会失败，不能用跳过测试通过发布门槛。
+
 ## 文件名与固定下载入口
 
 | 用途 | 文件名示例 |
@@ -97,7 +107,7 @@ sudo systemctl enable --now mihomo
 
 构建脚本检查每个 native 包的架构、版本、配置保护、文件清单/权限、无安装脚本，以及其二进制与对应归档完全一致。回归还在隔离 dpkg 根目录执行旧包到新包的真实迁移，验证本地修改的配置保留与文件归属。Linux amd64 产物实际执行 `-v`、`-t` 和本地模拟上游的 DNS 端到端回归；不会安装到测试宿主机或启动宿主服务。
 
-开发者可运行 `python3 scripts/release-build.py matrix` 查看 37 目标矩阵，或 `bash scripts/ci-check.sh build <target> <绝对输出目录> mihomo-optimized-v1.0.5 <ISO时间>` 构建单个目标；版本参数须与当前 `PROJECT_VERSION` 一致，`amd64` / `arm64` 是 Linux 别名。依赖 `dpkg-deb`、`rpm`/`rpmbuild`/`rpm2cpio`、`cpio`、`zstd`、`fakeroot`、Python 3.12 和 MetaCubeX Go；Android 还需矩阵指定的固定 NDK。
+开发者可运行 `python3 scripts/release-build.py matrix` 查看 37 目标矩阵，或 `bash scripts/ci-check.sh build <target> <绝对输出目录> mihomo-optimized-v1.0.6 <ISO时间>` 构建单个目标；版本参数须与当前 `PROJECT_VERSION` 一致，`amd64` / `arm64` 是 Linux 别名。依赖 `dpkg-deb`、`rpm`/`rpmbuild`/`rpm2cpio`、`cpio`、`zstd`、`fakeroot`、Python 3.12 和 MetaCubeX Go；Android 还需矩阵指定的固定 NDK。
 
 ## 内核自动更新
 

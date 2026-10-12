@@ -16,7 +16,11 @@ type UDPListener struct {
 	packetConn net.PacketConn
 	addr       string
 	closed     bool
+	ipv4       bool
+	ipv6       bool
 }
+
+func (l *UDPListener) TransparentFamilies() (bool, bool) { return l.ipv4, l.ipv6 }
 
 // RawAddress implements C.Listener
 func (l *UDPListener) RawAddress() string {
@@ -35,13 +39,27 @@ func (l *UDPListener) Close() error {
 }
 
 func NewUDP(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*UDPListener, error) {
+	return newUDPListener(addr, tunnel, false, additions...)
+}
+
+func NewManagedUDP(addr string, tunnel C.Tunnel) (*UDPListener, error) {
+	return newUDPListener(addr, tunnel, true)
+}
+
+func newUDPListener(addr string, tunnel C.Tunnel, managed bool, additions ...inbound.Addition) (*UDPListener, error) {
 	if len(additions) == 0 {
 		additions = []inbound.Addition{
 			inbound.WithInName("DEFAULT-TPROXY"),
 			inbound.WithSpecialRules(""),
 		}
 	}
-	l, err := net.ListenPacket("udp", addr)
+	var l net.PacketConn
+	var err error
+	if managed {
+		l, err = listenManagedUDP(addr)
+	} else {
+		l, err = net.ListenPacket("udp", addr)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -55,13 +73,16 @@ func NewUDP(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*UDPLi
 
 	rc, err := c.SyscallConn()
 	if err != nil {
+		l.Close()
 		return nil, err
 	}
 
 	err = setsockopt(rc, addr)
 	if err != nil {
+		l.Close()
 		return nil, err
 	}
+	rl.ipv4, rl.ipv6 = transparentFamilies(l.LocalAddr(), rc)
 
 	go func() {
 		oob := make([]byte, 1024)

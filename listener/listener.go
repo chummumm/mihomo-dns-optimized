@@ -15,7 +15,6 @@ import (
 	"github.com/metacubex/mihomo/listener/redir"
 	embedSS "github.com/metacubex/mihomo/listener/shadowsocks"
 	"github.com/metacubex/mihomo/listener/sing_shadowsocks"
-	"github.com/metacubex/mihomo/listener/sing_tun"
 	"github.com/metacubex/mihomo/listener/sing_vmess"
 	"github.com/metacubex/mihomo/listener/socks"
 	"github.com/metacubex/mihomo/listener/tproxy"
@@ -35,14 +34,14 @@ var (
 	httpListener        *http.Listener
 	redirListener       *redir.Listener
 	redirUDPListener    *tproxy.UDPListener
-	tproxyListener      *tproxy.Listener
-	tproxyUDPListener   *tproxy.UDPListener
+	tproxyListener      C.Listener
+	tproxyUDPListener   C.Listener
 	mixedListener       *mixed.Listener
 	mixedUDPLister      *socks.UDPListener
 	tunnelTCPListeners  = map[string]*LT.Listener{}
 	tunnelUDPListeners  = map[string]*LT.PacketConn{}
 	inboundListeners    = map[string]C.InboundListener{}
-	tunLister           *sing_tun.Listener
+	tunLister           tunListener
 	shadowSocksListener C.MultiAddrListener
 	vmessListener       *sing_vmess.Listener
 	tuicListener        *tuic.Listener
@@ -51,11 +50,9 @@ var (
 	socksMux   sync.Mutex
 	httpMux    sync.Mutex
 	redirMux   sync.Mutex
-	tproxyMux  sync.Mutex
 	mixedMux   sync.Mutex
 	tunnelMux  sync.Mutex
 	inboundMux sync.Mutex
-	tunMux     sync.Mutex
 	ssMux      sync.Mutex
 	vmessMux   sync.Mutex
 	tuicMux    sync.Mutex
@@ -75,10 +72,22 @@ type Ports struct {
 }
 
 func GetTunConf() LC.Tun {
+	transparentListenersMu.Lock()
+	defer transparentListenersMu.Unlock()
 	if tunLister == nil {
-		return LastTunConf
+		cfg := LastTunConf.Clone()
+		cfg.Enable = false
+		return cfg
 	}
 	return tunLister.Config()
+}
+
+// GetLastTunConf returns the effective request before listener-specific
+// defaults. PATCH uses this stable snapshot so an unrelated edit reuses TUN.
+func GetLastTunConf() LC.Tun {
+	transparentListenersMu.Lock()
+	defer transparentListenersMu.Unlock()
+	return LastTunConf.Clone()
 }
 
 func GetTuicConf() LC.TuicServer {
@@ -394,52 +403,6 @@ func ReCreateTuic(config LC.TuicServer, tunnel C.Tunnel) {
 	return
 }
 
-func ReCreateTProxy(port int, tunnel C.Tunnel) {
-	tproxyMux.Lock()
-	defer tproxyMux.Unlock()
-
-	var err error
-	defer func() {
-		if err != nil {
-			log.Errorln("Start TProxy server error: %s", err.Error())
-		}
-	}()
-
-	addr := genAddr(bindAddress, port, allowLan)
-
-	if tproxyListener != nil {
-		if tproxyListener.RawAddress() == addr {
-			return
-		}
-		tproxyListener.Close()
-		tproxyListener = nil
-	}
-
-	if tproxyUDPListener != nil {
-		if tproxyUDPListener.RawAddress() == addr {
-			return
-		}
-		tproxyUDPListener.Close()
-		tproxyUDPListener = nil
-	}
-
-	if portIsZero(addr) {
-		return
-	}
-
-	tproxyListener, err = tproxy.New(addr, tunnel)
-	if err != nil {
-		return
-	}
-
-	tproxyUDPListener, err = tproxy.NewUDP(addr, tunnel)
-	if err != nil {
-		log.Warnln("Failed to start TProxy UDP Listener: %s", err)
-	}
-
-	log.Infoln("TProxy server listening at: %s", tproxyListener.Address())
-}
-
 func ReCreateMixed(port int, tunnel C.Tunnel) {
 	mixedMux.Lock()
 	defer mixedMux.Unlock()
@@ -493,45 +456,6 @@ func ReCreateMixed(port int, tunnel C.Tunnel) {
 	}
 
 	log.Infoln("Mixed(http+socks) proxy listening at: %s", mixedListener.Address())
-}
-
-func ReCreateTun(tunConf LC.Tun, tunnel C.Tunnel) {
-	tunConf.Sort()
-
-	tunMux.Lock()
-	defer func() {
-		LastTunConf = tunConf
-		tunMux.Unlock()
-	}()
-
-	var err error
-	defer func() {
-		if err != nil {
-			log.Errorln("Start TUN listening error: %s", err.Error())
-			tunConf.Enable = false
-		}
-	}()
-
-	if tunConf.Equal(LastTunConf) {
-		if tunLister != nil { // some default value in dialer maybe changed when config reload, reset at here
-			tunLister.OnReload()
-		}
-		return
-	}
-
-	closeTunListener()
-
-	if !tunConf.Enable {
-		return
-	}
-
-	lister, err := sing_tun.New(tunConf, tunnel)
-	if err != nil {
-		return
-	}
-	tunLister = lister
-
-	log.Infoln("[TUN] Tun adapter listening at: %s", tunLister.Address())
 }
 
 func PatchTunnel(tunnels []LC.Tunnel, tunnel C.Tunnel) {
@@ -675,11 +599,9 @@ func GetPorts() *Ports {
 		ports.RedirPort = port
 	}
 
-	if tproxyListener != nil {
-		_, portStr, _ := net.SplitHostPort(tproxyListener.Address())
-		port, _ := strconv.Atoi(portStr)
-		ports.TProxyPort = port
-	}
+	transparentListenersMu.Lock()
+	ports.TProxyPort = int(tproxyPortLocked())
+	transparentListenersMu.Unlock()
 
 	if mixedListener != nil {
 		_, portStr, _ := net.SplitHostPort(mixedListener.Address())
@@ -715,15 +637,4 @@ func genAddr(host string, port int, allowLan bool) string {
 	}
 
 	return fmt.Sprintf("127.0.0.1:%d", port)
-}
-
-func closeTunListener() {
-	if tunLister != nil {
-		tunLister.Close()
-		tunLister = nil
-	}
-}
-
-func Cleanup() {
-	closeTunListener()
 }

@@ -39,21 +39,23 @@ func restart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	render.JSON(w, r, render.M{"status": "ok"})
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
+	// Preparation can fail while keeping the old TUN alive. Do not acknowledge
+	// a restart before that barrier succeeds, or allow a reload into the gap
+	// between stopping its backends and replacing this process.
+	if err := restartAndRespond(w, r, execPath); err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, newError(fmt.Sprintf("restart preparation failed: %s", err)))
 	}
-
-	// modify from https://github.com/AdguardTeam/AdGuardHome/blob/595484e0b3fb4c457f9bb727a6b94faa78a66c5f/internal/home/controlupdate.go#L180
-	// The background context is used because the underlying functions wrap it
-	// with timeout and shut down the server, which handles current request.  It
-	// also should be done in a separate goroutine for the same reason.
-	go restartExecutable(execPath)
 }
 
-func restartExecutable(execPath string) {
-	executor.Shutdown()
-	restartProcess(execPath)
+func restartAndRespond(w http.ResponseWriter, r *http.Request, execPath string) error {
+	return executor.Restart(func() {
+		render.JSON(w, r, render.M{"status": "ok"})
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		restartProcess(execPath)
+	})
 }
 
 func restartProcess(execPath string) {
