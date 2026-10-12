@@ -59,7 +59,7 @@ func buildNFTRedir(state firewallState, addRule func(string, ...expr.Any)) {
 				&expr.Immediate{Register: 1, Data: binaryutil.NativeEndian.PutUint32(RedirMark)},
 				&expr.Ct{Key: expr.CtKeyMARK, SourceRegister: true, Register: 1},
 				&expr.Immediate{Register: 1, Data: binaryutil.BigEndian.PutUint16(state.RedirPort)},
-				&expr.Redir{RegisterProtoMin: 1, RegisterProtoMax: 1})
+				&expr.Redir{RegisterProtoMin: 1, RegisterProtoMax: 1, Flags: unix.NF_NAT_RANGE_PROTO_SPECIFIED})
 			addRule("redir_nat_"+path, match...)
 		}
 		match := nftProtocol(unix.IPPROTO_TCP)
