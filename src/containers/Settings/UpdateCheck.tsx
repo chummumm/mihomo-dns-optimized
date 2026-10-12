@@ -1,13 +1,13 @@
 import classnames from 'classnames'
 import { useSetAtom } from 'jotai'
 import { motion } from 'motion/react'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 
 import { Button, Card, Icon, springs } from '@components'
 import type { Client } from '@lib/request'
 import { useI18n, version as versionAtom } from '@stores'
 
-import { updateTaskActive, type UpdateItem, type UpdateItemStatus } from './update-state'
+import { currentUpdateSchedules, formatUpdateTime, nextUpdateTime, updateTaskActive, type UpdateItem, type UpdateItemStatus } from './update-state'
 import { useUpdateTask } from './use-update-task'
 
 const RELEASES = 'https://github.com/chummumm/mihomo-optimized/releases'
@@ -33,7 +33,31 @@ function shortVersion (version: string | undefined) {
     return version?.startsWith('mihomo-optimized-v') === true ? version.slice('mihomo-optimized-'.length) : version ?? ''
 }
 
-function UpdateRow ({ item, label, version, idle, uncertain = false }: { item: UpdateItem, label: string, version?: string, idle: boolean, uncertain?: boolean }) {
+interface ScheduleClock {
+    requestedAt?: number
+    now: number
+    monotonic: number
+}
+
+function UpdateSchedule ({ item, clock, group = false, stale = false }: { item: UpdateItem, clock: ScheduleClock, group?: boolean, stale?: boolean }) {
+    const { translation } = useI18n()
+    const { t } = translation('Settings')
+    if (!item.auto_update) return null
+    const next = nextUpdateTime(item, clock.requestedAt, clock.now, clock.monotonic)
+    const active = item.auto_update_state === 'checking' || item.auto_update_state === 'waiting'
+    const phase = active ? t(item.auto_update_state === 'checking' ? 'update.autoChecking' : 'update.autoWaiting') : undefined
+    const due = next !== undefined && next <= clock.now
+
+    return <span className="settings-update-schedule" data-update-schedule={item.id}>
+        {phase && <span>{phase}</span>}
+        {next !== undefined
+            ? <span>{t(item.auto_update_state === 'retrying' ? 'update.nextRetry' : group ? 'update.nextGroupCheck' : 'update.nextCheck')} <time dateTime={new Date(next).toISOString()}>{formatUpdateTime(next)}</time></span>
+            : !active && <span>{t(item.auto_update_state === 'unscheduled' ? 'update.notScheduled' : 'update.scheduleUnavailable')}</span>}
+        {stale ? <span>{t('update.scheduleStale')}</span> : due && !active && <span>{t('update.scheduleDue')}</span>}
+    </span>
+}
+
+function UpdateRow ({ item, label, version, idle, clock, stale, uncertain = false }: { item: UpdateItem, label: string, version?: string, idle: boolean, clock: ScheduleClock, stale: boolean, uncertain?: boolean }) {
     const { translation } = useI18n()
     const { t } = translation('Settings')
     const unconfirmed = uncertain && (item.status === 'pending' || item.status === 'checking' || item.status === 'restarting')
@@ -74,6 +98,7 @@ function UpdateRow ({ item, label, version, idle, uncertain = false }: { item: U
                 <span>{text}</span>
             </motion.span>
             {policyText && <span className="settings-update-policy">{policyText}</span>}
+            <UpdateSchedule item={item} clock={clock} stale={stale} />
         </div>
     </div>
 }
@@ -82,10 +107,22 @@ export function UpdateCheck ({ client, kernelVersion }: { client: Client, kernel
     const { translation } = useI18n()
     const { t } = translation('Settings')
     const task = useUpdateTask(client)
+    const [, refreshClock] = useState(0)
+    useEffect(() => {
+        const refresh = () => { if (!document.hidden) refreshClock(value => value + 1) }
+        const timer = window.setInterval(refresh, 30000)
+        document.addEventListener('visibilitychange', refresh)
+        return () => {
+            window.clearInterval(timer)
+            document.removeEventListener('visibilitychange', refresh)
+        }
+    }, [])
+    const clock = { requestedAt: task.scheduleRequestedAt, now: Date.now(), monotonic: performance.now() }
+    const staleSchedule = task.problem !== undefined || task.disconnected
     const setVersion = useSetAtom(versionAtom)
     const snapshot = task.snapshot
     const previous = task.restart ? task.previous : undefined
-    const resultItems = previous?.items ?? snapshot?.items ?? []
+    const resultItems = currentUpdateSchedules(previous?.items ?? snapshot?.items ?? [], snapshot?.items ?? [])
     // If a POST response was lost and its task cannot be recovered, old
     // terminal results belong to an earlier run. Never label them as this run.
     const items = task.unconfirmedStart ? resultItems.map(item => ({ ...item, status: 'pending' as const, error: undefined })) : resultItems
@@ -113,32 +150,45 @@ export function UpdateCheck ({ client, kernelVersion }: { client: Client, kernel
         ? t('update.reconnecting')
         : task.problem
             ? t(`update.errors.${task.problem}`)
-            : task.startRejected || task.unconfirmedStart
+            : task.startRejected === true || task.unconfirmedStart === true
                 ? t(task.startRejected ? 'update.requestBusy' : 'update.requestUnconfirmed')
                 : task.starting || running
                     ? t(snapshot?.state === 'restarting' ? 'update.restartingHint' : 'update.checkingHint')
                     : task.restart
-                    ? t(task.restart === 'verified' ? 'update.restartVerified' : 'update.restartUnconfirmed')
-                    : snapshot?.state === 'partial'
-                        ? t('update.summaryPartial')
-                        : snapshot?.state === 'completed' ? t('update.summaryDone') : t('update.hint')
+                        ? t(task.restart === 'verified' ? 'update.restartVerified' : 'update.restartUnconfirmed')
+                        : snapshot?.state === 'partial'
+                            ? t('update.summaryPartial')
+                            : snapshot?.state === 'completed' ? t('update.summaryDone') : t('update.hint')
 
     function group (rows: UpdateItem[], label: string) {
+        const enabled = rows.filter(item => item.auto_update)
+        const nearest = enabled.reduce<UpdateItem | undefined>((best, item) => {
+            if (!best) return item
+            const next = nextUpdateTime(item, clock.requestedAt, clock.now, clock.monotonic)
+            const earlier = nextUpdateTime(best, clock.requestedAt, clock.now, clock.monotonic)
+            return next !== undefined && (earlier === undefined || next < earlier) ? item : best
+        }, undefined)
+        const active = enabled.find(item => item.auto_update_state === 'checking' || item.auto_update_state === 'waiting')
+        const schedule = nearest
         return <details className="settings-update-group">
             <summary>
-                <span>{label}</span>
-                <span className="settings-update-group-count">{rows.filter(item => item.reason !== 'not_configured').length} {t('update.items')}{rows.some(item => item.status === 'error') ? ` · ${t('update.hasErrors')}` : ''}</span>
+                <span className="settings-update-group-name">{label}</span>
+                <span className="settings-update-group-meta">
+                    <span className="settings-update-group-count">{rows.filter(item => item.reason !== 'not_configured').length} {t('update.items')}{rows.some(item => item.status === 'error') ? ` · ${t('update.hasErrors')}` : ''}</span>
+                    {active && active !== schedule && <span className="settings-update-schedule">{t(active.auto_update_state === 'checking' ? 'update.autoChecking' : 'update.autoWaiting')}</span>}
+                    {schedule && <UpdateSchedule item={schedule} clock={clock} group stale={staleSchedule} />}
+                </span>
                 <Icon type="caret-right" size={14} />
             </summary>
             {rows.length
-                ? rows.map(item => <UpdateRow key={item.id} item={item} label={item.name} idle={idle} uncertain={task.restart !== undefined || task.unconfirmedStart} />)
+                ? rows.map(item => <UpdateRow key={item.id} item={item} label={item.name} idle={idle} clock={clock} stale={staleSchedule} uncertain={task.restart !== undefined || task.unconfirmedStart} />)
                 : <p className="settings-update-empty">{t(task.loading ? 'update.loading' : 'update.noResources')}</p>}
         </details>
     }
 
     return <Card className="settings-card settings-update" aria-busy={busy}>
-        <UpdateRow item={completedCore} label={t('update.kernel')} version={currentCore?.current_version || (task.loading ? '' : kernelVersion)} idle={idle} uncertain={task.restart === 'unconfirmed' || task.unconfirmedStart} />
-        <UpdateRow item={ui} label={t('update.dashboard')} version={__UI_VERSION__} idle={idle} uncertain={task.restart !== undefined || task.unconfirmedStart} />
+        <UpdateRow item={completedCore} label={t('update.kernel')} version={currentCore?.current_version ? currentCore.current_version : task.loading ? '' : kernelVersion} idle={idle} clock={clock} stale={staleSchedule} uncertain={task.restart === 'unconfirmed' || task.unconfirmedStart} />
+        <UpdateRow item={ui} label={t('update.dashboard')} version={__UI_VERSION__} idle={idle} clock={clock} stale={staleSchedule} uncertain={task.restart !== undefined || task.unconfirmedStart} />
         {uiInstalled && uiInstalled !== __UI_VERSION__ && <div className="settings-update-installed">
             <span>{t('update.installedVersion')} {uiInstalled}</span>
             {reloadAvailable && <button type="button" className="settings-update-link" onClick={() => window.location.reload()}>{t('update.reloadPage')}<Icon type="update" size={12} /></button>}
@@ -147,6 +197,7 @@ export function UpdateCheck ({ client, kernelVersion }: { client: Client, kernel
         {group(providers, t('update.ruleProviders'))}
         <div className="settings-update-sources">
             <span>{t('update.policyHint')}</span>
+            <span>{t('update.scheduleHint')}</span>
             <a className="settings-update-link" href={RELEASES} target="_blank" rel="noreferrer noopener">{t('update.coreReleases')}<Icon type="arrow-square-out" size={12} /></a>
             <a className="settings-update-link" href={DASHBOARD_SOURCE} target="_blank" rel="noreferrer noopener">{t('update.uiReleases')}<Icon type="arrow-square-out" size={12} /></a>
         </div>

@@ -218,9 +218,19 @@
     text-underline-offset: 3px;
 }
 
-.settings-update-policy {
+.settings-update-policy,
+.settings-update-schedule {
     color: var(--text-3);
     font-size: var(--t-2xs);
+}
+
+.settings-update-schedule {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.5;
 }
 
 .settings-update-footer {
@@ -280,9 +290,28 @@
 }
 
 .settings-update-group-count {
-    margin-left: auto;
     color: var(--text-3);
     font-size: var(--t-xs);
+}
+
+.settings-update-group-name {
+    flex: 0 1 30%;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.settings-update-group-meta {
+    display: grid;
+    flex: 1 1 55%;
+    justify-items: end;
+    gap: 4px;
+    min-width: 0;
+    margin-left: auto;
+    text-align: right;
+}
+
+.settings-update-group > summary > .icon {
+    flex-shrink: 0;
 }
 
 .settings-update-group[open] > summary > .icon {
