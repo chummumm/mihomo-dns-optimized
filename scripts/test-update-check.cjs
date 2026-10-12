@@ -222,7 +222,7 @@ async function main () {
     b.port = second.address().port
     origin = `http://127.0.0.1:${a.port}`
     browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined, args: process.env.PLAYWRIGHT_CHROMIUM_ARGS ? JSON.parse(process.env.PLAYWRIGHT_CHROMIUM_ARGS) : ['--no-sandbox', '--disable-dev-shm-usage'] })
-    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: 'en-US', timezoneId: 'Asia/Shanghai', serviceWorkers: 'block' })
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: 'en-US', serviceWorkers: 'block' })
     await context.route('**/*', route => {
         const url = new URL(route.request().url())
         if (url.hostname === '127.0.0.1' && [String(a.port), String(b.port)].includes(url.port)) return route.continue()
@@ -236,6 +236,11 @@ async function main () {
         localStorage.setItem('profile', JSON.stringify({ autoUpdateDashboard: true, autoUpdateCore: true }))
     }, { port: a.port, secret: a.secret })
     const page = await context.newPage()
+    // Use one CDP session for both the initial zone and later changes. A
+    // context-level timezoneId would reserve the override in Playwright's own
+    // session and make a second session's override fail before the assertion.
+    const devtools = await context.newCDPSession(page)
+    await devtools.send('Emulation.setTimezoneOverride', { timezoneId: 'Asia/Shanghai' })
     page.setDefaultTimeout(10000)
     page.on('pageerror', reason => errors.push(String(reason)))
     page.on('request', request => {
@@ -296,7 +301,6 @@ async function main () {
     }
     assert.equal(posts().length, 0, 'schedule refresh never starts an installation')
 
-    const devtools = await context.newCDPSession(page)
     await devtools.send('Emulation.setTimezoneOverride', { timezoneId: 'America/Los_Angeles' })
     await poll(async () => /PDT/.test(await nextTime('ui').textContent()), 'time zone changes follow the browser default', 31000)
     assert.match(await nextTime('ui').textContent(), /10\/12\/2026/, 'the same instant is still the preceding date in Los Angeles')
@@ -305,7 +309,6 @@ async function main () {
     await poll(async () => /10\/19\/2026/.test(await nextTime('ui').textContent()), 'browser clock corrections also change displayed update dates', 31000)
     await page.clock.setSystemTime(new Date(wallClock))
     await devtools.send('Emulation.setTimezoneOverride', { timezoneId: 'Asia/Shanghai' })
-    await devtools.detach()
 
     const providerPolicy = a.snapshot.items.find(item => item.id === 'rule-provider:remote')
     Object.assign(providerPolicy, { ...schedule(60000), auto_update_state: 'retrying' })
