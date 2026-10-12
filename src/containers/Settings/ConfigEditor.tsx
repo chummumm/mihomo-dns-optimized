@@ -1,8 +1,9 @@
 import axios from 'axios'
 import classnames from 'classnames'
+import { motion } from 'motion/react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MutableRefObject } from 'react'
 
-import { Button, Icon, Modal } from '@components'
+import { Button, Icon, Modal, springs } from '@components'
 import { type Client } from '@lib/request'
 import { useClient, useGeneral, useI18n } from '@stores'
 
@@ -80,7 +81,6 @@ function EditorSession ({ client, onClose, closeHandler }: {
     const requestRef = useRef<AbortController | null>(null)
     const active = useRef(true)
     const root = useRef<HTMLDivElement>(null)
-    const closeButton = useRef<HTMLButtonElement>(null)
     const original = useMemo(() => file !== null ? configDisplayText(file.content) : '', [file])
     const dirty = useMemo(() => file !== null && text !== original, [file, original, text])
     const lines = useMemo(() => configLineStarts(text), [text])
@@ -205,9 +205,15 @@ function EditorSession ({ client, onClose, closeHandler }: {
         return () => { closeHandler.current = null }
     }, [closeHandler, confirmation, dirty, onClose, saving])
 
-    useEffect(() => {
-        if (confirmation !== null) closeButton.current?.focus()
-    }, [confirmation])
+    // The confirmation mounts after the footer has animated out, so focus its
+    // safe action as soon as that element exists.
+    // The footer only animates back in after a confirmation, not when the editor opens.
+    const returning = useRef(false)
+    if (confirmation !== null) returning.current = true
+
+    const focusKeepEditing = useCallback((element: HTMLButtonElement | null) => {
+        element?.focus({ preventScroll: true })
+    }, [])
 
     async function save () {
         if (file === null || readOnly || (!dirty && !reloadPending) || conflict || requestRef.current !== null || confirmation !== null) return
@@ -322,7 +328,7 @@ function EditorSession ({ client, onClose, closeHandler }: {
             <div className={classnames('config-editor-notice', { 'is-error': problem !== null, 'is-saved': saved })} role={problem !== null ? 'alert' : 'status'}>
                 {problem !== null ? t(`editor.errors.${problem}`) : readOnly ? t('editor.readOnlyNote') : saved ? t('editor.saved') : t('editor.note')}
             </div>
-            <div className="config-editor-frame" aria-busy={loading || saving}>
+            <div className={classnames('config-editor-frame', { 'is-held': confirmation !== null })} aria-busy={loading || saving}>
                 <pre ref={lineMeasure} className="config-editor-line-measure" aria-hidden="true">{'0\n0\n0\n0\n0\n0\n0\n0'}</pre>
                 <div className="config-editor-gutter" aria-hidden="true" style={{ minWidth: `calc(${Math.max(2, String(lines.length).length)}ch + 22px)` }}>
                     <pre style={{ transform: `translateY(${viewport.paddingTop + firstLine * viewport.lineHeight - viewport.top}px)` }}>{numbers}</pre>
@@ -361,22 +367,42 @@ function EditorSession ({ client, onClose, closeHandler }: {
                 <span className="reading">YAML · UTF-8</span>
             </div>
             {confirmation !== null
-                ? <div className="config-editor-confirm" role="alert">
-                    <span>{t(confirmation === 'close' ? 'editor.discardClose' : 'editor.discardRead')}</span>
-                    <div className="config-editor-footer">
-                        <button ref={closeButton} type="button" className="button button-normal button-md" onClick={() => setConfirmation(null)}>{t('editor.keepEditing')}</button>
-                        <Button type="danger" onClick={() => {
+                ? <motion.div
+                    key={`confirm-${confirmation}`}
+                    className="config-editor-confirm"
+                    role="alertdialog"
+                    aria-labelledby="config-editor-confirm-title"
+                    aria-describedby="config-editor-confirm-text"
+                    initial={{ opacity: 0, y: 14, scale: 0.97 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    transition={springs.snap}>
+                    <span className="config-editor-confirm-icon" aria-hidden="true"><Icon type="warning" size={20} /></span>
+                    <div className="config-editor-confirm-copy">
+                        <b id="config-editor-confirm-title">{t(confirmation === 'close' ? 'editor.discardCloseTitle' : 'editor.discardReadTitle')}</b>
+                        <span id="config-editor-confirm-text">{t(confirmation === 'close' ? 'editor.discardClose' : 'editor.discardRead')}</span>
+                    </div>
+                    <div className="config-editor-confirm-actions">
+                        <button ref={focusKeepEditing} type="button" className="button button-normal button-md" onClick={() => { setConfirmation(null); area.current?.focus() }}>
+                            <Icon type="edit" size={16} />
+                            <span className="button-label">{t('editor.keepEditing')}</span>
+                        </button>
+                        <Button type="danger" icon={confirmation === 'close' ? 'trash' : 'update'} onClick={() => {
                             if (confirmation === 'close') onClose()
                             else void load()
                         }}>{t(confirmation === 'close' ? 'editor.discard' : 'editor.discardAndRead')}</Button>
                     </div>
-                </div>
-                : <div className="config-editor-footer">
+                </motion.div>
+                : <motion.div
+                    key="footer"
+                    className="config-editor-footer"
+                    initial={returning.current ? { opacity: 0, y: -6 } : false}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={springs.snap}>
                     <Button icon="update" disabled={loading || saving} onClick={reread}>{t(file === null ? 'editor.retry' : 'editor.reread')}</Button>
                     <span className="config-editor-footer-spacer" />
-                    <Button disabled={saving} onClick={() => closeHandler.current?.()}>{t('editor.close')}</Button>
+                    <Button icon="close" disabled={saving} onClick={() => closeHandler.current?.()}>{t('editor.close')}</Button>
                     <Button type="primary" icon={reloading ? 'update' : 'save'} loading={saving} disabled={file === null || readOnly || loading || saving || (!dirty && !reloadPending) || conflict} onClick={() => { void save() }}>{t(saving ? reloading ? 'editor.reloading' : 'editor.saving' : reloadPending && !dirty ? 'editor.retryReload' : 'editor.save')}</Button>
-                </div>}
+                </motion.div>}
         </div>
     )
 }

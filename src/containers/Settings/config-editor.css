@@ -235,13 +235,108 @@
     flex: 1;
 }
 
+/* Discard confirmation: rises in place of the footer and holds the editor behind it. */
 .config-editor-confirm {
-    padding: 10px 12px;
-    border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+    position: relative;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px 14px;
+    padding: 12px 12px 12px 14px;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--warn) 38%, transparent);
+    border-radius: 12px;
+    background:
+        linear-gradient(90deg, color-mix(in srgb, var(--warn) 10%, transparent), transparent 55%),
+        var(--sunken);
+    box-shadow: 0 14px 36px -24px color-mix(in srgb, var(--warn) 70%, transparent);
+    transform-origin: 50% 100%;
+}
+
+.config-editor-confirm::before {
+    content: '';
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 3px;
+    background: var(--warn);
+}
+
+.config-editor-confirm-icon {
+    display: grid;
+    flex-shrink: 0;
+    place-items: center;
+    width: 36px;
+    height: 36px;
     border-radius: 10px;
+    background: var(--warn-bg);
     color: var(--warn);
-    background: var(--sunken);
+}
+
+.config-editor-confirm-copy {
+    display: grid;
+    flex: 1 1 260px;
+    gap: 2px;
+    min-width: 0;
     font-size: var(--t-xs);
+    line-height: 1.5;
+}
+
+.config-editor-confirm-copy b {
+    color: var(--text);
+    font-size: var(--t-sm);
+    font-weight: 620;
+}
+
+.config-editor-confirm-copy span {
+    color: var(--text-2);
+}
+
+.config-editor-confirm-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: var(--sp-2);
+    margin-left: auto;
+}
+
+.config-editor-gutter,
+.config-editor-text {
+    transition: opacity var(--dur-3) var(--ease-out);
+}
+
+.config-editor-frame.is-held .config-editor-gutter,
+.config-editor-frame.is-held .config-editor-text {
+    opacity: 0.45;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .config-editor-confirm-icon .icon {
+        animation: config-confirm-nudge 620ms var(--ease-out) 120ms both;
+    }
+}
+
+@keyframes config-confirm-nudge {
+    0% {
+        transform: scale(0.6) rotate(0deg);
+        opacity: 0;
+    }
+
+    45% {
+        transform: scale(1.12) rotate(-10deg);
+        opacity: 1;
+    }
+
+    65% {
+        transform: scale(1) rotate(8deg);
+    }
+
+    82% {
+        transform: rotate(-4deg);
+    }
+
+    100% {
+        transform: none;
+    }
 }
 
 @media (max-width: 768px), (max-height: 500px) and (pointer: coarse) {

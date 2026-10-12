@@ -12,12 +12,13 @@ import { DEFAULT_PROBE_URL, normalizeProbeURL } from '@lib/probe'
 import { useI18n, useClashXData, useGeneral, useVersion, useClient, useConfig, identityAtom, hostSelectIdxStorageAtom, hostsStorageAtom, useAPIInfo } from '@stores'
 
 import { ConfigEditor } from './ConfigEditor'
+import { UpdateCheck } from './UpdateCheck'
 import './style.css'
 
 const languageOptions: ButtonSelectOptions[] = [{ label: '中文', value: 'zh_CN' }, { label: 'English', value: 'en_US' }]
 
 export default function Settings () {
-    const { premium } = useVersion()
+    const { premium, version } = useVersion()
     const { data: clashXData, update: fetchClashXData } = useClashXData()
     const { general, update: fetchGeneral } = useGeneral()
     const setIdentity = useSetAtom(identityAtom)
@@ -324,6 +325,11 @@ export default function Settings () {
                         />
                     </div>
                 </Card>
+            </section>
+
+            <section className="settings-section">
+                <h2 className="settings-section-title">{t('sections.update')}</h2>
+                <UpdateCheck client={client} kernelVersion={version} />
             </section>
             <ConfigEditor show={editorOpen} onClose={() => setEditorOpen(false)} />
         </div>
