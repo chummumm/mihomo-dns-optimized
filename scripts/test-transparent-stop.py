@@ -320,7 +320,7 @@ class Core:
                         pass  # StartTransientUnit has not published the unit yet.
                     time.sleep(0.1)
                 else:
-                    raise Failure("systemd did not start the transient core service")
+                    raise Failure(f"systemd did not start the transient core service:\n{self.diagnostics()}")
             except BaseException:
                 self.close()
                 raise
@@ -375,6 +375,18 @@ class Core:
 
     def diagnostics(self) -> str:
         texts = [path.read_text(errors="replace") for path in (self.log, self.wait_log) if path.exists()]
+        if self.unit:
+            # Capture the first failure before close() stops and resets the
+            # transient unit. A constructor failure leaves the caller without
+            # a Core instance from which to collect these diagnostics later.
+            for argv in (
+                ["systemctl", "show", self.unit, "--property=MainPID,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,NRestarts"],
+                ["journalctl", "--no-pager", "--output=short-monotonic", "--lines=40", f"--unit={self.unit}"],
+            ):
+                try:
+                    texts.append(run(argv, timeout=5))
+                except (Failure, OSError, subprocess.TimeoutExpired) as error:
+                    texts.append(str(error))
         return "\n".join(texts)[-16000:] or "no core log was created"
 
     def close(self) -> None:
@@ -477,6 +489,11 @@ def test_case(binary: Path, label: str, *, reexec: bool = False, systemd: bool =
                 account = pwd.getpwnam(SERVICE_USER)
                 if account.pw_uid == 0:
                     raise Failure("service fixture must use an unprivileged account")
+                # Package installs give this user both the binary and data.
+                # Avoid depending on traversal permissions in RUNNER_TEMP.
+                installed_binary = directory / "mihomo"
+                shutil.copy2(binary, installed_binary)
+                binary = installed_binary.resolve(strict=True)
                 for path in [directory, *directory.rglob("*")]:
                     os.chown(path, account.pw_uid, account.pw_gid)
             core = Core(ns, binary, directory, systemd)
