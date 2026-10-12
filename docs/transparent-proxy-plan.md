@@ -81,6 +81,8 @@ transparent-proxy:
 
 选择 TUN 时要求 `tun.enable: true`，选择 TProxy 时要求有效 `tproxy-port`。托管 TProxy 使用通配地址监听原始目的地址，不受 HTTP / SOCKS 的 `allow-lan` 绑定限制。需要 Linux 的网络管理权限及 nftables TProxy/socket 内核支持；运行用户仍可使用 `mihomo`。不需要安装命令行 `nft` 或 `ip` 来执行后台维护。
 
+运行用户还必须能写入 `-d` 数据目录下的 `transparent-proxy` 子目录，用来在修改系统资源前保存所有权记录。使用 `User=mihomo` 且数据目录由 root 管理时，可预先创建仅供该服务写入的子目录，例如 `install -d -o mihomo -g mihomo -m 0700 /etc/mihomo/transparent-proxy`；按实际 `-d` 路径调整。配置文件本身可以继续由 root 持有并保持只读。无法持久化记录时不会继续启用接管。
+
 未知字段会报错，包括已经决定不提供的 `reconcile-interval`。这些配置通过完整 YAML 重载应用；控制器的局部 PATCH 不用于改变整套透明代理策略。
 
 ### 官方写法核对与选择依据

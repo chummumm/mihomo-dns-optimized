@@ -5,6 +5,7 @@ package transparentproxy
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"net/netip"
 	"strings"
@@ -445,6 +446,99 @@ func TestNFTWireExpressionFingerprint(t *testing.T) {
 	padded = appendWireAttribute(padded, unix.NFTA_RULE_PAD, nil)
 	if _, err := nftAttributeMap(padded); err != nil {
 		t.Fatalf("rejected valid kernel alignment padding: %v", err)
+	}
+}
+
+func TestNFTKernelLookupDefaultFlagsConverge(t *testing.T) {
+	if binaryutil.NativeEndian.Uint16([]byte{1, 0}) != 1 {
+		t.Skip("fixture was captured from a little-endian Linux kernel")
+	}
+	// Expression attributes read back by Linux in CI job 114713887233.
+	// Every pre4/pre6/out4/out6 rule 0 had this form: mark lookup followed
+	// by return. Unlike the writer, Linux includes NFTA_LOOKUP_FLAGS=0.
+	kernelExpressions, err := hex.DecodeString(
+		"24000100090001006d657461000000001400020008000100000000010800020000000003" +
+			"380001000b0001006c6f6f6b7570000028000200110001006279706173735f6d61726b730000000008000200000000010800050000000000" +
+			"300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	program, err := buildNFTRuleset("stable-owner", nftTestState())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := nftSnapshotFromProgram(t, program)
+	for _, name := range []string{"pre4", "pre6", "out4", "out6"} {
+		chain := snapshot.chains[name]
+		rule := chain.rules[0].rule
+		data := []byte{unix.NFPROTO_INET, unix.NFNETLINK_V0, 0, 0}
+		data = appendWireAttribute(data, unix.NFTA_RULE_TABLE, []byte(program.table.Name+"\x00"))
+		data = appendWireAttribute(data, unix.NFTA_RULE_CHAIN, []byte(name+"\x00"))
+		data = appendWireAttribute(data, unix.NFTA_RULE_HANDLE, binaryutil.BigEndian.PutUint64(rule.Handle))
+		data = appendWireAttribute(data, unix.NFTA_RULE_USERDATA, rule.UserData)
+		data = appendWireAttribute(data, unix.NFTA_RULE_EXPRESSIONS, kernelExpressions)
+		chain.rules[0], err = decodeNFTRule(wireMessage{Type: uint16(unix.NFNL_SUBSYS_NFTABLES<<8) | unix.NFT_MSG_NEWRULE, Data: data})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	plan, err := planNFTChanges(snapshot, program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.empty() {
+		t.Fatalf("kernel default flags caused a rewrite: addRules=%d deleteRules=%d", len(plan.createRules), len(plan.deleteRules))
+	}
+}
+
+func TestNFTLookupNormalizationPreservesSignificantAttributes(t *testing.T) {
+	data, err := expr.Marshal(byte(nftables.TableFamilyINet), &expr.Lookup{SourceRegister: 1, SetName: "bypass_marks", SetID: 99})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wanted, err := canonicalNFTExpression(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer, err := nftAttributeMap(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name       string
+		kind       uint16
+		value      []byte
+		equal, bad bool
+	}{
+		{name: "default flags", kind: unix.NFTA_LOOKUP_FLAGS, value: []byte{0, 0, 0, 0}, equal: true},
+		{name: "inverted lookup", kind: unix.NFTA_LOOKUP_FLAGS, value: []byte{0, 0, 0, 1}},
+		{name: "unknown flag", kind: unix.NFTA_LOOKUP_FLAGS, value: []byte{0, 0, 0, 2}},
+		{name: "zero destination register", kind: unix.NFTA_LOOKUP_DREG, value: []byte{0, 0, 0, 0}},
+		{name: "unknown zero attribute", kind: 0x3ffe, value: []byte{0, 0, 0, 0}},
+		{name: "empty flags", kind: unix.NFTA_LOOKUP_FLAGS, bad: true},
+		{name: "short flags", kind: unix.NFTA_LOOKUP_FLAGS, value: []byte{0, 0, 0}, bad: true},
+		{name: "long flags", kind: unix.NFTA_LOOKUP_FLAGS, value: []byte{0, 0, 0, 0, 0}, bad: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fields, err := nftAttributeMap(outer[unix.NFTA_EXPR_DATA])
+			if err != nil {
+				t.Fatal(err)
+			}
+			delete(fields, unix.NFTA_LOOKUP_SET_ID)
+			fields[test.kind] = test.value
+			response := appendWireAttribute(nil, unix.NFTA_EXPR_NAME, outer[unix.NFTA_EXPR_NAME])
+			response = appendWireAttribute(response, unix.NFTA_EXPR_DATA, marshalNFTAttributes(fields))
+			got, err := canonicalNFTExpression(response)
+			if test.bad {
+				if !errors.Is(err, errIncompleteNetlink) {
+					t.Fatalf("malformed flags were not rejected: %v", err)
+				}
+				return
+			}
+			if err != nil || bytes.Equal(got, wanted) != test.equal {
+				t.Fatalf("significant lookup change lost or default not normalized: equal=%v want=%v err=%v", bytes.Equal(got, wanted), test.equal, err)
+			}
+		})
 	}
 }
 

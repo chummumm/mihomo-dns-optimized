@@ -141,11 +141,19 @@ jobs:
           go-version: "1.26"
           go-download-base-url: https://github.com/MetaCubeX/go/releases/download/build
           cache: true
-      - name: Install package inspection tools
-        run: sudo apt-get update && sudo apt-get install -y rpm cpio zstd fakeroot
+      - name: Install package inspection and network test tools
+        run: sudo apt-get update && sudo apt-get install -y rpm cpio zstd fakeroot iproute2 nftables
       - name: Read the checked release matrix
         id: matrix
         run: printf 'matrix=%s\n' "$(python3 scripts/release-build.py matrix)" >> "$GITHUB_OUTPUT"
+      - name: Verify transparent capture and TUN blackholes in isolated namespaces
+        run: |
+          set -euo pipefail
+          network_test_binary="$RUNNER_TEMP/transparent-proxy.test"
+          trap 'rm -f "$network_test_binary"' EXIT
+          CGO_ENABLED=0 go test -tags with_gvisor -c -o "$network_test_binary" ./component/transparentproxy
+          sudo -n env MIHOMO_TRANSPARENT_PROXY_INTEGRATION=1 TMPDIR=/tmp \
+            "$network_test_binary" -test.run '^(TestNFTKernelRoundTrip|TestRoutesKernelBlackholeBarrier)$' -test.v -test.timeout 3m
       - name: Test fork changes and sync safeguards
         run: bash scripts/ci-check.sh test
       - name: Test configuration permissions with an unprivileged service user
@@ -156,16 +164,6 @@ jobs:
           CGO_ENABLED=0 go test -tags with_gvisor -c -o "$permission_test_binary" ./hub/route
           sudo -n env MIHOMO_CONFIG_FILE_PERMISSION_REQUIRED=1 TMPDIR=/tmp \
             "$permission_test_binary" -test.run '^TestConfigFileUnprivilegedPermissions$' -test.v -test.timeout 2m
-      - name: Install Linux network namespace test tools
-        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables
-      - name: Verify transparent capture and TUN blackholes in isolated namespaces
-        run: |
-          set -euo pipefail
-          network_test_binary="$RUNNER_TEMP/transparent-proxy.test"
-          trap 'rm -f "$network_test_binary"' EXIT
-          CGO_ENABLED=0 go test -tags with_gvisor -c -o "$network_test_binary" ./component/transparentproxy
-          sudo -n env MIHOMO_TRANSPARENT_PROXY_INTEGRATION=1 TMPDIR=/tmp \
-            "$network_test_binary" -test.run '^(TestNFTKernelRoundTrip|TestRoutesKernelBlackholeBarrier)$' -test.v -test.timeout 3m
 
   build:
     name: ${{ matrix.target }}

@@ -437,6 +437,15 @@ func canonicalNFTExpression(data []byte) ([]byte, error) {
 		// Set IDs are transaction-local references; the persistent name is
 		// the identity returned by the kernel for an installed lookup.
 		delete(fields, unix.NFTA_LOOKUP_SET_ID)
+		// Linux nft_lookup_dump always emits flags, while the writer omits
+		// the default zero value. Preserve inversion and unknown flag bits.
+		flags, err := nftUint32Attribute(fields, unix.NFTA_LOOKUP_FLAGS, true)
+		if err != nil {
+			return nil, err
+		}
+		if flags == 0 {
+			delete(fields, unix.NFTA_LOOKUP_FLAGS)
+		}
 	}
 	if name == "socket" {
 		key, err := nftUint32Attribute(fields, expr.NFTA_SOCKET_KEY, false)
