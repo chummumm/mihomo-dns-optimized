@@ -89,22 +89,62 @@ func TestCoreUpdaterPreflightFailurePreservesExecutableAndBackup(t *testing.T) {
 			if err := os.WriteFile(backup, previousBackup, 0o751); err != nil {
 				t.Fatal(err)
 			}
-			ctx := context.Background()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			readyPath := ""
 			if behavior == "hang" {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, 250*time.Millisecond)
-				defer cancel()
+				readyPath = filepath.Join(t.TempDir(), "probe-started")
+				t.Setenv("MIHOMO_TEST_CORE_PROBE_READY", readyPath)
 			}
 			reservation, err := f.u.ReserveCheckAndUpdate()
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer reservation.Close()
-			result, err := reservation.CheckAndUpdate(ctx, f.path, f.u.restartHandler, nil)
+			type outcome struct {
+				result CoreCheckResult
+				err    error
+			}
+			completed := make(chan outcome, 1)
+			go func() {
+				result, err := reservation.CheckAndUpdate(ctx, f.path, f.u.restartHandler, nil)
+				completed <- outcome{result, err}
+			}()
+			timeout := time.NewTimer(30 * time.Second)
+			defer timeout.Stop()
+			if behavior == "hang" {
+				// Cancellation must target the actual version subprocess. A short
+				// transaction deadline can expire during race-instrumented unpacking
+				// or slow disk I/O before the preflight has even started.
+				poll := time.NewTicker(10 * time.Millisecond)
+				defer poll.Stop()
+				for {
+					if _, statErr := os.Stat(readyPath); statErr == nil {
+						cancel()
+						break
+					} else if !os.IsNotExist(statErr) {
+						t.Fatalf("inspect native probe readiness: %v", statErr)
+					}
+					select {
+					case early := <-completed:
+						t.Fatalf("update ended before the native hanging probe started: %+v %v", early.result, early.err)
+					case <-timeout.C:
+						t.Fatal("native hanging probe did not start within the test timeout")
+					case <-poll.C:
+					}
+				}
+			}
+			var result CoreCheckResult
+			select {
+			case finished := <-completed:
+				result, err = finished.result, finished.err
+			case <-timeout.C:
+				t.Fatal("preflight failure did not finish within the test timeout")
+			}
 			if err == nil || !strings.Contains(err.Error(), "validate staged") || result.Updated || f.u.pendingRestart || !f.settled() {
 				t.Fatalf("unusable release reached installation or left the updater locked: %+v %v", result, err)
 			}
-			if behavior == "hang" && !errors.Is(err, context.DeadlineExceeded) {
+			if behavior == "hang" && !errors.Is(err, context.Canceled) {
 				t.Fatalf("preflight did not retain its cancellation cause: %v", err)
 			}
 			f.unchanged(t)

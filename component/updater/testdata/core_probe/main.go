@@ -41,6 +41,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "fixture CPU initialization failed")
 		os.Exit(2)
 	case "hang":
+		if readyPath := os.Getenv("MIHOMO_TEST_CORE_PROBE_READY"); readyPath != "" {
+			if err := os.WriteFile(readyPath, []byte("entered -v hang branch\n"), 0o600); err != nil {
+				fmt.Fprintf(os.Stderr, "write probe readiness marker: %v\n", err)
+				os.Exit(91)
+			}
+		}
 		time.Sleep(time.Minute)
 	case "excess-output":
 		fmt.Print(strings.Repeat("x", 32*1024))
