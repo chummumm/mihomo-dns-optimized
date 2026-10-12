@@ -471,7 +471,7 @@ type RawConfig struct {
 	RoutingMark              int                     `yaml:"routing-mark" json:"routing-mark"`
 	Tunnels                  []LC.Tunnel             `yaml:"tunnels" json:"tunnels"`
 	GeoAutoUpdate            bool                    `yaml:"geo-auto-update" json:"geo-auto-update"`
-	GeoUpdateInterval        int                     `yaml:"geo-update-interval" json:"geo-update-interval"`
+	GeoUpdateInterval        GeoUpdateInterval       `yaml:"geo-update-interval" json:"geo-update-interval"`
 	GeodataMode              bool                    `yaml:"geodata-mode" json:"geodata-mode"`
 	GeodataLoader            string                  `yaml:"geodata-loader" json:"geodata-loader"`
 	GeositeMatcher           string                  `yaml:"geosite-matcher" json:"geosite-matcher"`
@@ -807,12 +807,18 @@ func parseRawConfig(rawCfg *RawConfig) (*Config, error) {
 func temporaryUpdateGeneral(general *General) func()
 
 func parseGeneral(cfg *RawConfig) (*General, error) {
-	const maxUIUpdateHours = int64(1<<63-1) / int64(time.Hour)
-	if cfg.ExternalUIUpdateInterval <= 0 || int64(cfg.ExternalUIUpdateInterval) > maxUIUpdateHours {
-		return nil, fmt.Errorf("external-ui-update-interval must be a positive integer number of hours no greater than %d", maxUIUpdateHours)
-	}
-	if cfg.CoreUpdateInterval <= 0 || int64(cfg.CoreUpdateInterval) > maxUIUpdateHours {
-		return nil, fmt.Errorf("core-update-interval must be a positive integer number of hours no greater than %d", maxUIUpdateHours)
+	const maxUpdateHours = int64(1<<63-1) / int64(time.Hour)
+	for _, schedule := range []struct {
+		name  string
+		hours int64
+	}{
+		{"external-ui-update-interval", int64(cfg.ExternalUIUpdateInterval)},
+		{"core-update-interval", int64(cfg.CoreUpdateInterval)},
+		{"geo-update-interval", int64(cfg.GeoUpdateInterval)},
+	} {
+		if schedule.hours <= 0 || schedule.hours > maxUpdateHours {
+			return nil, fmt.Errorf("%s must be a positive integer number of hours no greater than %d", schedule.name, maxUpdateHours)
+		}
 	}
 	if cfg.GlobalClientFingerprint != "" {
 		log.Errorln("The `global-client-fingerprint` configuration is removed, please set `client-fingerprint` directly on the proxy instead")
@@ -848,7 +854,7 @@ func parseGeneral(cfg *RawConfig) (*General, error) {
 			GeoSite: cfg.GeoXUrl.GeoSite,
 		},
 		GeoAutoUpdate:            cfg.GeoAutoUpdate,
-		GeoUpdateInterval:        cfg.GeoUpdateInterval,
+		GeoUpdateInterval:        int(cfg.GeoUpdateInterval),
 		ExternalUIAutoUpdate:     cfg.ExternalUIAutoUpdate,
 		ExternalUIUpdateInterval: int(cfg.ExternalUIUpdateInterval),
 		CoreAutoUpdate:           cfg.CoreAutoUpdate,

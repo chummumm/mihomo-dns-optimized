@@ -198,6 +198,7 @@ func (u *CoreUpdater) automaticUpdate(job *coreAutomaticUpdate, waitForOperation
 // a successful core commit, when no updater policy lock is held.
 func StopAutomaticUpdates() {
 	DefaultCoreUpdater.stopAutomaticUpdates()
+	DefaultGeoUpdater.stopAutomaticUpdates()
 	uiActivation.Lock()
 	defer uiActivation.Unlock()
 	if u := currentUIUpdater.Load(); u != nil {

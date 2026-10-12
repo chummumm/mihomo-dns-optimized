@@ -19,7 +19,6 @@ import (
 	"github.com/metacubex/mihomo/component/age"
 	"github.com/metacubex/mihomo/component/generator"
 	"github.com/metacubex/mihomo/component/geodata"
-	"github.com/metacubex/mihomo/component/updater"
 	"github.com/metacubex/mihomo/config"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/constant/features"
@@ -215,10 +214,6 @@ func main() {
 
 	if err := hub.Parse(configBytes, options...); err != nil {
 		log.Fatalln("Parse config error: %s", err.Error())
-	}
-
-	if updater.GeoAutoUpdate() {
-		updater.RegisterGeoUpdater()
 	}
 
 	if postDown != "" {
