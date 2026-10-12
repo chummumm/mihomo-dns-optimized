@@ -628,6 +628,7 @@ func (m *manager) applyConfigurationLocked(cfg Config, runtime Runtime, uids, ma
 	if m.closing || m.closed {
 		return errors.New("transparent-proxy is stopping")
 	}
+	wasUncertain := m.uncertain
 	if m.uncertain {
 		if m.watch != nil {
 			_ = m.watch.Close()
@@ -703,7 +704,46 @@ func (m *manager) applyConfigurationLocked(cfg Config, runtime Runtime, uids, ma
 	} else {
 		m.nextRepair = time.Time{}
 	}
+	if wasUncertain {
+		// Only a complete successful apply restores observation. A missing
+		// backend or restart fence can still leave selected traffic protected.
+		tcp, udp := appliedBackendAvailability(state)
+		log.Infoln("[Transparent Proxy] Network synchronization restored; applied backend availability: TCP=%s; UDP=%s", tcp, udp)
+	}
 	return nil
+}
+
+func appliedBackendAvailability(state firewallState) (string, string) {
+	if !state.Enabled {
+		return "disabled", "disabled"
+	}
+	describe := func(mode Mode, ready4, ready6 bool) string {
+		if mode == ModeOff {
+			return "off"
+		}
+		ipv4, ipv6 := "protected", "protected"
+		if ready4 {
+			ipv4 = "ready"
+		}
+		if !state.IPv6 {
+			ipv6 = "disabled"
+		} else if ready6 {
+			ipv6 = "ready"
+		}
+		return fmt.Sprintf("%s (IPv4=%s, IPv6=%s)", mode, ipv4, ipv6)
+	}
+	tcp4, tcp6 := state.TProxyTCP4, state.TProxyTCP6
+	switch state.TCP {
+	case ModeTUN:
+		tcp4, tcp6 = state.Tun4, state.Tun6
+	case ModeRedir:
+		tcp4, tcp6 = state.Redir4, state.Redir6
+	}
+	udp4, udp6 := state.TProxyUDP4, state.TProxyUDP6
+	if state.UDP == ModeTUN {
+		udp4, udp6 = state.Tun4, state.Tun6
+	}
+	return describe(state.TCP, tcp4, tcp6), describe(state.UDP, udp4, udp6)
 }
 
 func blockedFirewall(state firewallState) firewallState {
