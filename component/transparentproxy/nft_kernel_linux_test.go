@@ -129,7 +129,7 @@ func TestNFTKernelRoundTrip(t *testing.T) {
 	}
 	actual = assertConverged()
 
-	for _, tcp := range []Mode{ModeOff, ModeTProxy, ModeTUN} {
+	for _, tcp := range []Mode{ModeOff, ModeTProxy, ModeTUN, ModeRedir} {
 		for _, udp := range []Mode{ModeOff, ModeTProxy, ModeTUN} {
 			state.TCP, state.UDP = tcp, udp
 			if err := f.Apply(ctx, state); err != nil {

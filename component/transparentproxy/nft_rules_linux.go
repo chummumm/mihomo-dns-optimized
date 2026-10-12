@@ -43,22 +43,28 @@ type nftRuleset struct {
 
 func buildNFTRuleset(state firewallState) (*nftRuleset, error) {
 	for _, mode := range []Mode{state.TCP, state.UDP} {
-		if mode != ModeOff && mode != ModeTUN && mode != ModeTProxy {
+		if mode != ModeOff && mode != ModeTUN && mode != ModeTProxy && mode != ModeRedir {
 			return nil, fmt.Errorf("invalid transparent-proxy capture mode %q", mode)
 		}
 	}
+	if state.UDP == ModeRedir {
+		return nil, errors.New("transparent-proxy REDIRECT only supports TCP")
+	}
 	usesTProxy := state.TCP == ModeTProxy || state.UDP == ModeTProxy
 	usesTUN := state.TCP == ModeTUN || state.UDP == ModeTUN
-	if usesTProxy && state.TProxyMark == 0 || usesTUN && state.TunMark == 0 || usesTProxy && usesTUN && state.TProxyMark == state.TunMark {
+	if usesTProxy && (state.TProxyMark == 0 || state.TProxyMark == RedirMark) || usesTUN && (state.TunMark == 0 || state.TunMark == RedirMark) || usesTProxy && usesTUN && state.TProxyMark == state.TunMark {
 		return nil, errors.New("transparent-proxy capture marks must be nonzero and distinct")
 	}
 	for _, mark := range state.BypassMarks {
-		if usesTProxy && mark == state.TProxyMark || usesTUN && mark == state.TunMark {
+		if mark == RedirMark || usesTProxy && mark == state.TProxyMark || usesTUN && mark == state.TunMark {
 			return nil, fmt.Errorf("transparent-proxy bypass mark %#x conflicts with capture", mark)
 		}
 	}
 	if usesTProxy && state.TProxyPort == 0 && (state.TProxyTCP4 || state.TProxyTCP6 || state.TProxyUDP4 || state.TProxyUDP6) {
 		return nil, errors.New("ready transparent-proxy TProxy listener has no port")
+	}
+	if state.TCP == ModeRedir && state.RedirPort == 0 && (state.Redir4 || state.Redir6) {
+		return nil, errors.New("ready transparent-proxy REDIRECT listener has no port")
 	}
 	if state.TunName != "" && !validNFTInterface(state.TunName) {
 		return nil, fmt.Errorf("invalid transparent-proxy TUN interface %q", state.TunName)
@@ -102,11 +108,21 @@ func buildNFTRuleset(state firewallState) (*nftRuleset, error) {
 	}
 	uidSet := addSet("bypass_uids", nftables.TypeUID, nftUint32Elements(state.BypassUIDs), false)
 	markSet := addSet("bypass_marks", nftables.TypeMark, nftUint32Elements(state.BypassMarks), false)
-	var portElements []nftables.SetElement
-	for _, port := range state.BypassUDPPorts {
-		portElements = append(portElements, nftables.SetElement{Key: binaryutil.BigEndian.PutUint16(port)})
+	portSets := make(map[byte]*nftables.Set)
+	for _, entry := range []struct {
+		name     string
+		protocol byte
+		ports    []uint16
+	}{{"bypass_tcp_ports", unix.IPPROTO_TCP, state.BypassTCPPorts}, {"bypass_udp_ports", unix.IPPROTO_UDP, state.BypassUDPPorts}} {
+		var elements []nftables.SetElement
+		for _, port := range entry.ports {
+			if port == 0 {
+				return nil, errors.New("transparent-proxy bypass ports must be 1..65535")
+			}
+			elements = append(elements, nftables.SetElement{Key: binaryutil.BigEndian.PutUint16(port)})
+		}
+		portSets[entry.protocol] = addSet(entry.name, nftables.TypeInetService, elements, false)
 	}
-	portSet := addSet("bypass_udp_ports", nftables.TypeInetService, portElements, false)
 	localTypeSet := addSet("local_types", nftables.TypeInteger, nftUint32Elements([]uint32{unix.RTN_LOCAL, unix.RTN_BROADCAST, unix.RTN_ANYCAST, unix.RTN_MULTICAST}), false)
 	addressSets := make(map[string]*nftables.Set)
 	for _, entry := range []struct {
@@ -128,7 +144,7 @@ func buildNFTRuleset(state firewallState) (*nftRuleset, error) {
 	}
 
 	chains := make(map[string]*nftDesiredChain)
-	for _, name := range []string{"prerouting", "output", "pre4", "pre6", "out4", "out6", "tproxy4", "tproxy6", "mark_tproxy4", "mark_tproxy6", "tun4", "tun6"} {
+	for _, name := range []string{"prerouting", "output", "pre4", "pre6", "out4", "out6", "tproxy4", "tproxy6", "mark_tproxy4", "mark_tproxy6", "tun4", "tun6", "redir4", "redir6", "redir_nat_pre", "redir_nat_out", "redir_guard_pre", "redir_guard_out", "redir_check4", "redir_check6"} {
 		chain := &nftables.Chain{Name: name, Table: ruleset.table}
 		if name == "prerouting" || name == "output" {
 			policy := nftables.ChainPolicyAccept
@@ -136,6 +152,18 @@ func buildNFTRuleset(state firewallState) (*nftRuleset, error) {
 			chain.Hooknum = nftables.ChainHookPrerouting
 			if name == "output" {
 				chain.Type, chain.Hooknum = nftables.ChainTypeRoute, nftables.ChainHookOutput
+			}
+		}
+		if name == "redir_nat_pre" || name == "redir_nat_out" || name == "redir_guard_pre" || name == "redir_guard_out" {
+			policy := nftables.ChainPolicyAccept
+			chain.Type, chain.Policy, chain.Priority = nftables.ChainTypeNAT, &policy, nftables.ChainPriorityNATDest
+			chain.Hooknum = nftables.ChainHookPrerouting
+			if strings.HasSuffix(name, "_out") {
+				chain.Hooknum = nftables.ChainHookOutput
+			}
+			if strings.HasPrefix(name, "redir_guard_") {
+				chain.Type = nftables.ChainTypeFilter
+				chain.Priority = nftables.ChainPriorityRef(-90)
 			}
 		}
 		desired := &nftDesiredChain{chain: chain}
@@ -154,6 +182,7 @@ func buildNFTRuleset(state firewallState) (*nftRuleset, error) {
 		protocol byte
 		mode     Mode
 	}{{unix.IPPROTO_TCP, state.TCP}, {unix.IPPROTO_UDP, state.UDP}}
+	buildNFTRedir(state, addRule)
 
 	for _, family := range []int{4, 6} {
 		if family == 6 && !state.IPv6 {
@@ -251,9 +280,12 @@ func buildNFTRuleset(state firewallState) (*nftRuleset, error) {
 				if mode == ModeTProxy {
 					return nftGoto(entry.proxy)
 				}
+				if mode == ModeRedir {
+					return nftGoto("redir" + suffix)
+				}
 				return nftGoto(tun)
 			}
-			// FakeIP deliberately precedes FIB/prefix and local UDP-port bypass.
+			// FakeIP deliberately precedes FIB/prefix and local port bypass.
 			// ModeOff has no matching rule here, including for fake addresses.
 			for _, protocol := range protocols {
 				if protocol.mode == ModeOff {
@@ -266,8 +298,10 @@ func buildNFTRuleset(state firewallState) (*nftRuleset, error) {
 			addRule(entry.chain, &expr.Fib{Register: 1, FlagDADDR: true, ResultADDRTYPE: true}, nftLookup(localTypeSet, false), nftReturn())
 			addRule(entry.chain, nftDestination(family), nftLookup(addressSets["bypass"+suffix], false), nftReturn())
 			if entry.chain == out {
-				match := append(nftProtocol(unix.IPPROTO_UDP), &expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2}, nftLookup(portSet, false), nftReturn())
-				addRule(out, match...)
+				for _, protocol := range protocols {
+					match := append(nftProtocol(protocol.protocol), &expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2}, nftLookup(portSets[protocol.protocol], false), nftReturn())
+					addRule(out, match...)
+				}
 			}
 			for _, protocol := range protocols {
 				if protocol.mode != ModeOff {

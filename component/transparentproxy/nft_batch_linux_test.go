@@ -215,8 +215,17 @@ func TestNFTBatchEncodingMatchesSnapshot(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if chain.chain.Hooknum != nil && *chain.chain.Priority != -150 {
-				t.Fatal("capture does not run at mangle priority")
+			if chain.chain.Hooknum != nil {
+				wantPriority := -150
+				switch chain.chain.Name {
+				case "redir_nat_pre", "redir_nat_out":
+					wantPriority = -100
+				case "redir_guard_pre", "redir_guard_out":
+					wantPriority = -90
+				}
+				if int(*chain.chain.Priority) != wantPriority {
+					t.Fatalf("chain %s runs at wrong hook priority: %d", chain.chain.Name, *chain.chain.Priority)
+				}
 			}
 		case unix.NFT_MSG_NEWSET:
 			set, err := decodeNFTSet(operation)

@@ -153,7 +153,7 @@ func (s *linuxRouteSystem) ApplySysctls(ctx context.Context, state networkState,
 		}
 		return nil
 	}
-	active := config.Enable && (config.Uses(ModeTProxy) || config.Uses(ModeTUN))
+	active := config.Enable && (config.Uses(ModeTProxy) || config.Uses(ModeTUN) || config.Uses(ModeRedir))
 	if active && config.Gateway.Enable {
 		// IPv4 forwards according to its ingress interface's FORWARDING flag.
 		// Unlike ip_forward/all.forwarding, writing the selected interfaces does

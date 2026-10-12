@@ -256,10 +256,11 @@ func updateListeners(general *config.General, listeners map[string]C.InboundList
 	listener.PatchInboundListeners(listeners, tunnel.Tunnel, true)
 	if !force {
 		if general.TransparentProxy.Enable {
-			return listener.ReCreateTProxy(general.TProxyPort, tunnel.Tunnel)
+			return errors.Join(listener.ReCreateRedir(general.RedirPort, tunnel.Tunnel), listener.ReCreateTProxy(general.TProxyPort, tunnel.Tunnel))
 		}
 		if wasManaged {
-			return listener.ReCreateTProxy(listener.GetPorts().TProxyPort, tunnel.Tunnel)
+			ports := listener.GetPorts()
+			return errors.Join(listener.ReCreateRedir(ports.RedirPort, tunnel.Tunnel), listener.ReCreateTProxy(ports.TProxyPort, tunnel.Tunnel))
 		}
 		return nil
 	}
@@ -274,8 +275,8 @@ func updateListeners(general *config.General, listeners map[string]C.InboundList
 	listener.SetBindAddress(bindAddress)
 	listener.ReCreateHTTP(general.Port, tunnel.Tunnel)
 	listener.ReCreateSocks(general.SocksPort, tunnel.Tunnel)
-	listener.ReCreateRedir(general.RedirPort, tunnel.Tunnel)
-	err := listener.ReCreateTProxy(general.TProxyPort, tunnel.Tunnel)
+	err := listener.ReCreateRedir(general.RedirPort, tunnel.Tunnel)
+	err = errors.Join(err, listener.ReCreateTProxy(general.TProxyPort, tunnel.Tunnel))
 	listener.ReCreateMixed(general.MixedPort, tunnel.Tunnel)
 	listener.ReCreateShadowSocks(general.ShadowSocksConfig, tunnel.Tunnel)
 	listener.ReCreateVmess(general.VmessConfig, tunnel.Tunnel)

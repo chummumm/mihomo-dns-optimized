@@ -33,6 +33,7 @@ func transparentProxyRuntime(cfg *config.Config) transparentproxy.Runtime {
 		TunIPv6Ready: backends.TunIPv6Ready,
 		TProxyPort:   backends.TProxyPort, TProxyTCP: backends.TProxyTCP, TProxyUDP: backends.TProxyUDP,
 		TProxyTCPIPv6: backends.TProxyTCPIPv6, TProxyUDPIPv6: backends.TProxyUDPIPv6,
+		RedirPort: backends.RedirPort, RedirTCP: backends.RedirTCP, RedirTCPIPv6: backends.RedirTCPIPv6,
 	}
 	if cfg.DNS != nil && cfg.DNS.Enable && cfg.DNS.EnhancedMode == C.DNSFakeIP {
 		for _, prefix := range []netip.Prefix{cfg.DNS.FakeIPRange, cfg.DNS.FakeIPRange6} {

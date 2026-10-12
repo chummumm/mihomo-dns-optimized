@@ -12,12 +12,10 @@ import (
 	LC "github.com/metacubex/mihomo/listener/config"
 	"github.com/metacubex/mihomo/listener/http"
 	"github.com/metacubex/mihomo/listener/mixed"
-	"github.com/metacubex/mihomo/listener/redir"
 	embedSS "github.com/metacubex/mihomo/listener/shadowsocks"
 	"github.com/metacubex/mihomo/listener/sing_shadowsocks"
 	"github.com/metacubex/mihomo/listener/sing_vmess"
 	"github.com/metacubex/mihomo/listener/socks"
-	"github.com/metacubex/mihomo/listener/tproxy"
 	"github.com/metacubex/mihomo/listener/tuic"
 	LT "github.com/metacubex/mihomo/listener/tunnel"
 	"github.com/metacubex/mihomo/log"
@@ -32,8 +30,8 @@ var (
 	socksListener       *socks.Listener
 	socksUDPListener    *socks.UDPListener
 	httpListener        *http.Listener
-	redirListener       *redir.Listener
-	redirUDPListener    *tproxy.UDPListener
+	redirListener       C.Listener
+	redirUDPListener    C.Listener
 	tproxyListener      C.Listener
 	tproxyUDPListener   C.Listener
 	mixedListener       *mixed.Listener
@@ -49,7 +47,6 @@ var (
 	// lock for recreate function
 	socksMux   sync.Mutex
 	httpMux    sync.Mutex
-	redirMux   sync.Mutex
 	mixedMux   sync.Mutex
 	tunnelMux  sync.Mutex
 	inboundMux sync.Mutex
@@ -204,52 +201,6 @@ func ReCreateSocks(port int, tunnel C.Tunnel) {
 	socksUDPListener = udpListener
 
 	log.Infoln("SOCKS proxy listening at: %s", socksListener.Address())
-}
-
-func ReCreateRedir(port int, tunnel C.Tunnel) {
-	redirMux.Lock()
-	defer redirMux.Unlock()
-
-	var err error
-	defer func() {
-		if err != nil {
-			log.Errorln("Start Redir server error: %s", err.Error())
-		}
-	}()
-
-	addr := genAddr(bindAddress, port, allowLan)
-
-	if redirListener != nil {
-		if redirListener.RawAddress() == addr {
-			return
-		}
-		redirListener.Close()
-		redirListener = nil
-	}
-
-	if redirUDPListener != nil {
-		if redirUDPListener.RawAddress() == addr {
-			return
-		}
-		redirUDPListener.Close()
-		redirUDPListener = nil
-	}
-
-	if portIsZero(addr) {
-		return
-	}
-
-	redirListener, err = redir.New(addr, tunnel)
-	if err != nil {
-		return
-	}
-
-	redirUDPListener, err = tproxy.NewUDP(addr, tunnel)
-	if err != nil {
-		log.Warnln("Failed to start Redir UDP Listener: %s", err)
-	}
-
-	log.Infoln("Redirect proxy listening at: %s", redirListener.Address())
 }
 
 func ReCreateShadowSocks(shadowSocksConfig string, tunnel C.Tunnel) {
@@ -593,13 +544,8 @@ func GetPorts() *Ports {
 		ports.SocksPort = port
 	}
 
-	if redirListener != nil {
-		_, portStr, _ := net.SplitHostPort(redirListener.Address())
-		port, _ := strconv.Atoi(portStr)
-		ports.RedirPort = port
-	}
-
 	transparentListenersMu.Lock()
+	ports.RedirPort = int(listenerPort(redirListener))
 	ports.TProxyPort = int(tproxyPortLocked())
 	transparentListenersMu.Unlock()
 

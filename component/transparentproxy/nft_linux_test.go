@@ -22,6 +22,7 @@ func nftTestState() firewallState {
 		Enabled: true, TCP: ModeTProxy, UDP: ModeTUN, IPv6: true,
 		TProxyMark: 1, TunMark: 0x162, TProxyPort: 7895, TunName: "utun",
 		TProxyTCP4: true, TProxyTCP6: true, TProxyUDP4: true, TProxyUDP6: true, Tun4: true, Tun6: true,
+		RedirPort: 7892, Redir4: true, Redir6: true,
 		Local4: []string{"eth0"}, Local6: []string{"eth0"}, Gateway: []string{"eth0"},
 		BypassUIDs: []uint32{1001}, BypassMarks: []uint32{0x9001}, BypassUDPPorts: []uint16{123},
 		FakeIP: []netip.Prefix{netip.MustParsePrefix("198.18.0.0/16"), netip.MustParsePrefix("fdfe:dcba:9876::/64")},
@@ -38,6 +39,8 @@ type nftTestPacket struct {
 	fibType                             uint32
 	reply, transparent, missingListener bool
 	tproxied                            bool
+	ctMark, ctStatus                    uint32
+	redirected                          bool
 }
 
 // This small packet evaluator executes the generated expression objects. It
@@ -138,13 +141,40 @@ func evaluateNFT(t *testing.T, program *nftRuleset, hook string, packet nftTestP
 					}
 					registers[value.Register] = binaryutil.NativeEndian.PutUint32(packet.fibType)
 				case *expr.Ct:
-					if value.Key != expr.CtKeyDIRECTION {
+					switch value.Key {
+					case expr.CtKeyDIRECTION:
+						registers[value.Register] = []byte{0}
+						if packet.reply {
+							registers[value.Register][0] = 1
+						}
+					case expr.CtKeyMARK:
+						if value.SourceRegister {
+							packet.ctMark = binaryutil.NativeEndian.Uint32(registers[value.Register])
+						} else {
+							registers[value.Register] = binaryutil.NativeEndian.PutUint32(packet.ctMark)
+						}
+					case expr.CtKeySTATUS:
+						registers[value.Register] = binaryutil.NativeEndian.PutUint32(packet.ctStatus)
+					default:
 						t.Fatal("unexpected conntrack read")
 					}
-					registers[value.Register] = []byte{0}
-					if packet.reply {
-						registers[value.Register][0] = 1
+				case *expr.Bitwise:
+					input := registers[value.SourceRegister]
+					output := make([]byte, value.Len)
+					for i := range output {
+						output[i] = input[i]&value.Mask[i] ^ value.Xor[i]
 					}
+					registers[value.DestRegister] = output
+				case *expr.Redir:
+					packet.port = binaryutil.BigEndian.Uint16(registers[value.RegisterProtoMin])
+					if packet.address.Is4() {
+						packet.address = netip.MustParseAddr("127.0.0.1")
+					} else {
+						packet.address = netip.IPv6Loopback()
+					}
+					packet.ctStatus |= 1 << 5
+					packet.fibType, packet.redirected = unix.RTN_LOCAL, true
+					return expr.VerdictAccept
 				case *expr.Socket:
 					if !packet.transparent {
 						continue rules

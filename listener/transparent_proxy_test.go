@@ -55,6 +55,8 @@ func isolateTransparentListeners(t *testing.T) {
 	t.Helper()
 	oldTun, oldConf := tunLister, LastTunConf
 	oldTCP, oldUDP, oldPort := tproxyListener, tproxyUDPListener, lastTProxyPort
+	oldRedir, oldRedirUDP, oldRedirPort := redirListener, redirUDPListener, lastRedirPort
+	oldNewRedir, oldNewRedirUDP, oldBeforeRedir := newRedirListener, newRedirUDPListener, beforeRedirClose
 	oldNewTun, oldNewTCP, oldNewUDP := newTunListener, newTProxyListener, newTProxyUDPListener
 	oldBefore, oldNotify := beforeTunClose, notifyBackends
 	oldLookup, oldAddresses := tunInterfaceByName, tunInterfaceAddresses
@@ -63,6 +65,8 @@ func isolateTransparentListeners(t *testing.T) {
 	t.Cleanup(func() {
 		tunLister, LastTunConf = oldTun, oldConf
 		tproxyListener, tproxyUDPListener, lastTProxyPort = oldTCP, oldUDP, oldPort
+		redirListener, redirUDPListener, lastRedirPort = oldRedir, oldRedirUDP, oldRedirPort
+		newRedirListener, newRedirUDPListener, beforeRedirClose = oldNewRedir, oldNewRedirUDP, oldBeforeRedir
 		newTunListener, newTProxyListener, newTProxyUDPListener = oldNewTun, oldNewTCP, oldNewUDP
 		beforeTunClose, notifyBackends = oldBefore, oldNotify
 		tunInterfaceByName, tunInterfaceAddresses = oldLookup, oldAddresses
@@ -71,8 +75,10 @@ func isolateTransparentListeners(t *testing.T) {
 	})
 	tunLister, LastTunConf = nil, LC.Tun{}
 	tproxyListener, tproxyUDPListener, lastTProxyPort = nil, nil, 0
+	redirListener, redirUDPListener, lastRedirPort = nil, nil, 0
 	allowLan, bindAddress = false, "*"
 	beforeTunClose = func() error { return nil }
+	beforeRedirClose = func() error { return nil }
 	notifyBackends = func(transparentproxy.BackendState) error { return nil }
 	transparentConfig = transparentproxy.DefaultConfig
 	transparentIPv6Available = func() bool { return false }
@@ -86,6 +92,10 @@ func isolateTransparentListeners(t *testing.T) {
 	newTunListener = func(LC.Tun, C.Tunnel) (tunListener, error) { t.Fatal("unexpected TUN creation"); return nil, nil }
 	newTProxyListener = func(string, C.Tunnel) (C.Listener, error) { t.Fatal("unexpected TCP creation"); return nil, nil }
 	newTProxyUDPListener = func(string, C.Tunnel) (C.Listener, error) { t.Fatal("unexpected UDP creation"); return nil, nil }
+	newRedirListener = func(string, C.Tunnel) (C.Listener, error) { t.Fatal("unexpected REDIRECT creation"); return nil, nil }
+	newRedirUDPListener = func(string, C.Tunnel) (C.Listener, error) {
+		return nil, errors.New("unmanaged UDP sidecar disabled in test")
+	}
 }
 
 func TestTunReloadRetainsStableRequestAndReusesDevice(t *testing.T) {

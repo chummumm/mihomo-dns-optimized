@@ -15,9 +15,13 @@ const (
 	ModeOff    Mode = "off"
 	ModeTProxy Mode = "tproxy"
 	ModeTUN    Mode = "tun"
+	ModeRedir  Mode = "redir"
 	// DefaultOutboundMark is separate from both capture marks. An explicit
 	// routing-mark always retains its entire value; bits are never ORed into it.
 	DefaultOutboundMark uint32 = 0x4d484d4f
+	// RedirMark identifies our per-packet REDIRECT selection and conntrack
+	// sessions. It never selects a policy-routing table.
+	RedirMark uint32 = 0x4d485244
 )
 
 type Config struct {
@@ -42,10 +46,15 @@ type RouteConfig struct {
 }
 
 type LocalConfig struct {
-	Enable         bool     `yaml:"enable" json:"enable"`
-	Interfaces     []string `yaml:"interfaces" json:"interfaces"`
-	BypassUsers    []string `yaml:"bypass-users" json:"bypass-users"`
-	BypassUDPPorts []uint16 `yaml:"bypass-udp-ports" json:"bypass-udp-ports"`
+	Enable      bool        `yaml:"enable" json:"enable"`
+	Interfaces  []string    `yaml:"interfaces" json:"interfaces"`
+	BypassUsers []string    `yaml:"bypass-users" json:"bypass-users"`
+	BypassPorts BypassPorts `yaml:"bypass-ports" json:"bypass-ports"`
+}
+
+type BypassPorts struct {
+	TCP []uint16 `yaml:"tcp" json:"tcp"`
+	UDP []uint16 `yaml:"udp" json:"udp"`
 }
 
 type GatewayConfig struct {
@@ -66,7 +75,7 @@ func DefaultConfig() Config {
 			TProxy: RouteConfig{Mark: 1, Table: 100, Priority: 1000},
 			TUN:    RouteConfig{Mark: 0x162, Table: 101, Priority: 1010},
 		},
-		Local:   LocalConfig{Enable: true, Interfaces: []string{"auto"}, BypassUDPPorts: []uint16{123}},
+		Local:   LocalConfig{Enable: true, Interfaces: []string{"auto"}, BypassUsers: []string{"mihomo"}, BypassPorts: BypassPorts{TCP: []uint16{}, UDP: []uint16{123}}},
 		Gateway: GatewayConfig{Interfaces: []string{"*"}},
 		Bypass:  BypassConfig{ReservedAddresses: true, InterfacePrefixes: []string{"auto"}},
 	}
@@ -77,7 +86,8 @@ func (c Config) Uses(mode Mode) bool { return c.Enable && (c.TCP == mode || c.UD
 func (c Config) Clone() Config {
 	c.Local.Interfaces = slices.Clone(c.Local.Interfaces)
 	c.Local.BypassUsers = slices.Clone(c.Local.BypassUsers)
-	c.Local.BypassUDPPorts = slices.Clone(c.Local.BypassUDPPorts)
+	c.Local.BypassPorts.TCP = slices.Clone(c.Local.BypassPorts.TCP)
+	c.Local.BypassPorts.UDP = slices.Clone(c.Local.BypassPorts.UDP)
 	c.Gateway.Interfaces = slices.Clone(c.Gateway.Interfaces)
 	c.Bypass.InterfacePrefixes = slices.Clone(c.Bypass.InterfacePrefixes)
 	c.Bypass.ExtraAddresses = slices.Clone(c.Bypass.ExtraAddresses)
@@ -92,8 +102,11 @@ func (c Config) Validate() error {
 		name string
 		mode Mode
 	}{{"tcp", c.TCP}, {"udp", c.UDP}} {
-		if entry.mode != ModeOff && entry.mode != ModeTProxy && entry.mode != ModeTUN {
-			return fmt.Errorf("transparent-proxy.%s must be tproxy, tun or off", entry.name)
+		if entry.mode != ModeOff && entry.mode != ModeTProxy && entry.mode != ModeTUN && (entry.name != "tcp" || entry.mode != ModeRedir) {
+			if entry.name == "tcp" {
+				return fmt.Errorf("transparent-proxy.tcp must be tproxy, tun, redir or off")
+			}
+			return fmt.Errorf("transparent-proxy.udp must be tproxy, tun or off; redir only supports TCP")
 		}
 	}
 	for _, entry := range []struct {
@@ -104,8 +117,8 @@ func (c Config) Validate() error {
 			continue
 		}
 		p := entry.route
-		if p.Mark == 0 || p.Mark == DefaultOutboundMark {
-			return fmt.Errorf("transparent-proxy.routing.%s.mark must be nonzero and differ from internal outbound mark 0x%x", entry.mode, DefaultOutboundMark)
+		if p.Mark == 0 || p.Mark == DefaultOutboundMark || p.Mark == RedirMark {
+			return fmt.Errorf("transparent-proxy.routing.%s.mark must be nonzero and differ from internal marks 0x%x and 0x%x", entry.mode, DefaultOutboundMark, RedirMark)
 		}
 		if p.Table == 0 || p.Table == 253 || p.Table == 254 || p.Table == 255 {
 			return fmt.Errorf("transparent-proxy.routing.%s.table cannot use a reserved routing table", entry.mode)
@@ -144,9 +157,14 @@ func (c Config) Validate() error {
 			return fmt.Errorf("transparent-proxy.bypass.extra-addresses requires non-default IPv4 or IPv6 prefixes: %q", prefix)
 		}
 	}
-	for _, port := range c.Local.BypassUDPPorts {
-		if port == 0 {
-			return fmt.Errorf("transparent-proxy.local.bypass-udp-ports must be 1..65535")
+	for _, entry := range []struct {
+		name  string
+		ports []uint16
+	}{{"tcp", c.Local.BypassPorts.TCP}, {"udp", c.Local.BypassPorts.UDP}} {
+		for _, port := range entry.ports {
+			if port == 0 {
+				return fmt.Errorf("transparent-proxy.local.bypass-ports.%s must be 1..65535", entry.name)
+			}
 		}
 	}
 	for _, name := range c.Local.BypassUsers {
@@ -172,10 +190,10 @@ func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 
 func (m *Mode) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind != yaml.ScalarNode || node.Tag != "!!str" {
-		return fmt.Errorf("transparent-proxy backend must be tproxy, tun or quoted off")
+		return fmt.Errorf("transparent-proxy backend must be tproxy, tun, redir (TCP only) or quoted off")
 	}
 	*m = Mode(node.Value)
-	if *m != ModeOff && *m != ModeTProxy && *m != ModeTUN {
+	if *m != ModeOff && *m != ModeTProxy && *m != ModeTUN && *m != ModeRedir {
 		return fmt.Errorf("invalid transparent-proxy backend %q", node.Value)
 	}
 	return nil
@@ -213,26 +231,69 @@ func (r *RouteConfig) UnmarshalYAML(node *yaml.Node) error {
 }
 
 func (l *LocalConfig) UnmarshalYAML(node *yaml.Node) error {
-	if err := knownFields(node, "enable", "interfaces", "bypass-users", "bypass-udp-ports"); err != nil {
+	if err := knownFields(node, "enable", "interfaces", "bypass-users", "bypass-ports", "bypass-udp-ports"); err != nil {
 		return err
 	}
+	var legacy *yaml.Node
+	hasPorts := false
 	for i := 0; i < len(node.Content); i += 2 {
-		if node.Content[i].Value != "bypass-udp-ports" {
-			continue
+		switch node.Content[i].Value {
+		case "bypass-udp-ports":
+			legacy = node.Content[i+1]
+		case "bypass-ports":
+			hasPorts = true
 		}
-		for _, port := range node.Content[i+1].Content {
-			if port.Tag != "!!int" {
-				return fmt.Errorf("transparent-proxy bypass UDP ports require integers")
-			}
-		}
+	}
+	if legacy != nil && hasPorts {
+		return fmt.Errorf("transparent-proxy.local cannot combine deprecated bypass-udp-ports with bypass-ports; use bypass-ports.udp")
 	}
 	type plain LocalConfig
 	value := plain(*l)
 	if err := node.Decode(&value); err != nil {
 		return err
 	}
+	// v1.0.6 accepted the flat UDP-only option. Decode that alias here so it
+	// never appears in the runtime API or newly serialized configuration.
+	if legacy != nil {
+		if err := decodeBypassPorts(legacy, &value.BypassPorts.UDP); err != nil {
+			return err
+		}
+	}
 	*l = LocalConfig(value)
 	return nil
+}
+
+func (p *BypassPorts) UnmarshalYAML(node *yaml.Node) error {
+	if err := knownFields(node, "tcp", "udp"); err != nil {
+		return err
+	}
+	for i := 0; i < len(node.Content); i += 2 {
+		target := &p.TCP
+		if node.Content[i].Value == "udp" {
+			target = &p.UDP
+		}
+		if err := decodeBypassPorts(node.Content[i+1], target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func decodeBypassPorts(node *yaml.Node, ports *[]uint16) error {
+	// An empty YAML value has the same meaning as an explicit empty list.
+	if node.Tag == "!!null" {
+		*ports = []uint16{}
+		return nil
+	}
+	if node.Kind != yaml.SequenceNode {
+		return fmt.Errorf("transparent-proxy bypass ports require a list of integers")
+	}
+	for _, port := range node.Content {
+		if port.Tag != "!!int" {
+			return fmt.Errorf("transparent-proxy bypass ports require integers")
+		}
+	}
+	return node.Decode(ports)
 }
 
 func (g *GatewayConfig) UnmarshalYAML(node *yaml.Node) error {
@@ -265,7 +326,13 @@ func knownFields(node *yaml.Node, names ...string) error {
 	if node.Kind != yaml.MappingNode {
 		return fmt.Errorf("transparent-proxy configuration must be a mapping")
 	}
+	seen := make(map[string]bool, len(node.Content)/2)
 	for i := 0; i < len(node.Content); i += 2 {
+		name := node.Content[i].Value
+		if seen[name] {
+			return fmt.Errorf("duplicate transparent-proxy configuration field %q", name)
+		}
+		seen[name] = true
 		if !slices.Contains(names, node.Content[i].Value) {
 			return fmt.Errorf("unknown transparent-proxy configuration field %q", node.Content[i].Value)
 		}

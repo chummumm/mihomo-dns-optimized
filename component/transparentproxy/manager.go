@@ -185,6 +185,7 @@ func (m *manager) rollbackInitialApplyLocked(cfg Config, runtime Runtime, uids [
 		m.runtime.TunIPv6Ready = false
 		m.runtime.TProxyTCP, m.runtime.TProxyUDP = false, false
 		m.runtime.TProxyTCPIPv6, m.runtime.TProxyUDPIPv6 = false, false
+		m.runtime.RedirTCP, m.runtime.RedirTCPIPv6 = false, false
 		managed.config = m.config.Clone()
 		m.startLocked()
 		m.requestSync()
@@ -205,6 +206,11 @@ func (m *manager) subscribe() error {
 		return fmt.Errorf("subscribe to network changes: %w", err)
 	}
 	m.events, m.watch = events, watch
+	if m.started {
+		// A synchronous lifecycle apply can replace the subscription while
+		// the worker is waiting on its old channel or a recovery timer.
+		m.requestSync()
+	}
 	return nil
 }
 
@@ -276,6 +282,37 @@ func (m *manager) setBackendsLocked(state BackendState) {
 	m.runtime.TProxyPort = state.TProxyPort
 	m.runtime.TProxyTCP, m.runtime.TProxyUDP = state.TProxyTCP, state.TProxyUDP
 	m.runtime.TProxyTCPIPv6, m.runtime.TProxyUDPIPv6 = state.TProxyTCPIPv6, state.TProxyUDPIPv6
+	m.runtime.RedirPort = state.RedirPort
+	m.runtime.RedirTCP, m.runtime.RedirTCPIPv6 = state.RedirTCP, state.RedirTCPIPv6
+}
+
+// BeforeRedirClose blocks every selected packet before replacing a REDIRECT
+// listener. NAT chains alone cannot provide this fence: established sessions
+// retain their conntrack translation and skip those chains entirely.
+func BeforeRedirClose() error {
+	managed.Lock()
+	defer managed.Unlock()
+	m := managed.current
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closing {
+		return errors.New("finish transparent-proxy stop cleanup before closing REDIRECT listener")
+	}
+	if m.hasFirewall {
+		state := m.lastFirewall
+		state.Redir4, state.Redir6 = false, false
+		ctx, cancel := context.WithTimeout(m.ctx, operationTimeout)
+		defer cancel()
+		if err := m.wall.Apply(ctx, state); err != nil {
+			return fmt.Errorf("preserve REDIRECT listener: block capture before close: %w", err)
+		}
+		m.lastFirewall = state
+	}
+	m.runtime.RedirTCP, m.runtime.RedirTCPIPv6 = false, false
+	return nil
 }
 
 // BeforeTunClose is a synchronous fence, not an asynchronous request. Returning
@@ -363,7 +400,7 @@ func OutboundMark(mark uint32) (uint32, error) {
 }
 
 func validateOutboundMark(cfg Config, mark uint32) error {
-	if cfg.Uses(ModeTProxy) && mark == cfg.Routing.TProxy.Mark || cfg.Uses(ModeTUN) && mark == cfg.Routing.TUN.Mark {
+	if mark == RedirMark || cfg.Uses(ModeTProxy) && mark == cfg.Routing.TProxy.Mark || cfg.Uses(ModeTUN) && mark == cfg.Routing.TUN.Mark {
 		return fmt.Errorf("outbound routing-mark %#x is also a transparent capture mark", mark)
 	}
 	return nil
@@ -591,6 +628,15 @@ func (m *manager) applyConfigurationLocked(cfg Config, runtime Runtime, uids, ma
 	if m.closing || m.closed {
 		return errors.New("transparent-proxy is stopping")
 	}
+	if m.uncertain {
+		if m.watch != nil {
+			_ = m.watch.Close()
+			m.watch = nil
+		}
+		if err := m.subscribe(); err != nil {
+			return err
+		}
+	}
 	ctx, cancel := context.WithTimeout(m.ctx, operationTimeout)
 	defer cancel()
 	for _, mark := range marks {
@@ -661,6 +707,7 @@ func (m *manager) applyConfigurationLocked(cfg Config, runtime Runtime, uids, ma
 }
 
 func blockedFirewall(state firewallState) firewallState {
+	state.Redir4, state.Redir6 = false, false
 	state.Tun4, state.Tun6 = false, false
 	state.TProxyTCP4, state.TProxyTCP6 = false, false
 	state.TProxyUDP4, state.TProxyUDP6 = false, false
@@ -670,15 +717,6 @@ func blockedFirewall(state firewallState) firewallState {
 func (m *manager) reconcileLocked() error {
 	if m.closed || m.closing {
 		return nil
-	}
-	if m.uncertain {
-		if m.watch != nil {
-			_ = m.watch.Close()
-			m.watch = nil
-		}
-		if err := m.subscribe(); err != nil {
-			return err
-		}
 	}
 	return m.applyConfigurationLocked(m.config, m.runtime, m.uids, m.marks)
 }
@@ -694,101 +732,26 @@ func (m *manager) requestSync() {
 // subscription followed by complete snapshots is required to resume capture.
 func (m *manager) loseObservationLocked(cause error) {
 	m.uncertain = true
+	err := m.fenceCaptureLocked()
+	log.Warnln("[Transparent Proxy] Network observation interrupted; capture is protected while resubscribing: %v", errors.Join(cause, err))
+}
+
+// fenceCaptureLocked repairs protection without resuming capture or restarting
+// recovery. Both adapters compare live state before writing, so notifications
+// from the fence itself converge without further writes.
+func (m *manager) fenceCaptureLocked() error {
 	ctx, cancel := context.WithTimeout(m.ctx, operationTimeout)
 	defer cancel()
 	err := m.system.QuiesceTUN(ctx)
 	if m.hasFirewall {
-		state := m.lastFirewall
-		state.Tun4, state.Tun6 = false, false
-		state.TProxyTCP4, state.TProxyTCP6 = false, false
-		state.TProxyUDP4, state.TProxyUDP6 = false, false
+		state := blockedFirewall(m.lastFirewall)
 		if applyErr := m.wall.Apply(ctx, state); applyErr != nil {
 			err = errors.Join(err, applyErr)
 		} else {
 			m.lastFirewall = state
 		}
 	}
-	log.Warnln("[Transparent Proxy] Network observation interrupted; capture is protected while resubscribing: %v", errors.Join(cause, err))
-}
-
-// Healthy operation has no ticker. Timers exist only to coalesce notifications
-// or recover a failed observation/application; a successful sync disarms them.
-func (m *manager) run() {
-	defer close(m.done)
-	var retry <-chan time.Time
-	var timer *time.Timer
-	backoff := 100 * time.Millisecond
-	defer func() {
-		if timer != nil {
-			timer.Stop()
-		}
-	}()
-	for {
-		m.mu.Lock()
-		events := m.events
-		closed := m.closed || m.closing
-		m.mu.Unlock()
-		if closed {
-			return
-		}
-		var observationError error
-		if retry != nil {
-			// Self-generated notifications and a closed subscription must not
-			// turn failure recovery into a busy loop. Public lifecycle calls
-			// still run synchronously while this worker backs off.
-			select {
-			case <-m.ctx.Done():
-				return
-			case <-retry:
-			}
-		} else {
-			select {
-			case <-m.ctx.Done():
-				return
-			case event, ok := <-events:
-				if !ok {
-					observationError = errors.New("network notification subscription closed")
-				} else {
-					observationError = event.Err
-				}
-			case <-m.kick:
-			}
-		}
-		m.mu.Lock()
-		if m.closed || m.closing {
-			m.mu.Unlock()
-			return
-		}
-		if observationError != nil {
-			m.loseObservationLocked(observationError)
-		}
-		err := m.reconcileLocked()
-		if err != nil {
-			// A failed complete read or transaction never licenses destructive
-			// cleanup. Force a fresh observation before a later successful apply.
-			m.loseObservationLocked(err)
-		}
-		needRetry := m.retryNeeded
-		m.mu.Unlock()
-		if timer != nil {
-			timer.Stop()
-		}
-		retry = nil
-		if err != nil || needRetry {
-			if timer == nil {
-				timer = time.NewTimer(backoff)
-			} else {
-				timer.Reset(backoff)
-			}
-			retry = timer.C
-			backoff *= 2
-			if backoff > 5*time.Second {
-				backoff = 5 * time.Second
-			}
-		} else {
-			backoff = 100 * time.Millisecond
-		}
-	}
+	return err
 }
 
 func cloneRuntime(runtime Runtime) Runtime {
