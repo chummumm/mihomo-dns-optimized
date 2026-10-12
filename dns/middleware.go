@@ -243,11 +243,58 @@ func compose(middlewares []middleware, endpoint handler) handler {
 	return h
 }
 
+func withForcedSOA(policy AnswerPolicy, forceAAAA bool) middleware {
+	return func(next handler) handler {
+		return func(ctx *icontext.DNSContext, query *D.Msg) (*D.Msg, error) {
+			if forcedSOAQuestion(ctx, query) {
+				qtype := query.Question[0].Qtype
+				forced := policy.ForceQtypeSOA.Contains(qtype)
+				if forceAAAA {
+					forced = policy.ForceAAAASOA && qtype == D.TypeAAAA
+				}
+				if forced {
+					ctx.SetType(icontext.DNSTypeRaw)
+					return policy.forcedSOAReply(ctx, query), nil
+				}
+			}
+			return next(ctx, query)
+		}
+	}
+}
+
+func withFinalAnswerPolicy(policy AnswerPolicy) middleware {
+	return func(next handler) handler {
+		return func(ctx *icontext.DNSContext, query *D.Msg) (*D.Msg, error) {
+			answer, err := next(ctx, query)
+			if err == nil && !icontext.DNSBootstrap(ctx) {
+				answer = policy.applyFinalReply(query, answer)
+			}
+			return answer, err
+		}
+	}
+}
+
 func newHandler(resolver resolver.Resolver, mapper *ResolverEnhancer) handler {
 	var middlewares []middleware
+	native, _ := resolver.(*Resolver)
+	if native != nil && !native.bootstrap {
+		if native.answerPolicy.RRTTLReplyMax != 0 || native.answerPolicy.ForceNoCNAME {
+			middlewares = append(middlewares, withFinalAnswerPolicy(native.answerPolicy))
+		}
+		if native.answerPolicy.ForceAAAASOA {
+			middlewares = append(middlewares, withForcedSOA(native.answerPolicy, true))
+		}
+	}
 
 	if mapper.useHosts {
 		middlewares = append(middlewares, withHosts(mapper))
+	}
+
+	// Real hosts keep their explicit answer, as in SmartDNS. A configured query
+	// type block precedes synthetic FakeIP allocation so it cannot be bypassed
+	// by fake-ip mode. Local policies do not select an upstream or a rule group.
+	if native != nil && !native.bootstrap && native.answerPolicy.ForceQtypeSOA != nil {
+		middlewares = append(middlewares, withForcedSOA(native.answerPolicy, false))
 	}
 
 	if mapper.mode == C.DNSFakeIP {

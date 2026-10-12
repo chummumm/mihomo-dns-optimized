@@ -31,16 +31,17 @@ func (f NetDialerFunc) DialContext(ctx context.Context, network, address string)
 }
 
 type option struct {
-	interfaceName string
-	fallbackBind  bool
-	addrReuse     bool
-	routingMark   int
-	network       int
-	prefer        int
-	tfo           bool
-	mpTcp         bool
-	resolver      resolver.Resolver
-	netDialer     NetDialer
+	interfaceName       string
+	fallbackBind        bool
+	addrReuse           bool
+	routingMark         int
+	network             int
+	prefer              int
+	tfo                 bool
+	mpTcp               bool
+	resolver            resolver.Resolver
+	netDialer           NetDialer
+	preferResolverOrder bool
 }
 
 type Option func(opt *option)
@@ -72,6 +73,14 @@ func WithRoutingMark(mark int) Option {
 func WithResolver(r resolver.Resolver) Option {
 	return func(opt *option) {
 		opt.resolver = r
+	}
+}
+
+// WithPreferResolverOrder lets a DIRECT connection retain DNS optimization's
+// address order. A resolver without an active preference keeps normal dialing.
+func WithPreferResolverOrder(prefer bool) Option {
+	return func(opt *option) {
+		opt.preferResolverOrder = prefer
 	}
 }
 

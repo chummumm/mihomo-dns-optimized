@@ -55,6 +55,22 @@ func DialContext(ctx context.Context, network, address string, options ...Option
 		return nil, err
 	}
 
+	if opt.preferResolverOrder && resolver.PreferIPOrder(opt.resolver) {
+		// Each family's best address gets the first attempt. A slow or failed
+		// connection still falls back, without immediately racing every IP
+		// that the DNS optimizer has already compared.
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		switch network {
+		case "tcp4", "tcp6", "udp4", "udp6":
+			return orderedDialContext(ctx, network, ips, port, opt)
+		case "tcp", "udp":
+			return dualStackDialContext(ctx, orderedDialContext, network, ips, port, opt)
+		default:
+			return nil, ErrorInvalidedNetworkStack
+		}
+	}
+
 	tcpConcurrent := GetTcpConcurrent()
 
 	switch network {
@@ -409,6 +425,19 @@ func parseAddr(ctx context.Context, network, address string, preferResolver reso
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, "-1", err
+	}
+	if ip, parseErr := netip.ParseAddr(host); parseErr == nil {
+		ip = ip.Unmap()
+		if ((network == "tcp4" || network == "udp4") && !ip.Is4()) ||
+			((network == "tcp6" || network == "udp6") && !ip.Is6()) {
+			return nil, "-1", fmt.Errorf("dns resolve failed: %w", resolver.ErrIPVersion)
+		}
+		if ip.Is6() && resolver.DisableIPv6 {
+			return nil, "-1", fmt.Errorf("dns resolve failed: %w", resolver.ErrIPv6Disabled)
+		}
+		// A numeric destination is already resolved. Neither a DNS resolver
+		// nor a hosts entry may replace the IP chosen by the caller.
+		return []netip.Addr{ip}, port, nil
 	}
 
 	if preferResolver == nil {

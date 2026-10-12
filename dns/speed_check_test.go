@@ -163,7 +163,7 @@ func TestSpeedCheckAAAAAndDuplicateCandidates(t *testing.T) {
 	got, _, err := s.Exchange(context.Background(), []dnsClient{
 		speedCheckTestClient{message: response}, speedCheckTestClient{message: response},
 	}, query)
-	if err != nil || len(got.Answer) != 1 || got.Answer[0].(*D.AAAA).AAAA.String() != "2001:db8::2" || calls.Load() != 2 {
+	if err != nil || len(got.Answer) != 2 || got.Answer[0].(*D.AAAA).AAAA.String() != "2001:db8::2" || got.Answer[1].(*D.AAAA).AAAA.String() != "2001:db8::1" || calls.Load() != 2 {
 		t.Fatalf("AAAA/deduplication: answer=%v calls=%d error=%v", got, calls.Load(), err)
 	}
 }

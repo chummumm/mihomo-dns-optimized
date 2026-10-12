@@ -186,6 +186,11 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 	// A cache refresh or shared lookup can outlive the caller. Keep its query
 	// immutable even when the caller reuses or changes the original message.
 	m = m.Copy()
+	defer func() {
+		if err == nil {
+			msg = r.answerPolicy.applyReply(m, msg)
+		}
+	}()
 	if r.cacheControl != nil {
 		ctx = r.cacheControl.Context(ctx)
 		if !r.cacheControl.active(ctx) {
@@ -198,6 +203,9 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 	}
 	if r.cacheControl != nil && !r.cacheControl.active(ctx) {
 		return nil, context.Canceled
+	}
+	if forcedSOAQuestion(ctx, m) && r.answerPolicy.forcesQtype(m.Question[0].Qtype) {
+		return r.answerPolicy.forcedSOAReply(ctx, m), nil
 	}
 	continueFetch := false
 	key := r.cacheKey(ctx, m)
@@ -515,6 +523,16 @@ func (r *Resolver) lookupIP(ctx context.Context, host string, dnsType uint16) (i
 	}
 
 	ips = msgToIP(msg)
+	if r.PreferIPOrder() {
+		// Unrelated Answer records are retained on the wire, but must not
+		// precede the optimizer's terminal A/AAAA RRset when DIRECT dials.
+		if _, valid := speedCheckResponseChain(msg, query.Question[0]); valid {
+			ips = nil
+			for _, candidate := range speedCheckCandidates(msg, query.Question[0]) {
+				ips = append(ips, candidate.ip)
+			}
+		}
+	}
 	ipLength := len(ips)
 	if ipLength == 0 {
 		return []netip.Addr{}, resolver.ErrIPNotFound

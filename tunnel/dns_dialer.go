@@ -155,6 +155,9 @@ func (d *DNSDialer) DialContext(ctx context.Context, network, addr string) (net.
 		if !proxyAdapter.SupportUDP() {
 			return nil, fmt.Errorf("proxy adapter [%s] UDP is not supported", proxyAdapter.Name())
 		}
+		if proxyAdapter.IsL3Protocol(metadata) {
+			metadata.Host = "" // preserve the already resolved DNS server IP
+		}
 
 		packetConn, err := proxyAdapter.ListenPacketContext(ctx, metadata)
 		if err != nil {
@@ -221,6 +224,9 @@ func (d *DNSDialer) ListenPacket(ctx context.Context, network, addr string) (net
 
 	if !proxyAdapter.SupportUDP() {
 		return nil, fmt.Errorf("proxy adapter [%s] UDP is not supported", proxyAdapter.Name())
+	}
+	if proxyAdapter.IsL3Protocol(metadata) {
+		metadata.Host = "" // preserve the already resolved DNS server IP
 	}
 
 	packetConn, err := proxyAdapter.ListenPacketContext(ctx, metadata)

@@ -215,6 +215,10 @@ type Metadata struct {
 
 	RawSrcAddr net.Addr `json:"-"`
 	RawDstAddr net.Addr `json:"-"`
+	// InboundDstIP retains a client's real IP across hosts mapping and
+	// destination sniffing. DIRECT uses it without resolving another address.
+	// FakeIP and internal DNS destinations do not inherit this value.
+	InboundDstIP netip.Addr `json:"-"`
 	// Only domain rule
 	SniffHost string `json:"sniffHost"`
 }

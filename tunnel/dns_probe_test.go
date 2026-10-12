@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"reflect"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -51,7 +52,8 @@ func dnsProbeTestPlan(t *testing.T, family C.DNSPrefer) (*tunnel.DNSRoutingPlan,
 		Type: C.INNER, NetWork: C.UDP, InName: "DNS",
 		Host: "must-not-resolve.invalid", SniffHost: "must-not-sniff.invalid",
 		DstIP: netip.MustParseAddr("192.0.2.53"), DstPort: 53,
-		Process: "dns-client", ProcessPath: "/test/dns-client", Uid: 1000,
+		InboundDstIP: netip.MustParseAddr("203.0.113.99"),
+		Process:      "dns-client", ProcessPath: "/test/dns-client", Uid: 1000,
 	}
 	// Live rules and groups return adapter.Proxy wrappers around the actual
 	// leaf. The probe must retain access to the leaf's optional dial methods.
@@ -59,6 +61,9 @@ func dnsProbeTestPlan(t *testing.T, family C.DNSPrefer) (*tunnel.DNSRoutingPlan,
 	plan, err := tunnel.PrepareDNSRouting(ctx, "probe-target.invalid", origin)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if plan.OriginMetadata().InboundDstIP.IsValid() {
+		t.Fatal("DNS routing inherited the client's fixed business destination")
 	}
 	return plan, leaf
 }
@@ -181,5 +186,58 @@ func TestDNSDirectProbePreservesAddressFamilyConstraints(t *testing.T) {
 				t.Fatal("ICMP probe lost the DIRECT address-family constraint")
 			}
 		})
+	}
+}
+
+type dnsDirectBootstrapResolver struct {
+	R.Resolver
+	calls int
+}
+
+func (r *dnsDirectBootstrapResolver) Invalid() bool { return true }
+func (r *dnsDirectBootstrapResolver) LookupIP(context.Context, string) ([]netip.Addr, error) {
+	r.calls++
+	return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+}
+func (r *dnsDirectBootstrapResolver) LookupIPv4(ctx context.Context, host string) ([]netip.Addr, error) {
+	return r.LookupIP(ctx, host)
+}
+
+func TestDNSDirectProbeLegacyUDPDialerKeepsBootstrapIP(t *testing.T) {
+	forbidden := &dnsProbeForbiddenResolver{}
+	old := R.DirectHostResolver
+	R.DirectHostResolver = forbidden
+	t.Cleanup(func() { R.DirectHostResolver = old })
+	listener, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	bootstrap := &dnsDirectBootstrapResolver{}
+	d := tunnel.NewDNSDialer(bootstrap, outbound.NewDirect(), "")
+	address := net.JoinHostPort("bootstrap.example", strconv.Itoa(listener.LocalAddr().(*net.UDPAddr).Port))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	conn, err := d.DialContext(ctx, "udp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("upstream")); err != nil {
+		t.Fatal(err)
+	}
+	_ = listener.SetReadDeadline(time.Now().Add(time.Second))
+	buffer := make([]byte, 32)
+	n, _, err := listener.ReadFromUDP(buffer)
+	if err != nil || string(buffer[:n]) != "upstream" {
+		t.Fatalf("wrong bootstrap destination: %q %v", buffer[:n], err)
+	}
+	packet, err := d.ListenPacket(ctx, "udp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = packet.Close()
+	if bootstrap.calls != 2 || forbidden.calls.Load() != 0 {
+		t.Fatalf("DNS upstream was re-resolved as a business domain: bootstrap=%d direct=%d", bootstrap.calls, forbidden.calls.Load())
 	}
 }

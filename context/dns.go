@@ -2,6 +2,7 @@ package context
 
 import (
 	"context"
+	"net/netip"
 
 	"github.com/metacubex/mihomo/common/utils"
 	C "github.com/metacubex/mihomo/constant"
@@ -33,7 +34,11 @@ func WithDNSRoutingMetadata(ctx context.Context, metadata *C.Metadata) context.C
 	if metadata == nil {
 		return ctx
 	}
-	return context.WithValue(ctx, dnsRoutingMetadataKey{}, metadata.Clone())
+	origin := metadata.Clone()
+	// Nested DNS connections have their own destination. The client's fixed
+	// business IP must never replace an upstream resolver or probe address.
+	origin.InboundDstIP = netip.Addr{}
+	return context.WithValue(ctx, dnsRoutingMetadataKey{}, origin)
 }
 
 func DNSRoutingMetadata(ctx context.Context) *C.Metadata {

@@ -3,6 +3,9 @@ package outbound
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/netip"
+	"strconv"
 
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/loopback"
@@ -30,13 +33,21 @@ func (d *Direct) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn,
 // allowing a caller such as an IP latency probe to require an eager connection.
 func (d *Direct) DialContextWithOptions(ctx context.Context, metadata *C.Metadata, extra ...dialer.Option) (C.Conn, error) {
 	ctx = icontext.WithDNSFixedOutbound(ctx, d)
-	if err := d.loopBack.CheckConn(metadata); err != nil {
+	address := metadata.RemoteAddress()
+	checkMetadata := metadata
+	if ip := directDestinationIP(ctx, metadata); ip.IsValid() {
+		address = net.JoinHostPort(ip.String(), strconv.Itoa(int(metadata.DstPort)))
+		checkMetadata = metadata.Clone()
+		checkMetadata.DstIP = ip
+	}
+	if err := d.loopBack.CheckConn(checkMetadata); err != nil {
 		return nil, err
 	}
 	opts := d.DialOptions()
-	opts = append(opts, dialer.WithResolver(resolver.DirectHostResolver))
+	opts = append(opts, dialer.WithResolver(resolver.DirectHostResolver),
+		dialer.WithPreferResolverOrder(!icontext.DNSBootstrap(ctx)))
 	opts = append(opts, extra...)
-	c, err := dialer.DialContext(ctx, "tcp", metadata.RemoteAddress(), opts...)
+	c, err := dialer.DialContext(ctx, "tcp", address, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -60,14 +71,63 @@ func (d *Direct) ListenPacketContext(ctx context.Context, metadata *C.Metadata) 
 
 func (d *Direct) ResolveUDP(ctx context.Context, metadata *C.Metadata) error {
 	ctx = icontext.WithDNSFixedOutbound(ctx, d)
-	if (!metadata.Resolved() || resolver.DirectHostResolver != resolver.DefaultResolver) && metadata.Host != "" {
-		ip, err := resolveIPWithResolver(ctx, metadata.Host, d.prefer, resolver.DirectHostResolver)
+	if ip := directDestinationIP(ctx, metadata); ip.IsValid() {
+		metadata.DstIP = ip
+		return nil
+	}
+	if metadata.Host != "" {
+		ip, err := d.resolveIP(ctx, metadata.Host)
 		if err != nil {
 			return fmt.Errorf("can't resolve ip: %w", err)
 		}
 		metadata.DstIP = ip
 	}
 	return nil
+}
+
+func directDestinationIP(ctx context.Context, metadata *C.Metadata) netip.Addr {
+	if !icontext.DNSBootstrap(ctx) && metadata.InboundDstIP.IsValid() {
+		return metadata.InboundDstIP.Unmap()
+	}
+	// An IP filled in while matching GEOIP rules for a domain-only request is
+	// not the client's fixed destination. Resolve that domain through DIRECT's
+	// own resolver; literal/internal destinations already have no hostname.
+	if metadata.Host == "" && metadata.DstIP.IsValid() && !resolver.IsFakeIP(metadata.DstIP) {
+		return metadata.DstIP.Unmap()
+	}
+	return netip.Addr{}
+}
+
+func (d *Direct) resolveIP(ctx context.Context, host string) (netip.Addr, error) {
+	r := resolver.DirectHostResolver
+	if icontext.DNSBootstrap(ctx) || !resolver.PreferIPOrder(r) {
+		return resolveIPWithResolver(ctx, host, d.prefer, r)
+	}
+	var ips []netip.Addr
+	var err error
+	switch d.prefer {
+	case C.IPv4Only:
+		ips, err = resolver.LookupIPv4WithResolver(ctx, host, r)
+	case C.IPv6Only:
+		ips, err = resolver.LookupIPv6WithResolver(ctx, host, r)
+	default:
+		ips, err = resolver.LookupIPWithResolver(ctx, host, r)
+	}
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	if len(ips) == 0 {
+		return netip.Addr{}, fmt.Errorf("%w: %s", resolver.ErrIPNotFound, host)
+	}
+	// Honor the configured family preference, then take its highest-ranked IP.
+	// Unlike TCP, a UDP socket has no handshake with which to race candidates.
+	wantIPv6 := d.prefer == C.IPv6Prefer || d.prefer == C.IPv6Only
+	for _, ip := range ips {
+		if ip.Is6() == wantIPv6 {
+			return ip, nil
+		}
+	}
+	return ips[0], nil
 }
 
 func (d *Direct) IsL3Protocol(metadata *C.Metadata) bool {
