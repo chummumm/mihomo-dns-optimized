@@ -439,9 +439,9 @@ dns:
 
 ## 云编译、更新与验证
 
-[构建工作流](https://github.com/chummumm/mihomo-optimized/actions/workflows/build.yml)先执行规定 Go 测试、DNS race、同步保护与安装包检查，再构建完整 37 目标矩阵；Linux amd64 产物运行本地模拟服务的实际二进制端到端测试。其他目标为交叉编译，不等同于在各设备实际执行。所有必需归档和安装包齐全、摘要一致后才发布。
+[构建工作流](https://github.com/chummumm/mihomo-optimized/actions/workflows/build.yml)保留规定 Go 测试、race、同步保护、安装包、真实路由 / 防火墙、systemd 生命周期及 Windows / macOS 更新器检查；Linux amd64 产物运行本地模拟服务的实际二进制端到端测试。从 `1.0.8` 起，普通 PR 构建 7 个代表目标，涉及工具链、依赖、平台专属代码或构建配置的 PR 自动使用完整 37 目标；无法可靠判断变动范围也使用完整矩阵。`main`、tag、手动、上游同步以及显式指定 ref 的构建均保留完整 37 目标，所有必需归档和安装包齐全、摘要一致后才发布。其他目标为交叉编译，不等同于在各设备实际执行。
 
-`main` 的源码、依赖或构建配置变更通过验证后自动发布带源提交标识和 SHA-256 的下载包；PR 只生成 Actions artifact。纯文档更新跳过自动构建和发布，具体路径与显式发布入口见[发行文档](docs/releases.md)。当前 `main` 对应构建才能更新 Latest，旧构建重跑不会覆盖新版本入口。
+`main` 的源码、依赖或构建配置变更通过验证后自动发布带源提交标识和 SHA-256 的下载包；PR 只生成 Actions artifact。Release 直接校验并发布同一次运行的构建产物。纯文档更新跳过自动构建和发布，代表目标、自动全量条件与显式发布入口见[发行文档](docs/releases.md)。当前 `main` 对应构建才能更新 Latest，旧构建重跑不会覆盖新版本入口。
 
 [稳定版同步](https://github.com/chummumm/mihomo-optimized/actions/workflows/sync-upstream.yml)计划每日北京时间 04:23 检查上游正式 release，定时任务可能延迟。先合并、测试和编译，通过后普通推送；冲突、验证失败或远端分支并发变化时停止，不强推覆盖本项目修改。基线见 [UPSTREAM_VERSION](UPSTREAM_VERSION) / [UPSTREAM_COMMIT](UPSTREAM_COMMIT)。
 

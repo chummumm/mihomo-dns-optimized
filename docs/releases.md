@@ -2,6 +2,26 @@
 
 项目使用独立版本 **`mihomo-optimized-vX.Y.Z`**，首版为 `mihomo-optimized-v1.0.0`。`main` 的源码、依赖或构建配置变更在全部测试和完整编译成功后生成固定提交的 GitHub Release。Latest 仅在该构建仍对应当前 `main` 时更新；PR 只生成 Actions artifacts。纯文档变更不消耗版本号，也不触发自动发布。
 
+## 1.0.8：减少 PR 的重复全量构建
+
+从 `mihomo-optimized-v1.0.8` 起，普通 PR 使用 7 个代表目标，合并后的正式构建仍使用完整 37 目标矩阵。矩阵选择只减少 PR 的跨平台编译和打包任务：现有功能测试、race 检查、真实网络命名空间中的路由 / 防火墙与防泄漏测试、systemd 生命周期测试，以及 Windows / macOS 更新器测试全部保留。
+
+| 触发场景 | 构建矩阵 | 产物用途 |
+| --- | --- | --- |
+| 普通 PR | 7 个代表目标 | Actions artifacts，用于合并前验证 |
+| 涉及平台兼容或构建风险的 PR，或无法可靠取得差异 | 完整 37 个目标 | Actions artifacts，用于合并前验证 |
+| `main`、tag、手动、上游同步或显式指定 ref 的构建 | 完整 37 个目标 | 按发布条件使用本次运行的正式产物 |
+
+代表目标固定为 `linux-amd64`、`linux-arm64`、`linux-386`、`windows-amd64`、`darwin-arm64`、`freebsd-amd64`、`android-arm64-v8`，覆盖主要操作系统、Linux 64 / 32 位与 Android CGO 构建。选择器基于 PR 的真实 base 与 head 执行 `base...head` 差异比较，不用临时合并提交代替变更范围。以下变动自动扩大到完整矩阵：
+
+- Go 工具链 / 依赖文件（`go.mod`、`go.sum`、`go.work*`）、`UPSTREAM*`，以及 `packaging/`、`scripts/`、工作流或 `vendor/`。
+- 平台或架构专属代码，C / C++ / 汇编，以及涉及 Go build constraints、`runtime.GOOS` / `runtime.GOARCH` 的变动。
+- base / head 缺失、Git 差异读取失败或无法可靠判断的情况。
+
+少见架构问题仍可能在合并后的完整矩阵中才发现；正式发布必须等全部测试和全部 37 个目标通过。Release 任务继续下载**同一次 workflow 运行**的产物并校验完整 69 个附件，不重新编译，也不跨运行复用 PR 包；版本、源码提交和摘要的检查保持不变。
+
+一次普通 PR 加合并后的矩阵任务由 `37 + 37 = 74` 个降为 `7 + 37 = 44` 个，减少 30 个，约 41%。这是矩阵任务数量，不是总 CI 运行分钟或完成时间的保证；测试程序本身仍需要编译。高风险 PR 仍为 74 个任务，本次修改了工作流和发布脚本，因此本次 PR 也会完整构建。
+
 ## 1.0.6：Linux 透明代理与路由托管
 
 `mihomo-optimized-v1.0.6` 新增默认关闭的 `transparent-proxy` YAML 配置。TCP、UDP 可分别选择 `tproxy`、`tun` 或 `"off"`；两种后端的 mark、路由表与策略优先级均可配置。本机出站与网关转发分别声明范围。健康状态依靠 Linux 的接口、地址、路由、策略规则与 nftables 事件更新，没有周期核对配置项。
@@ -117,7 +137,14 @@ sudo systemctl enable --now mihomo
 
 构建脚本检查每个 native 包的架构、版本、配置保护、文件清单/权限、账号工具依赖及唯一预期安装钩子，以及其二进制与对应归档完全一致。钩子行为测试覆盖新账号、已有用户 / 主组复用、重复升级和失败传播；账号及 chown 命令被限定到测试夹具。回归还在隔离 dpkg 根目录执行旧包到新包的真实迁移，验证本地修改的配置保留与文件归属。Linux amd64 产物实际执行 `-v`、`-t` 和本地模拟上游的 DNS 端到端回归；不会安装或启动测试宿主机已有的 mihomo 服务。stop 回归以现有非 root 测试账号创建使用隔离网络命名空间的临时 systemd 单元，使用该账号持有的临时资源，并在结束时撤销。
 
-开发者可运行 `python3 scripts/release-build.py matrix` 查看 37 目标矩阵，或 `bash scripts/ci-check.sh build <target> <绝对输出目录> mihomo-optimized-v1.0.7 <ISO时间>` 构建单个目标；版本参数须与当前 `PROJECT_VERSION` 一致，`amd64` / `arm64` 是 Linux 别名。依赖 `dpkg-deb`、`rpm`/`rpmbuild`/`rpm2cpio`、`cpio`、`zstd`、`fakeroot`、Python 3.12 和 MetaCubeX Go；Android 还需矩阵指定的固定 NDK。
+开发者可用以下命令查看矩阵。省略 profile 时始终返回完整 37 目标；PR profile 根据指定提交的差异自动返回 7 或 37 目标，不能用于缩减正式发布的必需产物集合：
+
+```sh
+python3 scripts/release-build.py matrix
+python3 scripts/release-build.py matrix --profile pr --base <base-sha> --head <head-sha>
+```
+
+运行 `bash scripts/ci-check.sh build <target> <绝对输出目录> mihomo-optimized-v1.0.8 <ISO时间>` 可构建单个目标；版本参数须与当前 `PROJECT_VERSION` 一致，`amd64` / `arm64` 是 Linux 别名。依赖 `dpkg-deb`、`rpm`/`rpmbuild`/`rpm2cpio`、`cpio`、`zstd`、`fakeroot`、Python 3.12 和 MetaCubeX Go；Android 还需矩阵指定的固定 NDK。
 
 ## 内核自动更新
 
