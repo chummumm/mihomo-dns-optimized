@@ -3,18 +3,18 @@ package geodata
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
-	mihomoHttp "github.com/metacubex/mihomo/component/http"
+	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/component/mmdb"
+	"github.com/metacubex/mihomo/component/resource"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
 
-	"github.com/metacubex/http"
+	"github.com/oschwald/maxminddb-golang"
 )
 
 var (
@@ -69,25 +69,78 @@ func SetASNUrl(url string) {
 }
 
 func downloadToPath(url string, path string) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*90)
+	defer func() { recordInitializationError(err) }()
+	scope := currentInitializationContext()
+	ctx, cancel := context.WithTimeout(scope.ctx, time.Second*90)
 	defer cancel()
-	resp, err := mihomoHttp.HttpRequest(ctx, url, http.MethodGet, nil, nil)
+	vehicle := resource.NewHTTPVehicle(url, path, "", nil, 90*time.Second, 512<<20)
+	data, _, err := vehicle.Read(ctx, utils.HashType{})
 	if err != nil {
-		return
+		return initialDownloadError{cause: err}
 	}
-	defer resp.Body.Close()
+	if err := validateInitialGeoData(path, data); err != nil {
+		return err
+	}
+	apply := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		write := func() error { return vehicle.Write(data) }
+		switch path {
+		case C.Path.MMDB(), C.Path.ASN():
+			old, err := os.ReadFile(path)
+			if err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			if path == C.Path.MMDB() {
+				return mmdb.ReplaceIP(path, data, old, write)
+			}
+			return mmdb.ReplaceASN(path, data, old, write)
+		default:
+			if err := write(); err != nil {
+				return err
+			}
+			if path == C.Path.GeoIP() {
+				ClearGeoIPCache()
+			} else {
+				ClearGeoSiteCache()
+			}
+			return nil
+		}
+	}
+	if scope.commit != nil {
+		return scope.commit(apply)
+	}
+	return apply()
+}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+type initialDownloadError struct{ cause error }
+
+func (e initialDownloadError) Error() string { return "GeoData download failed" }
+func (e initialDownloadError) Unwrap() error { return e.cause }
+
+func validateInitialGeoData(path string, data []byte) error {
+	if path == C.Path.MMDB() || path == C.Path.ASN() {
+		reader, err := maxminddb.FromBytes(data)
+		if err != nil {
+			return fmt.Errorf("invalid GeoData database: %w", err)
+		}
+		return reader.Close()
+	}
+	loader, err := GetGeoDataLoader("standard")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = io.Copy(f, resp.Body)
-
+	if path == C.Path.GeoIP() {
+		_, err = loader.LoadIPByBytes(data, "cn")
+	} else {
+		_, err = loader.LoadSiteByBytes(data, "cn")
+	}
 	return err
 }
 
-func InitGeoSite() error {
+func InitGeoSite() (err error) {
+	defer func() { recordInitializationError(err) }()
 	geoSiteEnable.Store(true)
 	initGeoSiteMutex.Lock()
 	defer initGeoSiteMutex.Unlock()
@@ -101,10 +154,7 @@ func InitGeoSite() error {
 	}
 	if !initGeoSite {
 		if err := Verify(C.GeositeName); err != nil {
-			log.Warnln("GeoSite.dat invalid, remove and download: %s", err)
-			if err := os.Remove(C.Path.GeoSite()); err != nil {
-				return fmt.Errorf("can't remove invalid GeoSite.dat: %s", err.Error())
-			}
+			log.Warnln("GeoSite.dat invalid, download replacement: %s", err)
 			if err := downloadToPath(GeoSiteUrl(), C.Path.GeoSite()); err != nil {
 				return fmt.Errorf("can't download GeoSite.dat: %s", err.Error())
 			}
@@ -114,7 +164,8 @@ func InitGeoSite() error {
 	return nil
 }
 
-func InitGeoIP() error {
+func InitGeoIP() (err error) {
+	defer func() { recordInitializationError(err) }()
 	geoIpEnable.Store(true)
 	initGeoIPMutex.Lock()
 	defer initGeoIPMutex.Unlock()
@@ -130,10 +181,7 @@ func InitGeoIP() error {
 
 		if initGeoIP != 1 {
 			if err := Verify(C.GeoipName); err != nil {
-				log.Warnln("GeoIP.dat invalid, remove and download: %s", err)
-				if err := os.Remove(C.Path.GeoIP()); err != nil {
-					return fmt.Errorf("can't remove invalid GeoIP.dat: %s", err.Error())
-				}
+				log.Warnln("GeoIP.dat invalid, download replacement: %s", err)
 				if err := downloadToPath(GeoIpUrl(), C.Path.GeoIP()); err != nil {
 					return fmt.Errorf("can't download GeoIP.dat: %s", err.Error())
 				}
@@ -152,10 +200,7 @@ func InitGeoIP() error {
 
 	if initGeoIP != 2 {
 		if !mmdb.Verify(C.Path.MMDB()) {
-			log.Warnln("MMDB invalid, remove and download")
-			if err := os.Remove(C.Path.MMDB()); err != nil {
-				return fmt.Errorf("can't remove invalid MMDB: %s", err.Error())
-			}
+			log.Warnln("MMDB invalid, download replacement")
 			if err := downloadToPath(MmdbUrl(), C.Path.MMDB()); err != nil {
 				return fmt.Errorf("can't download MMDB: %s", err.Error())
 			}
@@ -165,7 +210,8 @@ func InitGeoIP() error {
 	return nil
 }
 
-func InitASN() error {
+func InitASN() (err error) {
+	defer func() { recordInitializationError(err) }()
 	asnEnable.Store(true)
 	initASNMutex.Lock()
 	defer initASNMutex.Unlock()
@@ -179,10 +225,7 @@ func InitASN() error {
 	}
 	if !initASN {
 		if !mmdb.Verify(C.Path.ASN()) {
-			log.Warnln("ASN invalid, remove and download")
-			if err := os.Remove(C.Path.ASN()); err != nil {
-				return fmt.Errorf("can't remove invalid ASN: %s", err.Error())
-			}
+			log.Warnln("ASN invalid, download replacement")
 			if err := downloadToPath(ASNUrl(), C.Path.ASN()); err != nil {
 				return fmt.Errorf("can't download ASN: %s", err.Error())
 			}

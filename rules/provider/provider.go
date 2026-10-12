@@ -2,6 +2,7 @@ package provider
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -9,8 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/common/pool"
 	"github.com/metacubex/mihomo/common/yaml"
+	"github.com/metacubex/mihomo/component/geodata"
 	"github.com/metacubex/mihomo/component/resource"
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
@@ -61,7 +64,7 @@ type mrsRuleStrategy interface {
 
 type baseProvider struct {
 	behavior P.RuleBehavior
-	strategy ruleStrategy
+	strategy atomic.TypedValue[ruleStrategy]
 }
 
 func (bp *baseProvider) Type() P.ProviderType {
@@ -73,15 +76,16 @@ func (bp *baseProvider) Behavior() P.RuleBehavior {
 }
 
 func (bp *baseProvider) Count() int {
-	return bp.strategy.Count()
+	return bp.strategy.Load().Count()
 }
 
 func (bp *baseProvider) Match(metadata *C.Metadata, helper C.RuleMatchHelper) bool {
-	return bp.strategy != nil && bp.strategy.Match(metadata, helper)
+	strategy := bp.strategy.Load()
+	return strategy != nil && strategy.Match(metadata, helper)
 }
 
 func (bp *baseProvider) Strategy() any {
-	return bp.strategy
+	return bp.strategy.Load()
 }
 
 type ruleSetProvider struct {
@@ -104,13 +108,25 @@ func (rp *ruleSetProvider) Update() error {
 	return err
 }
 
+// CheckAndUpdate fetches the configured source and publishes a replacement only
+// after its contents have been parsed and saved successfully.
+func (rp *ruleSetProvider) CheckAndUpdate(ctx context.Context) (changed bool, err error) {
+	_, same, err := rp.Fetcher.UpdateContext(ctx)
+	return err == nil && !same, err
+}
+
+func (rp *ruleSetProvider) CheckAndUpdateWithCommit(ctx context.Context, commit func(func() error) error) (changed bool, err error) {
+	_, same, err := rp.Fetcher.UpdateContextWithCommit(ctx, commit)
+	return err == nil && !same, err
+}
+
 func (rp *ruleSetProvider) MarshalJSON() ([]byte, error) {
 	return json.Marshal(
 		providerForApi{
 			Behavior:    rp.behavior.String(),
 			Format:      rp.format.String(),
 			Name:        rp.Fetcher.Name(),
-			RuleCount:   rp.strategy.Count(),
+			RuleCount:   rp.Count(),
 			Type:        rp.Type().String(),
 			UpdatedAt:   rp.UpdatedAt(),
 			VehicleType: rp.VehicleType().String(),
@@ -131,17 +147,29 @@ func NewRuleSetProvider(name string, behavior P.RuleBehavior, format P.RuleForma
 	}
 
 	onUpdate := func(strategy ruleStrategy) {
-		rp.strategy = strategy
+		rp.strategy.Store(strategy)
 		tunnel.RuleUpdateCallback().Emit(rp)
 	}
 
-	rp.strategy = newStrategy(behavior, parse)
+	strategy := newStrategy(behavior, parse)
 	if len(payload) > 0 { // using as fallback rules
-		rp.strategy = rulesParseInline(payload, rp.strategy)
+		strategy = rulesParseInline(payload, strategy)
 	}
+	rp.strategy.Store(strategy)
 	rp.Fetcher = resource.NewFetcher(name, interval, vehicle, bundleFile, func(bytes []byte) (ruleStrategy, error) {
 		return rulesParse(bytes, newStrategy(behavior, parse), format)
 	}, onUpdate)
+	if behavior == P.Classical {
+		rp.Fetcher.SetContextParser(func(ctx context.Context, commit func(func() error) error, data []byte) (ruleStrategy, error) {
+			var strategy ruleStrategy
+			err := geodata.WithInitializationContext(ctx, commit, func() error {
+				var err error
+				strategy, err = rulesParse(data, newStrategy(behavior, parse), format)
+				return err
+			})
+			return strategy, err
+		})
+	}
 
 	wrapper := &RuleSetProvider{
 		rp,
@@ -311,7 +339,7 @@ func (i *inlineProvider) MarshalJSON() ([]byte, error) {
 		providerForApi{
 			Behavior:    i.behavior.String(),
 			Name:        i.Name(),
-			RuleCount:   i.strategy.Count(),
+			RuleCount:   i.Count(),
 			Type:        i.Type().String(),
 			VehicleType: i.VehicleType().String(),
 			UpdatedAt:   i.updateAt,
@@ -323,13 +351,12 @@ func NewInlineProvider(name string, behavior P.RuleBehavior, payload []string, p
 	ip := &inlineProvider{
 		baseProvider: baseProvider{
 			behavior: behavior,
-			strategy: newStrategy(behavior, parse),
 		},
 		payload:  payload,
 		name:     name,
 		updateAt: time.Now(),
 	}
-	ip.strategy = rulesParseInline(payload, ip.strategy)
+	ip.strategy.Store(rulesParseInline(payload, newStrategy(behavior, parse)))
 
 	wrapper := &InlineProvider{
 		ip,

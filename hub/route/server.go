@@ -87,7 +87,7 @@ func (c Cors) Apply(r chi.Router) {
 	r.Use(cors.New(cors.Options{
 		AllowedOrigins:      c.AllowOrigins,
 		AllowedMethods:      []string{"GET", "POST", "PUT", "PATCH", "DELETE"},
-		AllowedHeaders:      []string{"Content-Type", "Authorization"},
+		AllowedHeaders:      []string{"Content-Type", "Authorization", "Idempotency-Key", "X-Mihomo-Instance-ID"},
 		AllowPrivateNetwork: c.AllowPrivateNetwork,
 		MaxAge:              300,
 	}).Handler)

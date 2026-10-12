@@ -5,6 +5,7 @@ import (
 	"net"
 	"strings"
 
+	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
 	"github.com/oschwald/maxminddb-golang"
 )
@@ -18,10 +19,12 @@ type geoip2Country struct {
 type IPReader struct {
 	*maxminddb.Reader
 	databaseType
+	managed *database
 }
 
 type ASNReader struct {
 	*maxminddb.Reader
+	managed *database
 }
 
 type GeoLite2 struct {
@@ -35,6 +38,11 @@ type IPInfo struct {
 }
 
 func (r IPReader) LookupCode(ipAddress net.IP) []string {
+	if r.managed != nil {
+		reader, release := r.managed.acquire(C.Path.MMDB())
+		defer release()
+		r = IPReader{Reader: reader, databaseType: ipDatabaseType(reader)}
+	}
 	switch r.databaseType {
 	case typeMaxmind:
 		var country geoip2Country
@@ -73,6 +81,11 @@ func (r IPReader) LookupCode(ipAddress net.IP) []string {
 }
 
 func (r ASNReader) LookupASN(ip net.IP) (string, string) {
+	if r.managed != nil {
+		reader, release := r.managed.acquire(C.Path.ASN())
+		defer release()
+		r = ASNReader{Reader: reader}
+	}
 	switch r.Metadata.DatabaseType {
 	case "GeoLite2-ASN", "DBIP-ASN-Lite (compat=GeoLite2-ASN)":
 		var result GeoLite2

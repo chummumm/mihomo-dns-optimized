@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -205,6 +206,7 @@ type TLS struct {
 
 // Config is mihomo config manager
 type Config struct {
+	GeoDataUsage  geodata.Usage
 	General       *General
 	Controller    *Controller
 	Experimental  *Experimental
@@ -659,6 +661,15 @@ func UnmarshalRawConfig(buf []byte) (*RawConfig, error) {
 }
 
 func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
+	var parsed *Config
+	err := geodata.WithInitializationContext(context.Background(), nil, func() (err error) {
+		parsed, err = parseRawConfig(rawCfg)
+		return err
+	})
+	return parsed, err
+}
+
+func parseRawConfig(rawCfg *RawConfig) (*Config, error) {
 	config := &Config{}
 	log.Infoln("Start initial configuration in progress") //Segment finished in xxm
 	startTime := time.Now()
@@ -787,6 +798,7 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 
 	elapsedTime := time.Since(startTime) / time.Millisecond                     // duration in ms
 	log.Infoln("Initial configuration complete, total time: %dms", elapsedTime) //Segment finished in xxm
+	config.GeoDataUsage = CalculateGeoDataUsage(config)
 
 	return config, nil
 }
