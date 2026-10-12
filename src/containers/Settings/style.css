@@ -129,6 +129,199 @@
     gap: var(--sp-2);
 }
 
+/* Version & updates */
+.settings-update-row {
+    align-items: flex-start;
+    min-height: 64px;
+    padding-top: 12px;
+    padding-bottom: 12px;
+}
+
+.settings-update-name {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+}
+
+.settings-update-version {
+    overflow: hidden;
+    color: var(--text-3);
+    font-family: var(--font-mono);
+    font-size: var(--t-xs);
+    font-stretch: var(--mono-dense);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.settings-update-result {
+    display: grid;
+    justify-items: end;
+    gap: 4px;
+    min-width: 0;
+    margin-left: auto;
+    text-align: right;
+}
+
+.settings-update-status {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px 8px;
+    min-height: 26px;
+    padding: 3px 10px;
+    border-radius: var(--r-round);
+    background: var(--hover);
+    color: var(--text-2);
+    font-size: var(--t-xs);
+    font-weight: 540;
+}
+
+.settings-update-status.is-pending,
+.settings-update-status.is-skipped {
+    background: transparent;
+    color: var(--text-3);
+    font-weight: 450;
+}
+
+.settings-update-status.is-up_to_date,
+.settings-update-status.is-updated {
+    background: var(--good-bg);
+    color: var(--good);
+}
+
+.settings-update-status.is-checking,
+.settings-update-status.is-restarting {
+    background: color-mix(in srgb, var(--accent) 13%, transparent);
+    color: var(--accent);
+    box-shadow: 0 0 18px -8px var(--glow);
+}
+
+.settings-update-status.is-error {
+    background: var(--warn-bg);
+    color: var(--warn);
+}
+
+.settings-update-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding-left: 8px;
+    border-left: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+    color: var(--text);
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.settings-update-link:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+
+.settings-update-policy {
+    color: var(--text-3);
+    font-size: var(--t-2xs);
+}
+
+.settings-update-footer {
+    flex-wrap: nowrap;
+    justify-content: space-between;
+}
+
+.settings-update-summary {
+    min-width: 0;
+    color: var(--text-3);
+    font-size: var(--t-xs);
+    line-height: 1.5;
+}
+
+.settings-update-row .settings-update-name {
+    flex: 1 1 30%;
+    overflow-wrap: anywhere;
+}
+
+.settings-update-row .settings-update-result {
+    flex: 1 1 55%;
+}
+
+.settings-update-installed,
+.settings-update-sources {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 12px;
+    padding: 10px var(--sp-5);
+    color: var(--text-3);
+    font-size: var(--t-xs);
+    line-height: 1.6;
+}
+
+.settings-update-sources > span {
+    flex: 1 1 100%;
+}
+
+.settings-update-group {
+    border-top: 1px solid var(--hair);
+}
+
+.settings-update-group > summary {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px var(--sp-5);
+    color: var(--text);
+    font-size: var(--t-sm);
+    cursor: pointer;
+    list-style: none;
+}
+
+.settings-update-group > summary::-webkit-details-marker {
+    display: none;
+}
+
+.settings-update-group-count {
+    margin-left: auto;
+    color: var(--text-3);
+    font-size: var(--t-xs);
+}
+
+.settings-update-group[open] > summary > .icon {
+    transform: rotate(90deg);
+}
+
+.settings-update-group > .settings-update-row,
+.settings-update-group > .settings-update-empty {
+    background: var(--sunken);
+}
+
+.settings-update-empty {
+    margin: 0;
+    padding: 12px var(--sp-5);
+    color: var(--text-3);
+    font-size: var(--t-xs);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .settings-update-status.is-updated > .icon {
+        animation: settings-update-rise 1.6s var(--ease-in-out) 300ms 2;
+    }
+}
+
+@keyframes settings-update-rise {
+    0%,
+    100% {
+        transform: none;
+    }
+
+    40% {
+        transform: translateY(-3px);
+    }
+
+    60% {
+        transform: translateY(1px);
+    }
+}
+
 @media (max-width: 768px) {
     .settings-page {
         max-width: none;
@@ -158,5 +351,25 @@
 
     .settings-probe-field .input {
         flex-basis: 100%;
+    }
+
+    .settings-update-row {
+        flex-direction: column;
+        gap: var(--sp-2);
+    }
+
+    .settings-update-result {
+        justify-items: start;
+        margin-left: 0;
+        text-align: left;
+    }
+
+    .settings-update-status {
+        justify-content: flex-start;
+        border-radius: 12px;
+    }
+
+    .settings-update-footer {
+        flex-wrap: wrap;
     }
 }

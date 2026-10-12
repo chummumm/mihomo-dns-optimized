@@ -46,6 +46,7 @@ export interface DNSQuery {
 export interface DNSQueryParams {
     limit: 50 | 100
     cursor?: string
+    anchor?: string
     qname?: string
     client?: string
     outcome?: DNSOutcome
@@ -60,6 +61,10 @@ export interface DNSQueries {
     evicted: number
     scope: 'retained'
     instance_id: string
+    // Optional for dashboards connected to a core predating indexed pagination.
+    total?: number
+    page_cursors?: string[]
+    anchor_id?: string
 }
 
 export interface DNSCounts {

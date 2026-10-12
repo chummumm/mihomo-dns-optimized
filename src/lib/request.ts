@@ -1,6 +1,7 @@
 import axios, { type AxiosInstance } from 'axios'
 
 import type { DNSObservability, DNSQueries, DNSQueryParams, DNSStats, DNSUpstreams } from '@containers/DNS/types'
+import type { UpdateSnapshot } from '@containers/Settings/update-state'
 
 import { DEFAULT_PROBE_URL, normalizeProbeURL } from './probe'
 
@@ -185,6 +186,22 @@ export class Client {
 
     async getVersion () {
         return await this.axiosClient.get<{ version: string, premium?: boolean }>('version')
+    }
+
+    async getUpdateTask (signal: AbortSignal) {
+        return await this.axiosClient.get<UpdateSnapshot>('upgrade/check', {
+            signal,
+            timeout: 10000,
+            params: { _ts: Date.now() },
+        })
+    }
+
+    async startUpdateTask (signal: AbortSignal, instanceId: string, requestId: string) {
+        return await this.axiosClient.post<UpdateSnapshot>('upgrade/check', undefined, {
+            signal,
+            timeout: 15000,
+            headers: { 'Idempotency-Key': requestId, 'X-Mihomo-Instance-ID': instanceId },
+        })
     }
 
     async getProxyDelay (name: string, probeURL = DEFAULT_PROBE_URL, signal?: AbortSignal) {

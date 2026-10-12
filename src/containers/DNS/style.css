@@ -309,31 +309,69 @@
     padding: var(--sp-4) var(--sp-5);
 }
 
-/* Trend */
+/* Trend: a plain line chart drawn at real pixel size */
+.dns-trend-heading {
+    align-items: flex-start;
+}
+
+.dns-trend-title {
+    display: grid;
+    gap: 2px;
+}
+
+.dns-trend-unit {
+    font-size: var(--t-xs);
+}
+
+.dns-range-select .button-select-options {
+    height: 26px;
+    padding: 0 12px;
+    font-size: var(--t-xs);
+}
+
 .dns-trend-frame {
     position: relative;
+    min-width: 0;
+    margin-top: var(--sp-2);
 }
 
 .dns-trend {
     display: block;
     width: 100%;
-    height: auto;
-    min-height: 120px;
     overflow: visible;
+    border-radius: 6px;
+    cursor: crosshair;
+    touch-action: pan-y;
+}
+
+.dns-trend:focus {
+    outline: none;
+}
+
+.dns-trend:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    outline-offset: 4px;
 }
 
 .dns-trend text {
     fill: var(--text-3);
     font-family: var(--font-mono);
-    font-size: 9.5px;
+    font-size: 10.5px;
     font-stretch: var(--mono-dense);
+    font-variant-numeric: tabular-nums;
 }
 
 .dns-grid-line {
     stroke: var(--hair);
     stroke-width: 1;
-    stroke-dasharray: 2 4;
-    vector-effect: non-scaling-stroke;
+    shape-rendering: crispEdges;
+}
+
+.dns-grid-line.is-base,
+.dns-tick-line {
+    stroke: var(--hair-2);
+    stroke-width: 1;
+    shape-rendering: crispEdges;
 }
 
 .dns-line {
@@ -342,27 +380,15 @@
     stroke-linecap: round;
     stroke-linejoin: round;
     stroke-dasharray: 1 1;
-    vector-effect: non-scaling-stroke;
 }
 
-.dns-line-queries {
-    stroke: var(--accent);
-    stroke-width: 2.2;
-    filter: drop-shadow(0 0 4px var(--glow));
-}
-
-.dns-line-cache { stroke: var(--accent-2); stroke-width: 1.8; }
-.dns-line-errors { stroke: var(--bad); stroke-width: 1.5; }
-
-/* Each bin's quietest and busiest minute, so short spikes stay visible behind the smoothed line. */
-.dns-band-queries {
-    fill: color-mix(in srgb, var(--accent) 9%, transparent);
-    stroke: none;
-}
+.dns-line-queries { stroke: var(--accent); }
+.dns-line-cache { stroke: var(--accent-2); }
+.dns-line-errors { stroke: var(--bad); stroke-width: 1.6; }
 
 .dns-fill-top {
     stop-color: var(--accent);
-    stop-opacity: 0.22;
+    stop-opacity: 0.12;
 }
 
 .dns-fill-bottom {
@@ -370,39 +396,38 @@
     stop-opacity: 0;
 }
 
-/* Lines draw themselves in once, then morph smoothly as each refresh shifts the window. */
+/* Lines draw themselves in once per range, then morph smoothly as each refresh shifts the window. */
 @media (prefers-reduced-motion: no-preference) {
     .dns-line {
-        animation: dns-draw 1.2s var(--ease-out) backwards;
-    }
-
-    .dns-line-cache {
-        animation-delay: 120ms;
+        animation: dns-draw 900ms var(--ease-out) backwards;
     }
 
     .dns-line-errors {
-        animation-delay: 240ms;
+        animation-delay: 80ms;
     }
 
-    .dns-band-queries,
+    .dns-line-queries {
+        animation-delay: 160ms;
+    }
+
     .dns-area-queries {
-        animation: dns-fill-in 900ms var(--ease-out) 300ms backwards;
+        animation: dns-fill-in 700ms var(--ease-out) 260ms backwards;
     }
 
     .dns-trend path {
-        transition: d 700ms var(--ease-out);
+        transition: d 600ms var(--ease-out);
     }
 
     .dns-cursor {
-        transition: transform 140ms var(--ease-out);
+        transition: transform 120ms var(--ease-out);
     }
 
     .dns-cursor circle {
-        transition: cy 140ms var(--ease-out);
+        transition: cy 120ms var(--ease-out);
     }
 
     .dns-readout {
-        transition: left 140ms var(--ease-out);
+        transition: left 120ms var(--ease-out);
     }
 }
 
@@ -422,74 +447,75 @@
     }
 }
 
-.dns-hit-area {
-    fill: transparent;
-    cursor: crosshair;
-}
-
 .dns-cursor line {
     stroke: var(--hair-2);
     stroke-width: 1;
-    stroke-dasharray: 3 3;
-    vector-effect: non-scaling-stroke;
+    shape-rendering: crispEdges;
 }
 
 .dns-cursor circle {
     stroke: var(--panel-solid);
     stroke-width: 2;
-    vector-effect: non-scaling-stroke;
 }
 
 .dns-cursor-queries { fill: var(--accent); }
 .dns-cursor-cache { fill: var(--accent-2); }
+.dns-cursor-errors { fill: var(--bad); }
 
 .dns-readout {
     position: absolute;
     top: 0;
     z-index: 2;
     display: grid;
-    gap: 2px;
-    min-width: 140px;
+    gap: 3px;
+    min-width: 156px;
     padding: 8px 10px;
     border: 1px solid var(--hair);
     border-radius: var(--r-ctl);
-    background: var(--panel);
+    background: var(--panel-solid);
     box-shadow: var(--shadow-pop);
     font-size: var(--t-xs);
     pointer-events: none;
-    transform: translateX(12px);
+    transform: translateX(14px);
+    animation: dns-fill-in var(--dur-2) var(--ease-out);
 }
 
 .dns-readout b {
-    margin-left: 6px;
+    margin-left: 12px;
     color: var(--text);
     font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
     font-weight: 560;
 }
 
 .dns-readout-time {
+    margin-bottom: 2px;
     color: var(--text-3);
     font-family: var(--font-mono);
 }
 
 .dns-readout span:not(.dns-readout-time) {
     display: flex;
+    align-items: center;
     justify-content: space-between;
+    color: var(--text-2);
 }
 
-.dns-readout {
-    animation: dns-fill-in var(--dur-2) var(--ease-out);
+.dns-readout-total {
+    margin-top: 2px;
+    padding-top: 5px;
+    border-top: 1px solid var(--hair);
 }
 
 .dns-readout.is-flipped {
-    transform: translateX(calc(-100% - 12px));
+    transform: translateX(calc(-100% - 14px));
 }
 
 .dns-chart-legend {
     display: flex;
     flex-wrap: wrap;
     justify-content: flex-start;
-    gap: var(--sp-5);
+    gap: var(--sp-2) var(--sp-5);
     margin-top: var(--sp-2);
     font-size: var(--t-xs);
 }
@@ -499,21 +525,40 @@
 }
 
 .dns-chart-legend span::before,
-.dns-readout span:not(.dns-readout-time)::before {
+.dns-readout span:not(.dns-readout-time, .dns-readout-total)::before {
     content: '';
     display: inline-block;
     width: 12px;
-    height: 3px;
+    height: 2px;
     margin-right: 8px;
     border-radius: 2px;
     vertical-align: middle;
 }
 
-.dns-readout span:not(.dns-readout-time)::before {
+.dns-readout span:not(.dns-readout-time, .dns-readout-total)::before {
+    width: 10px;
+    margin-right: 6px;
+}
+
+.dns-readout span:not(.dns-readout-time, .dns-readout-total) {
+    justify-content: flex-start;
+}
+
+.dns-readout span:not(.dns-readout-time) b {
+    margin-left: auto;
+    padding-left: 12px;
+}
+
+.dns-chart-legend .dns-chart-empty-note {
+    margin-left: auto;
+    color: var(--text-3);
+}
+
+.dns-chart-legend .dns-chart-empty-note::before {
     display: none;
 }
 
-.dns-legend-queries::before { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.dns-legend-queries::before { background: var(--accent); }
 .dns-legend-cache::before { background: var(--accent-2); }
 .dns-legend-errors::before { background: var(--bad); }
 
@@ -847,6 +892,49 @@ select.dns-input {
     font-size: var(--t-xs);
 }
 
+.dns-pagination-position b {
+    font-variant-numeric: tabular-nums;
+}
+
+.dns-button-trailing .button-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.dns-page-jump {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-2);
+    margin-left: var(--sp-1);
+    padding-left: var(--sp-3);
+    border-left: 1px solid var(--hair);
+}
+
+.dns-page-jump label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-2);
+    font-size: var(--t-xs);
+    white-space: nowrap;
+}
+
+.dns-page-jump .dns-input {
+    width: 56px;
+    height: var(--ctl-h-sm);
+    padding: 0 6px;
+    font-family: var(--font-mono);
+    font-size: var(--t-xs);
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+}
+
+.dns-page-jump .dns-input:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
 .dns-upstream-address {
     display: inline-block;
     min-width: 20ch;
@@ -1001,7 +1089,7 @@ select.dns-input {
         grid-template-columns: 84px minmax(0, 1fr);
     }
 
-    /* On phones the reading for the touched minute sits under the chart instead of floating. */
+    /* On phones the reading for the touched point sits under the chart instead of floating. */
     .dns-readout,
     .dns-readout.is-flipped {
         position: static;
@@ -1014,7 +1102,45 @@ select.dns-input {
         transition: none;
     }
 
-    .dns-trend text {
-        font-size: 24px;
+    .dns-readout-time {
+        flex-basis: 100%;
+        margin-bottom: 0;
+    }
+
+    .dns-readout-total {
+        margin-top: 0;
+        padding-top: 0;
+        border-top: 0;
+    }
+
+    .dns-trend-heading {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .dns-range-select {
+        align-self: flex-start;
+    }
+
+    .dns-pagination {
+        padding: 10px 12px;
+    }
+
+    .dns-pagination-actions {
+        width: 100%;
+    }
+
+    .dns-pagination-actions > .button {
+        flex: 1 1 calc(50% - var(--sp-2));
+        min-width: 0;
+        padding: 0 8px;
+    }
+
+    .dns-page-jump {
+        flex: 1 1 100%;
+        justify-content: flex-end;
+        margin-left: 0;
+        padding-left: 0;
+        border-left: 0;
     }
 }

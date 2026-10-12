@@ -6,7 +6,7 @@ const path = require('node:path')
 const { chromium } = require('playwright')
 const { WebSocketServer } = require('ws')
 
-const dist = path.resolve(__dirname, '../dist')
+const dist = path.resolve(process.env.UI_DIST_DIR || path.join(__dirname, '../dist'))
 const marker = `dns-record-${Date.now()}.test`
 const maliciousAnswer = '<img src=x onerror="window.__dnsXSS=true">'
 const requests = []
@@ -40,7 +40,7 @@ function makeRecords (prefix, count) {
 }
 
 function state (name, count) {
-    return { name, instance: `${name}-1`, records: makeRecords(name, count), secret: `test-${name}-secret`, supported: true, enabled: true, emptyStats: false, detailedUpstreams: true, capabilityFailure: false, delay: '', pending: 0 }
+    return { name, instance: `${name}-1`, records: makeRecords(name, count), secret: `test-${name}-secret`, supported: true, enabled: true, emptyStats: false, detailedUpstreams: true, pageMetadata: true, capabilityFailure: false, delay: '', pending: 0 }
 }
 
 const stateA = state('controller-a', 140)
@@ -100,16 +100,25 @@ function api (req, res, current) {
         data = { instance_id: current.instance, started_at: new Date(kernelMinute - 86400000).toISOString(), totals: processCounts, last_24h: counts, series, top_domains: [{ name: current.records[0]?.qname || 'empty.test', count: 7 }], top_clients: [{ name: '192.0.2.1', count: 7 }], top_scope: 'retained', retained: current.records.length, evicted: 12 }
     } else if (url.pathname.endsWith('/queries')) {
         const normal = value => value.toLowerCase().replace(/\.$/, '')
-        let items = current.records.filter(record =>
-            (!url.searchParams.get('cursor') || Number(record.id) < Number(url.searchParams.get('cursor'))) &&
+        const newest = current.records[0]?.id || ''
+        const requestedAnchor = url.searchParams.get('anchor')
+        const anchor = requestedAnchor && newest && BigInt(requestedAnchor) < BigInt(newest) ? requestedAnchor : newest
+        const matches = current.records.filter(record =>
+            (!anchor || BigInt(record.id) <= BigInt(anchor)) &&
             (!url.searchParams.get('qname') || record.qname === normal(url.searchParams.get('qname'))) &&
             (!url.searchParams.get('client') || record.client === url.searchParams.get('client')) &&
             (!url.searchParams.get('outcome') || record.outcome === url.searchParams.get('outcome')) &&
             (!url.searchParams.get('qtype') || record.qtype === url.searchParams.get('qtype')))
         const limit = Number(url.searchParams.get('limit') || 50)
+        let items = matches.filter(record => !url.searchParams.get('cursor') || BigInt(record.id) < BigInt(url.searchParams.get('cursor')))
         const hasMore = items.length > limit
         items = items.slice(0, limit)
         data = { items, next_cursor: hasMore ? items.at(-1).id : '', has_more: hasMore, retained: current.records.length, evicted: 12, scope: 'retained', instance_id: current.instance }
+        if (current.pageMetadata) {
+            const cursors = ['']
+            for (let index = limit; index < matches.length; index += limit) cursors.push(matches[index - 1].id)
+            Object.assign(data, { total: matches.length, anchor_id: anchor, page_cursors: cursors })
+        }
     } else if (url.pathname.endsWith('/upstreams')) {
         data = { instance_id: current.instance, scope: 'process', attempt_scope: 'resolver_exchange', limit: 128, overflowed: 0, items: [
             { id: 'server-1', address: 'https://same.example/<redacted>', attempts: 100, successes: 8, errors: 2, canceled: 80, timeouts: 1, rcode_errors: 1, elapsed_ms_avg: 200 },
@@ -214,6 +223,25 @@ async function run () {
             try { await fetch(`${origin}/dns/observability`, { headers: { Authorization: `Bearer ${secret}`, 'X-Forbidden-DNS': '1' } }); return false } catch { return true }
         }, { origin: apiOrigin, secret: stateA.secret })
         assert(denied, 'negative CORS control: forbidden headers must fail; web security must remain enabled')
+        const trend = page.locator('.dns-trend-card')
+        await until(async () => await trend.locator('.dns-line').count() === 3, 'trend draws three lines')
+        assert.equal(await trend.locator('.dns-band-queries').count(), 0, 'the trend is a line chart, not a min/max band')
+        assert.equal(await trend.getByRole('button', { name: '24 hours', exact: true }).getAttribute('aria-pressed'), 'true', 'the trend opens on the 24-hour range')
+        assert.match(await trend.locator('.dns-trend-unit').textContent(), /Queries per minute · 10 min average/)
+        await trend.getByRole('button', { name: '1 hour', exact: true }).click()
+        await until(async () => (await trend.locator('.dns-trend-unit').textContent()) === 'Queries per minute', 'one-hour range uses per-minute points')
+        const plot = await trend.locator('svg.dns-trend').boundingBox()
+        await page.mouse.move(plot.x + plot.width - 18, plot.y + plot.height / 2)
+        await until(async () => await trend.locator('.dns-readout').count() === 1, 'trend readout on hover')
+        const readout = await trend.locator('.dns-readout').textContent()
+        assert.match(readout, /Queries\s*30/, 'the last point is the last complete minute')
+        assert.match(readout, /Errors\s*0/, 'the kernel\'s still-filling minute is not drawn')
+        const tickLabels = (await trend.locator('.dns-trend text').allTextContents()).filter(text => /^\d\d:\d\d$/.test(text))
+        assert(tickLabels.length >= 2 && tickLabels.every(text => Number(text.slice(3)) % 5 === 0), 'clock-aligned time ticks')
+        await page.mouse.move(0, 0)
+        await trend.getByRole('button', { name: '24 hours', exact: true }).click()
+        console.log('PASS DNS trend: line chart, ranges, completed-minute readout')
+
         stateA.emptyStats = true
         await page.getByRole('button', { name: 'Refresh', exact: true }).click()
         await until(async () => await metric('Cache hit ratio').textContent() === '—', 'zero queries renders an em dash')
@@ -250,6 +278,8 @@ async function run () {
 
         await page.getByRole('tab', { name: 'Query log', exact: true }).click()
         await until(async () => await queryButtons().count() === 50, 'default 50-row page')
+        const paging = () => page.locator('.dns-pagination-info').textContent()
+        await until(async () => /Page 1 \/ 3/.test(await paging()) && /140 records/.test(await paging()), 'atomic page count and total')
         const initialNames = await queryButtons().allTextContents()
         const needle = stateA.records[0].qname
         assert.equal(initialNames[0], needle)
@@ -267,14 +297,40 @@ async function run () {
         await queryButtons().nth(1).click()
         assert.match(await page.getByRole('dialog').textContent(), /https:\/\/resolver.example\/dns-query/)
         await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click()
-        await page.getByRole('button', { name: 'Older', exact: true }).click()
+        await page.getByRole('button', { name: 'Next', exact: true }).click()
         await until(async () => (await queryButtons().allTextContents())[0] === stateA.records[50].qname, 'cursor page 2')
         const pageTwoNames = await queryButtons().allTextContents()
         assert.equal(pageTwoNames.length, 50)
         assert(!pageTwoNames.some(name => initialNames.includes(name)), 'cursor pages do not overlap')
         assert.match(await page.locator('.dns-pagination-info').textContent(), /Page 2/)
+        assert.equal(requests.filter(request => request.path.endsWith('/queries')).at(-1).params.anchor, '140', 'history requests carry their original upper bound')
+        await page.getByRole('button', { name: 'Last', exact: true }).click()
+        await until(async () => await queryButtons().count() === 40, 'direct last page')
+        assert.equal((await queryButtons().allTextContents())[0], stateA.records[100].qname)
+        assert.match(await paging(), /Page 3 \/ 3/)
+        assert(await page.getByRole('button', { name: 'Next', exact: true }).isDisabled())
         await page.getByRole('button', { name: 'Previous', exact: true }).click()
+        await until(async () => (await queryButtons().allTextContents())[0] === stateA.records[50].qname, 'previous from last page')
+        await page.getByRole('button', { name: 'First', exact: true }).click()
         await until(async () => (await queryButtons().allTextContents())[0] === needle, 'previous cursor')
+        const jump = page.getByLabel('Go to page number', { exact: true })
+        await jump.fill('9')
+        assert(await page.getByRole('button', { name: 'Go', exact: true }).isDisabled(), 'out-of-range jump is disabled')
+        await jump.fill('2')
+        await jump.press('Enter')
+        await until(async () => (await queryButtons().allTextContents())[0] === stateA.records[50].qname, 'explicit page jump')
+        await page.getByRole('button', { name: 'First', exact: true }).click()
+        await until(async () => (await queryButtons().allTextContents())[0] === needle, 'first page after jump')
+
+        const beforeFiltered = count('/queries')
+        await page.getByLabel('Result source', { exact: true }).selectOption('upstream')
+        await page.getByRole('button', { name: 'Apply filters', exact: true }).click()
+        await until(async () => /139 records/.test(await paging()), 'exact filtered total returned with the first page')
+        assert.equal(count('/queries'), beforeFiltered + 1, 'filtered count requires no client-side page scans')
+        await page.getByRole('button', { name: 'Last', exact: true }).click()
+        await until(async () => /Page 3 \/ 3/.test(await paging()) && await queryButtons().count() === 39, 'last page of filtered matches')
+        await page.getByRole('button', { name: 'Reset', exact: true }).click()
+        await until(async () => /140 records/.test(await paging()), 'clear filter restores full count')
         await page.getByLabel('Rows per page').selectOption('100')
         await until(async () => await queryButtons().count() === 100, '100-row page')
         await page.getByLabel('Domain', { exact: true }).fill(`${needle.toUpperCase()}.`)
@@ -288,10 +344,72 @@ async function run () {
         assert.equal(filteredRequest.params.client, '192.0.2.1')
         assert.equal(filteredRequest.params.outcome, 'cache_fresh')
         assert.equal(await queryButtons().first().textContent(), needle)
-        assert(await page.getByRole('button', { name: 'Older', exact: true }).isDisabled())
+        assert(await page.getByRole('button', { name: 'Next', exact: true }).isDisabled())
         await page.getByRole('button', { name: 'Reset', exact: true }).click()
         await until(async () => await queryButtons().count() === 100, 'filters reset')
-        console.log('PASS DNS queries: 50/100 rows, cursor navigation, exact filters, answers/TTL/cache/upstream details')
+        console.log('PASS DNS queries: 50/100 rows, first/previous/next/last/jump, exact single-request filtered totals, answers/TTL/cache/upstream details')
+
+        const originalRecords = stateA.records
+        await page.getByLabel('Rows per page').selectOption('50')
+        await until(async () => await queryButtons().count() === 50, 'reset page size for anchored history')
+        await page.getByLabel('Result source', { exact: true }).selectOption('upstream')
+        await page.getByRole('button', { name: 'Apply filters', exact: true }).click()
+        await until(async () => /139 records/.test(await paging()), 'initial filtered history index')
+        stateA.records = [...makeRecords('new-during-history', 155).slice(0, 15), ...originalRecords.slice(0, 125)]
+        await page.getByRole('button', { name: 'Next', exact: true }).click()
+        await until(async () => /Page 2 \/ 3/.test(await paging()) && /124 records/.test(await paging()), 'new arrivals are excluded and evicted matches leave the anchored total')
+        assert.equal((await queryButtons().allTextContents())[0], originalRecords[51].qname, 'new queries do not shift a historical page')
+        assert.equal(requests.filter(request => request.path.endsWith('/queries')).at(-1).params.anchor, '140')
+        const historyNames = await queryButtons().allTextContents()
+        const pausedHistoryCount = count('/queries')
+        await page.clock.fastForward(12000)
+        await sleep(60)
+        assert.equal(count('/queries'), pausedHistoryCount, 'history remains paused')
+        assert.deepEqual(await queryButtons().allTextContents(), historyNames, 'paused history rows do not change')
+
+        // Expire enough old records that the remembered third page no longer exists.
+        stateA.records = stateA.records.filter(record => Number(record.id) >= 80)
+        const beforeClamp = count('/queries')
+        await page.getByRole('button', { name: 'Last', exact: true }).click()
+        await until(async () => /Page 2 \/ 2/.test(await paging()) && /60 records/.test(await paging()) && await queryButtons().count() === 10, 'evicted last page clamps to the real remaining last page')
+        assert.equal((await queryButtons().allTextContents())[0], originalRecords[51].qname)
+        assert.equal(count('/queries'), beforeClamp + 2, 'one stale-page response and one corrected page, without a scan loop')
+        await page.getByRole('button', { name: 'First', exact: true }).click()
+        await until(async () => /74 records/.test(await paging()), 'returning to first page includes new matching records')
+        assert.match((await queryButtons().allTextContents())[0], /new-during-history/)
+
+        stateA.records = originalRecords
+        await page.getByRole('button', { name: 'Reset', exact: true }).click()
+        await until(async () => /140 records/.test(await paging()), 'restore retained ring fixture')
+        const beforeFilterCancel = aborted.length
+        stateA.delay = '/queries'
+        await page.getByRole('button', { name: 'Last', exact: true }).click()
+        await until(() => stateA.pending > 0, 'history request is in flight')
+        stateA.delay = ''
+        await page.getByLabel('Result source', { exact: true }).selectOption('cache_fresh')
+        await page.getByRole('button', { name: 'Apply filters', exact: true }).click()
+        await until(async () => /Page 1 \/ 1/.test(await paging()) && /1 records/.test(await paging()) && await queryButtons().count() === 1, 'new filter replaces pending history and index')
+        await until(() => aborted.length > beforeFilterCancel, 'filter change aborts stale history request')
+        assert.equal((await queryButtons().allTextContents())[0], needle)
+        assert.equal(requests.filter(request => request.path.endsWith('/queries')).at(-1).params.anchor, undefined, 'new filter clears the old anchor')
+        await page.getByRole('button', { name: 'Reset', exact: true }).click()
+        await until(async () => /140 records/.test(await paging()), 'reset after canceled request')
+
+        stateA.pageMetadata = false
+        await page.getByRole('button', { name: 'Refresh', exact: true }).click()
+        await until(async () => /Page 1 \/ —/.test(await paging()), 'older core has no invented total')
+        assert(await page.getByRole('button', { name: 'Last', exact: true }).isDisabled())
+        assert(await jump.isDisabled())
+        await page.getByRole('button', { name: 'Next', exact: true }).click()
+        await until(async () => (await queryButtons().allTextContents())[0] === originalRecords[50].qname, 'legacy next cursor remains usable')
+        await page.getByRole('button', { name: 'Previous', exact: true }).click()
+        await until(async () => (await queryButtons().allTextContents())[0] === needle, 'legacy previous remains usable')
+        stateA.pageMetadata = true
+        await page.getByRole('button', { name: 'Refresh', exact: true }).click()
+        await until(async () => /140 records/.test(await paging()), 'metadata enables exact pagination again')
+        await page.getByLabel('Rows per page').selectOption('100')
+        await until(async () => await queryButtons().count() === 100, 'restore page size after pagination lifecycle checks')
+        console.log('PASS DNS pagination lifecycle: anchored insert/eviction counts, last-page clamping, canceled filter request and legacy fallback')
 
         let before = count('/queries')
         await page.clock.fastForward(12000)
@@ -321,7 +439,7 @@ async function run () {
         console.log('PASS DNS refresh lifecycle: pause, stable scroll, hidden-page cancellation and resume')
 
         await until(async () => !(await page.getByRole('button', { name: 'Refresh', exact: true }).isDisabled()), 'ready before instance reset')
-        await page.getByRole('button', { name: 'Older', exact: true }).click()
+        await page.getByRole('button', { name: 'Next', exact: true }).click()
         await until(async () => await queryButtons().count() === 40, 'history page before instance change')
         await queryButtons().first().click()
         stateA.instance = 'controller-a-2'
@@ -382,6 +500,48 @@ async function run () {
         await until(async () => await metric('Cache hit ratio').count() === 1, 'return to supported controller')
         await page.getByRole('tab', { name: 'Query log', exact: true }).click()
         await until(async () => await queryButtons().count() === 1, 'records visible for storage audit')
+        stateB.records = makeRecords('responsive-pagination', 1234)
+        await page.getByRole('button', { name: 'Refresh', exact: true }).click()
+        await until(async () => /1,234 records/.test(await paging()), 'thousands separator in pagination total')
+        await page.clock.resume()
+
+        async function checkPaginationLayout (width, height, language) {
+            await page.setViewportSize({ width, height })
+            await page.locator('.dns-pagination').scrollIntoViewIfNeeded()
+            const geometry = await page.locator('.dns-pagination').evaluate(element => {
+                const rect = element.getBoundingClientRect()
+                const clipped = Array.from(element.querySelectorAll('button')).flatMap(button => {
+                    const bounds = button.getBoundingClientRect()
+                    return Array.from(button.children).filter(child => {
+                        const childBounds = child.getBoundingClientRect()
+                        return childBounds.width > 0 && (childBounds.left < bounds.left + 1 || childBounds.right > bounds.right - 1 || child.scrollWidth > child.clientWidth + 1)
+                    }).map(() => button.textContent.trim())
+                })
+                return { left: rect.left, right: rect.right, viewport: innerWidth, clipped, scrollWidth: element.scrollWidth, width: element.clientWidth }
+            })
+            assert.deepEqual(geometry.clipped, [], `${language} ${width}px pagination button contents are readable`)
+            assert(geometry.left >= 0 && geometry.right <= geometry.viewport + 1 && geometry.scrollWidth <= geometry.width + 1, `${language} ${width}px pagination fits the viewport: ${JSON.stringify(geometry)}`)
+            if (process.env.DNS_SCREENSHOT_DIR) {
+                fs.mkdirSync(process.env.DNS_SCREENSHOT_DIR, { recursive: true })
+                await page.screenshot({ path: path.join(process.env.DNS_SCREENSHOT_DIR, `pagination-${language}-${width}.png`), animations: 'disabled', timeout: 15000 })
+            }
+        }
+
+        await jump.fill('7')
+        await jump.press('Enter')
+        await until(async () => /Page 7 \/ 25/.test(await paging()), 'jump within a larger retained history')
+        for (const [width, height] of [[390, 844], [320, 640], [820, 780]]) await checkPaginationLayout(width, height, 'en')
+        await navigate(uiPort, stateB.secret, '/settings')
+        await page.getByRole('button', { name: '中文', exact: true }).click()
+        await navigate(uiPort, stateB.secret)
+        await page.getByRole('tab', { name: '查询日志', exact: true }).click()
+        await until(async () => /共\s*1,234\s*条/.test(await paging()), 'Chinese pagination summary')
+        await page.getByLabel('跳转到指定页码', { exact: true }).fill('7')
+        await page.getByLabel('跳转到指定页码', { exact: true }).press('Enter')
+        await until(async () => /第\s*7\s*\/\s*25\s*页/.test(await paging()), 'Chinese jump')
+        for (const [width, height] of [[390, 844], [320, 640], [820, 780]]) await checkPaginationLayout(width, height, 'zh')
+        console.log('PASS DNS pagination layout: 320/390/820px, Chinese/English, 1,234 records and page 7/25')
+
         const persisted = await page.evaluate(async needle => {
             const leaks = []
             for (const [name, storage] of [['localStorage', localStorage], ['sessionStorage', sessionStorage]]) {
