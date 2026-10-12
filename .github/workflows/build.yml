@@ -47,7 +47,8 @@ permissions:
 
 concurrency:
   group: optimized-build-${{ github.workflow }}-${{ inputs.ref || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Temporary release hold while removing the on-disk routing journal.
+  cancel-in-progress: true
 
 defaults:
   run:
@@ -61,6 +62,7 @@ env:
 
 jobs:
   check:
+    if: ${{ false }} # Temporary release hold; restore before the next candidate.
     name: Core, DNS and release tests
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -211,6 +213,7 @@ jobs:
           compression-level: 0
 
   updater-platforms:
+    if: ${{ false }} # Temporary release hold; restore before the next candidate.
     name: Core updater (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
