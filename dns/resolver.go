@@ -210,7 +210,7 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 	continueFetch := false
 	key := r.cacheKey(ctx, m)
 	if r.cacheControl != nil {
-		r.cacheControl.Observe(ctx, m, key)
+		ctx = r.cacheControl.Observe(ctx, m, key)
 	}
 	defer func() {
 		if !cacheBackground(ctx) && !dnsQueryClosed(ctx) && (continueFetch || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
@@ -246,6 +246,7 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 		} else {
 			// updating TTL by subtracting common delta time from each DNS record
 			updateMsgTTL(msg, uint32(expireTime.Sub(now).Seconds()))
+			msg = r.preferCachedDualStack(ctx, m, msg, key, expireTime)
 		}
 		return
 	}
@@ -285,6 +286,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 		ctx, cancelSelection := context.WithCancelCause(ctx)
 		defer cancelSelection(nil)
 		ctx = withDNSAnswerLifetimes(ctx)
+		ctx = r.withDualStackAnswers(ctx)
 		if r.speedChecker != nil {
 			ctx = withSpeedCheckDeadline(ctx, r.speedChecker.timeout)
 		}
@@ -307,10 +309,17 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 			result = ageDNSAnswerAfterPolicy(ctx, original, result)
 			inheritDNSLocalAnswer(ctx, result, original)
 			if cache {
+				cacheAnswer := result
+				if dnsDualStackSelectionFor(ctx, original) != nil {
+					cacheAnswer = r.cacheableDualStackAnswer(ctx, m, original)
+				}
 				if r.cacheControl != nil {
-					r.cacheControl.Store(publisher.storeContext(ctx), key, q, result)
+					storeCtx := publisher.storeContext(ctx)
+					if r.cacheControl.Store(storeCtx, key, q, cacheAnswer) {
+						r.storeDualStackAuxiliary(storeCtx, original)
+					}
 				} else {
-					putMsgToCacheWithExpiry(r.cache, key, q, result, dnsAnswerExpires(ctx, result))
+					putMsgToCacheWithExpiry(r.cache, key, q, cacheAnswer, dnsAnswerExpires(ctx, cacheAnswer))
 				}
 			}
 		}()
@@ -386,6 +395,9 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 			msg = ageDNSAnswerAt(msg, ret.receivedAt, time.Now())
 		}
 		msg.Id = m.Id
+		if ret.earlyReply {
+			msg = limitDNSEarlyReplyTTL(m, msg)
+		}
 	}
 
 	return

@@ -87,7 +87,7 @@ func TestDNSResponseModeExpiredSnapshotIsAtomicallyReplaced(t *testing.T) {
 				query2 := query.Copy()
 				query2.Id++
 				second := routingTestExchange(t, r, ctx, query2)
-				if client.count(0) != 2 || second.Answer[0].Header().Ttl != 30 || second.Id != query2.Id {
+				if client.count(0) != 2 || second.Answer[0].Header().Ttl != dnsEarlyReplyTTL || second.Id != query2.Id {
 					t.Fatalf("late transaction replayed an expired snapshot: calls=%d answer=%v", client.count(0), second)
 				}
 				// The new cache lease revokes the old background work. Its final
@@ -98,7 +98,7 @@ func TestDNSResponseModeExpiredSnapshotIsAtomicallyReplaced(t *testing.T) {
 				query3 := query2.Copy()
 				query3.Id++
 				third, err := r.exchangeWithoutCache(ctx, query3)
-				if err != nil || client.count(0) != 2 || third.Id != query3.Id || third.Answer[0].Header().Ttl != 30 {
+				if err != nil || client.count(0) != 2 || third.Id != query3.Id || third.Answer[0].Header().Ttl != dnsEarlyReplyTTL {
 					t.Fatalf("old cleanup removed the fresh replacement: calls=%d answer=%v error=%v", client.count(0), third, err)
 				}
 				cached, _, hit := r.cache.GetWithExpire(r.cacheKey(ctx, query))

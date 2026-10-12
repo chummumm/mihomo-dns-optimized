@@ -3,8 +3,10 @@ package dns
 import (
 	"context"
 	"errors"
+	"net"
 	"net/netip"
 	"sync"
+	"syscall"
 	"time"
 
 	C "github.com/metacubex/mihomo/constant"
@@ -32,12 +34,29 @@ func ValidateDualStackConfig(config DualStackConfig) error {
 type dnsProbeMeasurementsKey struct{}
 
 type dualStackMeasurements struct {
-	mu   sync.Mutex
-	rtts map[netip.Addr]time.Duration
+	mu     sync.Mutex
+	rtts   map[netip.Addr]time.Duration
+	failed map[netip.Addr]bool
 }
 
 func (m *dualStackMeasurements) observe(ip netip.Addr, rtt time.Duration, err error) {
-	if err != nil || rtt < 0 {
+	if err != nil {
+		// A skipped probe, permission failure or canceled waiter does not
+		// prove that a destination is unreachable. Only an actual network
+		// failure or an attempted probe's timeout can prefer the other family.
+		var networkError net.Error
+		if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) || errors.Is(err, syscall.ETIMEDOUT) ||
+			errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH) {
+			m.mu.Lock()
+			if m.failed == nil {
+				m.failed = make(map[netip.Addr]bool)
+			}
+			m.failed[ip] = true
+			m.mu.Unlock()
+		}
+		return
+	}
+	if rtt < 0 {
 		return
 	}
 	m.mu.Lock()
@@ -46,6 +65,24 @@ func (m *dualStackMeasurements) observe(ip netip.Addr, rtt time.Duration, err er
 		m.rtts[ip] = rtt
 	}
 	m.mu.Unlock()
+}
+
+func (m *dualStackMeasurements) unreachable(query, response *D.Msg) bool {
+	if !speedCheckResponseMatches(query, response) || !answerPolicyCanRewrite(query, response) {
+		return false
+	}
+	candidates := speedCheckCandidates(response, query.Question[0])
+	if len(candidates) == 0 {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, candidate := range candidates {
+		if _, measured := m.rtts[candidate.ip]; measured || !m.failed[candidate.ip] {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *dualStackMeasurements) wrap(probe speedCheckProbe) speedCheckProbe {
@@ -98,6 +135,8 @@ type dualStackDecision struct {
 	pending           <-chan dualStackExchangeResult
 	auxiliary         dualStackExchangeResult
 	ready             bool
+	pool              string
+	otherCached       bool
 }
 
 func (d *dualStackDecision) collect() bool {
@@ -117,24 +156,34 @@ func (d *dualStackDecision) prefer(message *D.Msg, cache bool) (*D.Msg, bool) {
 	}
 	primaryRTT, primaryMeasured := d.primary.fastest(d.query, message)
 	otherRTT, otherMeasured := d.other.fastest(d.otherQuery, d.auxiliary.message)
-	if !primaryMeasured || !otherMeasured || primaryRTT-otherRTT < d.threshold {
+	if !otherMeasured || (!primaryMeasured && !d.primary.unreachable(d.query, message)) ||
+		(primaryMeasured && primaryRTT-otherRTT < d.threshold) {
 		return message, cache
 	}
 	return dualStackNoData(d.query, message), false
 }
 
+func (d *dualStackDecision) answer(ctx context.Context, positive *D.Msg, cache bool) (*D.Msg, bool) {
+	message, cache := d.prefer(positive, cache)
+	selection := &dnsDualStackSelection{positive: positive, measurements: d.primary, pool: d.pool}
+	if d.ready {
+		selection.otherQuery, selection.other, selection.otherMeasurements = d.otherQuery, d.auxiliary, d.other
+		selection.otherCached = d.otherCached
+	}
+	recordDNSDualStackSelection(ctx, message, selection)
+	return message, cache
+}
+
 // ExchangeDualStackWithProbe shares the original query's upstream pool, route
 // and optimization deadline with one auxiliary question. It never calls the
-// resolver recursively, selects a second outbound, or writes an auxiliary cache entry.
+// resolver recursively or selects a second outbound. The owning resolver may
+// commit the selected positive pair, under its ordinary generation/write lock.
 // Existing checker slots bound all probes across both families and callers.
 func (s *directSpeedChecker) ExchangeDualStackWithProbe(ctx context.Context, clients []dnsClient, query *D.Msg, probe speedCheckProbe, config DualStackConfig) (*D.Msg, bool, error) {
 	if query != nil && speedCheckQuestion(query) {
 		clients = s.shareCandidateClients(ctx, clients)
 	}
 	eligible := s != nil && probe != nil && config.Enabled && query != nil && speedCheckQuestion(query)
-	if eligible && query.Question[0].Qtype == D.TypeA && !config.AllowForceAAAA {
-		eligible = false // Preserve IPv4 for applications without IPv6 support.
-	}
 	if route := queryRoute(ctx); route != nil && (route.plan == nil || (route.plan.Type() != C.Direct && route.plan.Type() != C.Compatible)) {
 		eligible = false
 	}
@@ -154,25 +203,39 @@ func (s *directSpeedChecker) ExchangeDualStackWithProbe(ctx context.Context, cli
 	primaryMeasurements := &dualStackMeasurements{rtts: make(map[netip.Addr]time.Duration)}
 	otherMeasurements := &dualStackMeasurements{rtts: make(map[netip.Addr]time.Duration)}
 	otherResult := make(chan dualStackExchangeResult, 1)
-	go func() {
-		// The auxiliary family cannot answer the caller's question. Complete
-		// its bounded comparison for the final cache result, without emitting
-		// an early response or starting a second background continuation.
-		auxiliaryCtx := withDNSEarlyResponse(ctx, nil)
-		auxiliaryCtx = context.WithValue(auxiliaryCtx, dnsResponseModeKey{}, ResponseModeFastestIP)
-		message, cache, err := s.ExchangeWithProbe(context.WithValue(auxiliaryCtx, dnsProbeMeasurementsKey{}, otherMeasurements), clients, other, probe)
-		otherResult <- dualStackExchangeResult{message, cache, err}
-	}()
 	decision := dualStackDecision{
 		query: query, otherQuery: other, primary: primaryMeasurements,
 		other: otherMeasurements, threshold: config.Threshold, pending: otherResult,
+		pool: dnsDualStackPool(clients),
+	}
+	compare := query.Question[0].Qtype == D.TypeAAAA || config.AllowForceAAAA
+	if compare {
+		if cached, measurements, hit := cachedDNSDualStackFamily(ctx, clients, other); hit {
+			decision.auxiliary, decision.other = cached, measurements
+			decision.ready, decision.otherCached = true, true
+		}
+	}
+	// Timer and request-triggered refreshes update only the demanded family.
+	// They may use existing measurements but never generate auxiliary demand.
+	if compare && !decision.ready && !cacheBackground(ctx) {
+		go func() {
+			// The auxiliary family cannot answer the caller's question. Complete
+			// its bounded comparison for the final cache result, without emitting
+			// an early response or starting a second background continuation.
+			auxiliaryCtx := withDNSEarlyResponse(ctx, nil)
+			auxiliaryCtx = context.WithValue(auxiliaryCtx, dnsResponseModeKey{}, ResponseModeFastestIP)
+			message, cache, err := s.ExchangeWithProbe(context.WithValue(auxiliaryCtx, dnsProbeMeasurementsKey{}, otherMeasurements), clients, other, probe)
+			otherResult <- dualStackExchangeResult{message, cache, err}
+		}()
+	} else if !decision.ready {
+		decision.ready = true // no auxiliary exchange to wait for
 	}
 	earlyReturned := false
 	primaryCtx := context.WithValue(ctx, dnsEarlyReturnKey{}, &earlyReturned)
 	deliver, _ := ctx.Value(dnsEarlyResponseKey{}).(dnsEarlyResponse)
 	primaryCtx = withDNSEarlyResponse(primaryCtx, func(message *D.Msg) bool {
 		decision.collect()
-		early, _ := decision.prefer(message, true)
+		early, _ := decision.answer(primaryCtx, message, true)
 		return deliver != nil && deliver(early)
 	})
 	message, cache, err := s.ExchangeWithProbe(context.WithValue(primaryCtx, dnsProbeMeasurementsKey{}, primaryMeasurements), clients, query, probe)
@@ -183,15 +246,17 @@ func (s *directSpeedChecker) ExchangeDualStackWithProbe(ctx context.Context, cli
 		// The caller declined continuation. Use an already completed and
 		// reliably measured other family, but never wait to obtain evidence.
 		decision.collect()
-		message, cache = decision.prefer(message, cache)
+		message, cache = decision.answer(ctx, message, cache)
 		return message, cache, nil
 	}
 	_, primaryMeasured := primaryMeasurements.fastest(query, message)
-	if !primaryMeasured {
+	if !primaryMeasured && !primaryMeasurements.unreachable(query, message) {
+		decision.collect()
+		message, cache = decision.answer(ctx, message, cache)
 		return message, cache, nil // Unknown speed and signed answers are never filtered.
 	}
 	if decision.collect() {
-		message, cache = decision.prefer(message, cache)
+		message, cache = decision.answer(ctx, message, cache)
 		return message, cache, nil
 	}
 	wait := time.NewTimer(time.Until(speedCheckDeadline(ctx, s.timeout)))
@@ -207,6 +272,7 @@ func (s *directSpeedChecker) ExchangeDualStackWithProbe(ctx context.Context, cli
 		case decision.auxiliary = <-otherResult:
 			decision.ready = true
 		default:
+			message, cache = decision.answer(ctx, message, cache)
 			return message, cache, nil
 		}
 	case <-ctx.Done():
@@ -214,10 +280,11 @@ func (s *directSpeedChecker) ExchangeDualStackWithProbe(ctx context.Context, cli
 		case decision.auxiliary = <-otherResult:
 			decision.ready = true
 		default:
+			message, cache = decision.answer(ctx, message, cache)
 			return message, cache, nil
 		}
 	}
-	message, cache = decision.prefer(message, cache)
+	message, cache = decision.answer(ctx, message, cache)
 	return message, cache, nil
 }
 

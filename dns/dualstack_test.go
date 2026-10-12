@@ -159,7 +159,7 @@ func TestDualStackThresholdAndFailurePreservation(t *testing.T) {
 }
 
 func TestDualStackProtectedQuestionsAndDisabledModeDoNotQueryOtherFamily(t *testing.T) {
-	for _, mode := range []string{"disabled", "DO", "CD", "AD", "TSIG", "HTTPS"} {
+	for _, mode := range []string{"disabled", "DO", "CD", "TSIG", "HTTPS"} {
 		t.Run(mode, func(t *testing.T) {
 			query := new(D.Msg).SetQuestion("protected.example.", D.TypeAAAA)
 			switch mode {
@@ -167,8 +167,6 @@ func TestDualStackProtectedQuestionsAndDisabledModeDoNotQueryOtherFamily(t *test
 				query.SetEdns0(1232, true)
 			case "CD":
 				query.CheckingDisabled = true
-			case "AD":
-				query.AuthenticatedData = true
 			case "TSIG":
 				query.SetTsig("key.example.", D.HmacSHA256, 300, time.Now().Unix())
 			case "HTTPS":

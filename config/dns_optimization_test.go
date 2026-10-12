@@ -37,6 +37,9 @@ func TestDNSOptimizationDefaultsAndExplicitValues(t *testing.T) {
 			if got.CacheOptions == nil {
 				t.Fatal("cache options were not wired")
 			}
+			if got.CacheOptions.PrefetchMode != dns.PrefetchModeProactive || got.CacheOptions.ServeExpiredPrefetchTime != 0 {
+				t.Fatalf("default prefetch policy changed: %+v", got.CacheOptions)
+			}
 			if test.explicit {
 				if got.SpeedCheck.MaxReplyIPNum != 4 {
 					t.Fatalf("explicit maximum reply count lost: %d", got.SpeedCheck.MaxReplyIPNum)
@@ -80,6 +83,11 @@ func TestDNSOptimizationRejectsInvalidConfiguration(t *testing.T) {
 		{"serve-expired-reply-ttl: -1", "serve-expired-reply-ttl"},
 		{"serve-expired-reply-ttl: 4294967296", "serve-expired-reply-ttl"},
 		{"cache-max-size: -1", "cache-max-size"},
+		{"prefetch-mode: unknown", "prefetch-mode"},
+		{"prefetch-mode: SMARTDNS", "prefetch-mode"},
+		{"serve-expired-prefetch-time: -1", "serve-expired-prefetch-time"},
+		{"serve-expired-prefetch-time: 2147483648", "serve-expired-prefetch-time"},
+		{"serve-expired-prefetch-time: 30", "requires dns.prefetch-mode: smartdns"},
 	} {
 		t.Run(test.field, func(t *testing.T) {
 			raw, err := UnmarshalRawConfig([]byte("dns:\n  " + test.field + "\n"))
@@ -88,6 +96,39 @@ func TestDNSOptimizationRejectsInvalidConfiguration(t *testing.T) {
 			}
 			if _, err = parseDNS(raw, nil); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("invalid option %q accepted or unclear error: %v", test.field, err)
+			}
+		})
+	}
+}
+
+func TestDNSOptimizationPrefetchTimingModes(t *testing.T) {
+	for _, test := range []struct {
+		name, fields string
+		mode         dns.PrefetchMode
+		period       time.Duration
+		enabled      bool
+	}{
+		{"proactive-enabled", "  prefetch-domain: true\n", dns.PrefetchModeProactive, 0, true},
+		{"proactive-explicit", "  prefetch-domain: true\n  prefetch-mode: proactive\n", dns.PrefetchModeProactive, 0, true},
+		{"smartdns-auto", "  prefetch-domain: true\n  prefetch-mode: smartdns\n  serve-expired-prefetch-time: 0\n", dns.PrefetchModeSmartDNS, 0, true},
+		{"smartdns-one-second", "  prefetch-domain: true\n  prefetch-mode: smartdns\n  serve-expired-prefetch-time: 1\n", dns.PrefetchModeSmartDNS, time.Second, true},
+		{"smartdns-largest", "  prefetch-domain: true\n  prefetch-mode: smartdns\n  serve-expired-prefetch-time: 2147483647\n", dns.PrefetchModeSmartDNS, 2147483647 * time.Second, true},
+		{"mode-does-not-enable-prefetch", "  prefetch-mode: smartdns\n  serve-expired-prefetch-time: 60\n", dns.PrefetchModeSmartDNS, time.Minute, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw, err := UnmarshalRawConfig([]byte("dns:\n  enable: true\n  nameserver: [192.0.2.53]\n" + test.fields))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := parseDNS(raw, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.CacheOptions.PrefetchMode != test.mode || got.CacheOptions.ServeExpiredPrefetchTime != test.period || got.CacheOptions.Prefetch != test.enabled {
+				t.Fatalf("prefetch mode/period was ignored or enabled background work implicitly: %+v", got.CacheOptions)
+			}
+			if !got.CacheOptions.ServeExpired || got.CacheOptions.ServeExpiredTTL != 0 || got.CacheOptions.ServeExpiredReplyTTL != 1 || len(got.SpeedCheck.Mode) != 0 {
+				t.Fatal("selecting a prefetch mode changed independent Mihomo cache/probe defaults")
 			}
 		})
 	}

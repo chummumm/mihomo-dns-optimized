@@ -20,6 +20,10 @@ type (
 )
 
 func withHosts(mapper *ResolverEnhancer) middleware {
+	return withHostsAnswerPolicy(mapper, AnswerPolicy{})
+}
+
+func withHostsAnswerPolicy(mapper *ResolverEnhancer, policy AnswerPolicy) middleware {
 	return func(next handler) handler {
 		return func(ctx *icontext.DNSContext, r *D.Msg) (*D.Msg, error) {
 			q := r.Question[0]
@@ -48,9 +52,19 @@ func withHosts(mapper *ResolverEnhancer) middleware {
 					newR.Question[0].Name = record.Domain + "."
 					resp, err := next(ctx, newR)
 					if err == nil {
+						// A local alias exists even when its terminal target does
+						// not. Keep NXDOMAIN's complete chain so it cannot be
+						// misread as nonexistence of the alias itself. A plain
+						// NODATA answer can omit our alias without dropping any
+						// remote chain or rewriting an authenticated answer.
+						omitAlias := policy.ForceNoCNAME && resp.Rcode == D.RcodeSuccess &&
+							len(resp.Answer) == 0 && dnsMessageIsNegative(resp) && answerPolicyCanRewrite(newR, resp)
+						resp = resp.Copy()
 						resp.Id = r.Id
 						resp.Question = r.Question
-						handleCName(resp, record.Domain)
+						if !omitAlias {
+							handleCName(resp, record.Domain)
+						}
 					}
 					return resp, err
 				}
@@ -97,6 +111,7 @@ func withHosts(mapper *ResolverEnhancer) middleware {
 
 			ctx.SetType(icontext.DNSTypeHost)
 			msg.SetRcode(r, D.RcodeSuccess)
+			msg.AuthenticatedData = false // The query's AD capability does not authenticate our local answer.
 			msg.Authoritative = true
 			msg.RecursionAvailable = true
 			return msg, nil
@@ -201,6 +216,7 @@ func withFakeIP(skipper *fakeip.Skipper, fakePool *fakeip.Pool, fakePool6 *fakei
 			ctx.SetType(icontext.DNSTypeFakeIP)
 			setMsgTTL(msg, uint32(fakeIPTTL))
 			msg.SetRcode(r, D.RcodeSuccess)
+			msg.AuthenticatedData = false
 			msg.Authoritative = true
 			msg.RecursionAvailable = true
 
@@ -278,7 +294,7 @@ func newHandler(resolver resolver.Resolver, mapper *ResolverEnhancer) handler {
 	var middlewares []middleware
 	native, _ := resolver.(*Resolver)
 	if native != nil && !native.bootstrap {
-		if native.answerPolicy.RRTTLReplyMax != 0 || native.answerPolicy.ForceNoCNAME {
+		if native.answerPolicy.RRTTLReplyMax != 0 || native.answerPolicy.ForceNoCNAME || native.answerPolicy.ReplyIPLimit != 0 {
 			middlewares = append(middlewares, withFinalAnswerPolicy(native.answerPolicy))
 		}
 		if native.answerPolicy.ForceAAAASOA {
@@ -287,7 +303,11 @@ func newHandler(resolver resolver.Resolver, mapper *ResolverEnhancer) handler {
 	}
 
 	if mapper.useHosts {
-		middlewares = append(middlewares, withHosts(mapper))
+		policy := AnswerPolicy{}
+		if native != nil && !native.bootstrap {
+			policy = native.answerPolicy
+		}
+		middlewares = append(middlewares, withHostsAnswerPolicy(mapper, policy))
 	}
 
 	// Real hosts keep their explicit answer, as in SmartDNS. A configured query

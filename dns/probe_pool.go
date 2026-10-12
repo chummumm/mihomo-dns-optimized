@@ -14,6 +14,10 @@ import (
 var errDNSProbeBusy = errors.New("DIRECT probe capacity reached")
 var errDNSProbeClosed = errors.New("DIRECT probe pool closed")
 
+// Intentionally does not wrap context.DeadlineExceeded: expired admission is
+// not an attempted network timeout and cannot justify hiding an IP family.
+var errDNSProbeNotStarted = errors.New("DIRECT probe canceled before starting")
+
 type dnsProbeWork func(context.Context) (time.Duration, error)
 type dnsProbeDeliver func(time.Duration, error)
 type dnsProbeSample struct {
@@ -58,8 +62,8 @@ type dnsProbePool struct {
 func newDNSProbePool(workers int, timeout time.Duration) *dnsProbePool {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &dnsProbePool{ctx: ctx, cancel: cancel, workers: workers, timeout: timeout,
-		// This buffer only dispatches already reserved active slots. Admission
-		// never permits a backlog behind the workers' running probes.
+		// Admission is bounded by the fixed workers. A replacement may wait
+		// here only for canceled work to exit and release its actual socket.
 		jobs: make(chan *dnsProbeTask, workers), tasks: make(map[string]*dnsProbeTask), samples: make(map[string]dnsProbeSample)}
 }
 
@@ -143,18 +147,31 @@ func (p *dnsProbePool) submit(ctx context.Context, key string, work dnsProbeWork
 }
 
 func (t *dnsProbeTicket) Release() {
+	t.cancelWaiter()
+}
+
+// Cancel only this query's interest. The last waiter releases admission now,
+// but a replacement task still runs on the same fixed worker set: that worker
+// cannot start another network probe before the canceled probe actually exits.
+func (t *dnsProbeTicket) cancelWaiter() bool {
 	if t == nil {
-		return
+		return false
 	}
 	p := t.pool
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.tasks[t.task.key] == t.task {
+		if _, waiting := t.task.waiters[t.id]; !waiting {
+			return false
+		}
 		delete(t.task.waiters, t.id)
 		if len(t.task.waiters) == 0 {
+			delete(p.tasks, t.task.key)
 			t.task.cancel()
 		}
+		return true
 	}
-	p.mu.Unlock()
+	return false
 }
 
 func (p *dnsProbePool) worker() {
@@ -164,8 +181,8 @@ func (p *dnsProbePool) worker() {
 		case <-p.ctx.Done():
 			return
 		case task := <-p.jobs:
-			rtt, err := time.Duration(0), task.ctx.Err()
-			if err == nil {
+			rtt, err := time.Duration(0), errDNSProbeNotStarted
+			if task.ctx.Err() == nil {
 				rtt, err = task.work(task.ctx)
 			}
 			p.finish(task, rtt, err)

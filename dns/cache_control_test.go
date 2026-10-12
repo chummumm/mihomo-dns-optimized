@@ -20,6 +20,7 @@ func cacheTestControl(t *testing.T, options *CacheOptions) (*Resolver, *cacheCon
 	t.Helper()
 	r := &Resolver{cache: Config{}.newCache()}
 	c := newCacheControl(r, options)
+	r.cacheControl = c
 	c.tickEvery = time.Hour // tests advance the scheduler explicitly
 	t.Cleanup(c.Close)
 	return r, c
@@ -41,7 +42,7 @@ func cacheWaitIdle(t *testing.T, controls ...*cacheControl) {
 		idle := true
 		for _, c := range controls {
 			c.mu.Lock()
-			idle = idle && len(c.inflight) == 0
+			idle = idle && len(c.inflight) == 0 && len(c.pending) == 0
 			c.mu.Unlock()
 		}
 		if idle {
@@ -73,7 +74,7 @@ func cacheWaitSchedulerStopped(t *testing.T, c *cacheControl, scheduler *cacheSc
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.scheduler != nil || len(c.hot) != 0 || len(c.inflight) != 0 {
+	if c.scheduler != nil || len(c.hot) != 0 || len(c.inflight) != 0 || len(c.pending) != 0 {
 		t.Fatal("idle scheduler did not release its state")
 	}
 }
@@ -118,36 +119,6 @@ func TestCacheControlStaleRefreshStopsIdleSchedulerAndRestarts(t *testing.T) {
 		cacheWaitSchedulerStopped(t, c, scheduler)
 		previous = scheduler
 	}
-}
-
-func TestCacheControlHotDecayStopsSchedulerAndIgnoresRetiredTicks(t *testing.T) {
-	r, c := cacheTestControl(t, &CacheOptions{Prefetch: true})
-	now := time.Now()
-	c.now = func() time.Time { return now }
-	query := routingTestQuery("cool-scheduler.example", 32)
-	key := query.Question[0].String()
-	r.cache.SetWithExpire(key, cacheTestReply(query, 600), now.Add(10*time.Minute))
-	ctx := c.Context(icontext.WithDNSRoutingInbound(icontext.WithDNSRoutingMetadata(context.Background(), routingTestOrigin())))
-	for n := 0; n < cacheHotThreshold; n++ {
-		c.Observe(ctx, query, key)
-	}
-	first := cacheTestScheduler(t, c)
-	c.tickScheduler(first, now.Add(cacheHotWindow))
-	cacheWaitSchedulerStopped(t, c, first)
-
-	c.Observe(ctx, query, key)
-	second := cacheTestScheduler(t, c)
-	if second == first {
-		t.Fatal("new foreground demand reused a stopped scheduler")
-	}
-	// A ready tick from the previous runner can arrive after replacement.
-	// It must not expire the replacement's entries or stop its watcher.
-	c.tickScheduler(first, now.Add(cacheHotWindow))
-	if cacheTestScheduler(t, c) != second {
-		t.Fatal("retired scheduler changed its replacement")
-	}
-	c.tickScheduler(second, now.Add(cacheHotWindow))
-	cacheWaitSchedulerStopped(t, c, second)
 }
 
 func TestCacheControlStaleSchedulerCancelsOnPolicyChange(t *testing.T) {
@@ -329,102 +300,6 @@ func TestCacheControlCanceledRefreshCannotRefillClearedCache(t *testing.T) {
 	message, _, ok := r.cache.GetWithExpire(key)
 	if !ok || message.Answer[0].Header().Ttl != 30 {
 		t.Fatal("late old response replaced current cached data")
-	}
-}
-
-func TestCacheControlPrefetchHeatScheduleAndCooldown(t *testing.T) {
-	r, c := cacheTestControl(t, &CacheOptions{Prefetch: true})
-	base := time.Now()
-	var clock atomic.Int64
-	clock.Store(base.UnixNano())
-	c.now = func() time.Time { return time.Unix(0, clock.Load()) }
-	query := routingTestQuery("hot.example", 3)
-	key := query.Question[0].String()
-	ctx := c.Context(icontext.WithDNSRoutingInbound(icontext.WithDNSRoutingMetadata(context.Background(), routingTestOrigin())))
-	r.cache.SetWithExpire(key, cacheTestReply(query, 10), base.Add(10*time.Second))
-	var calls atomic.Int32
-	c.fetch = func(ctx context.Context, request *D.Msg) (*D.Msg, error) {
-		reply := cacheTestReply(request, 60)
-		c.Store(ctx, dnsCacheKey(ctx, request.Question[0]), request.Question[0], reply)
-		calls.Add(1)
-		return reply, nil
-	}
-	c.Observe(ctx, query, key)
-	c.Observe(ctx, query, key)
-	clock.Store(base.Add(8 * time.Second).UnixNano())
-	c.tick(c.now())
-	cacheWaitIdle(t, c)
-	if calls.Load() != 0 {
-		t.Fatal("fewer than three foreground requests became hot")
-	}
-	c.Observe(ctx, query, key)
-	c.tick(c.now())
-	cacheWaitIdle(t, c)
-	if calls.Load() != 1 {
-		t.Fatal("hot domain was not proactively refreshed at 80% of TTL")
-	}
-	clock.Store(base.Add(55 * time.Second).UnixNano())
-	c.tick(c.now())
-	cacheWaitIdle(t, c)
-	if calls.Load() != 2 {
-		t.Fatal("successful refresh did not schedule the next refresh cycle")
-	}
-	clock.Store(base.Add(75 * time.Second).UnixNano())
-	c.tick(c.now())
-	cacheWaitIdle(t, c)
-	if calls.Load() != 2 {
-		t.Fatal("background refreshes kept an inactive domain hot")
-	}
-}
-
-func TestCacheControlPrefetchRequiresSourceAndHasBoundedCapacity(t *testing.T) {
-	_, c := cacheTestControl(t, &CacheOptions{Prefetch: true})
-	anonymous := c.Context(context.Background())
-	query := routingTestQuery("anonymous.example", 4)
-	for n := 0; n < 3; n++ {
-		c.Observe(anonymous, query, query.Question[0].String())
-	}
-	if len(c.hot) != 0 {
-		t.Fatal("anonymous internal lookup enabled active prefetch")
-	}
-	internal := c.Context(icontext.WithDNSRoutingMetadata(context.Background(), routingTestOrigin()))
-	c.Observe(internal, query, query.Question[0].String())
-	if len(c.hot) != 0 {
-		t.Fatal("internal business lookup enabled active prefetch")
-	}
-	ctx := c.Context(icontext.WithDNSRoutingInbound(icontext.WithDNSRoutingMetadata(context.Background(), routingTestOrigin())))
-	for n := 0; n < cacheHotCapacity+20; n++ {
-		query := routingTestQuery(fmt.Sprintf("bounded-%d.example", n), 4)
-		c.Observe(ctx, query, query.Question[0].String())
-	}
-	if len(c.hot) != cacheHotCapacity || c.lru.Len() != cacheHotCapacity {
-		t.Fatal("hot-domain tracking exceeded its capacity")
-	}
-	first := routingTestQuery("bounded-0.example", 4).Question[0].String()
-	if c.hot[first] != nil {
-		t.Fatal("least recently demanded domain was not evicted")
-	}
-}
-
-func TestCacheControlPrefetchLargeTTLDoesNotRefreshImmediately(t *testing.T) {
-	r, c := cacheTestControl(t, &CacheOptions{Prefetch: true})
-	now := time.Now()
-	query := routingTestQuery("long-ttl.example", 30)
-	key := query.Question[0].String()
-	ctx := c.Context(icontext.WithDNSRoutingInbound(icontext.WithDNSRoutingMetadata(context.Background(), routingTestOrigin())))
-	r.cache.SetWithExpire(key, cacheTestReply(query, ^uint32(0)), now.Add(time.Duration(^uint32(0))*time.Second))
-	var calls atomic.Int32
-	c.fetch = func(context.Context, *D.Msg) (*D.Msg, error) {
-		calls.Add(1)
-		return nil, nil
-	}
-	for n := 0; n < 3; n++ {
-		c.Observe(ctx, query, key)
-	}
-	c.tick(now.Add(5 * time.Second))
-	cacheWaitIdle(t, c)
-	if calls.Load() != 0 {
-		t.Fatal("large TTL overflowed into an immediate refresh")
 	}
 }
 

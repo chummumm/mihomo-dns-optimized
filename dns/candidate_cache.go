@@ -62,7 +62,7 @@ func (c *dnsCandidateCache) storeReceived(key string, generation uint64, query, 
 	// Do not replay an upstream's EDNS cookies, ECS metadata or control fields
 	// as another transaction's response. Live answers are returned unchanged;
 	// this optional one-second cache simply declines these messages.
-	if query.IsEdns0() != nil || answer.IsEdns0() != nil || speedCheckProtected(query) || speedCheckProtected(answer) {
+	if query.IsEdns0() != nil || answer.IsEdns0() != nil || speedCheckQueryProtected(query) || speedCheckProtected(answer) {
 		return
 	}
 	ttl := ^uint32(0)

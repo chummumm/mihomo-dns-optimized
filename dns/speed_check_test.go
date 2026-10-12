@@ -244,14 +244,16 @@ func TestSpeedCheckConcurrencySharedAcrossQueries(t *testing.T) {
 }
 
 func TestSpeedCheckFallbackModeGetsTimeAfterBlackhole(t *testing.T) {
-	s, err := newDirectSpeedChecker(SpeedCheckConfig{Mode: []string{"tcp:443", "tcp:80"}, Timeout: 80 * time.Millisecond, Concurrency: 1})
+	s, err := newDirectSpeedChecker(SpeedCheckConfig{Mode: []string{"tcp:443", "tcp:80"}, Timeout: 500 * time.Millisecond, Concurrency: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer s.pool.Close()
+	defer s.candidates.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
 	defer cancel()
 	var called []uint16
-	rtt, err := s.checkIP(ctx, netip.MustParseAddr("192.0.2.1"), func(ctx context.Context, _ netip.Addr, mode speedCheckMode) (time.Duration, error) {
+	s.probe = func(ctx context.Context, _ netip.Addr, mode speedCheckMode) (time.Duration, error) {
 		called = append(called, mode.port)
 		if mode.port == 443 {
 			<-ctx.Done()
@@ -261,14 +263,19 @@ func TestSpeedCheckFallbackModeGetsTimeAfterBlackhole(t *testing.T) {
 			return 0, ctx.Err()
 		}
 		return time.Millisecond, nil
-	})
-	if err != nil || rtt != time.Millisecond || !reflect.DeepEqual(called, []uint16{443, 80}) {
-		t.Fatalf("fallback mode was starved: %v %v %v", called, rtt, err)
+	}
+	query := new(D.Msg).SetQuestion("fallback-mode.example.", D.TypeA)
+	answer := speedCheckTestReply(t, query, "fallback-mode.example. 60 IN A 192.0.2.1")
+	started := time.Now()
+	got, _, err := s.Exchange(ctx, []dnsClient{speedCheckTestClient{message: answer}}, query)
+	if elapsed := time.Since(started); err != nil || !speedCheckTestEqual(got, answer) ||
+		!reflect.DeepEqual(called, []uint16{443, 80}) || elapsed < 70*time.Millisecond || elapsed > 400*time.Millisecond {
+		t.Fatalf("fallback mode was starved or started before its stage: %v %v %v %v", called, got, err, elapsed)
 	}
 }
 
 func TestSpeedCheckPreservesDNSSECAndNonAddressQuestions(t *testing.T) {
-	for _, name := range []string{"DO", "CD", "AD", "TSIG", "HTTPS"} {
+	for _, name := range []string{"DO", "CD", "TSIG", "HTTPS"} {
 		t.Run(name, func(t *testing.T) {
 			query := new(D.Msg).SetQuestion("example.", D.TypeA)
 			switch name {
@@ -276,8 +283,6 @@ func TestSpeedCheckPreservesDNSSECAndNonAddressQuestions(t *testing.T) {
 				query.SetEdns0(1232, true)
 			case "CD":
 				query.CheckingDisabled = true
-			case "AD":
-				query.AuthenticatedData = true
 			case "TSIG":
 				query.SetTsig("key.", D.HmacSHA256, 300, time.Now().Unix())
 			case "HTTPS":

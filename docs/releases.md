@@ -2,6 +2,26 @@
 
 项目使用独立版本 **`mihomo-optimized-vX.Y.Z`**，首版为 `mihomo-optimized-v1.0.0`。`main` 的源码、依赖或构建配置变更在全部测试和完整编译成功后生成固定提交的 GitHub Release。Latest 仅在该构建仍对应当前 `main` 时更新；PR 只做合并前检查，不生成正式发布包。纯文档变更不消耗版本号，也不触发自动发布。
 
+## 1.0.12：DIRECT 预取、真实 TCP SYN 与 SmartDNS 行为补齐
+
+定时预取严格限于实际 DIRECT / Compatible 的自动 DNS 上游池，执行前重新检查来源、当前规则和出口；切到代理、拒绝或其他缓存作用域后，旧候选不再继续查询。客户端命中过期缓存触发的按需刷新仍保留原有代理等路径行为。测速、双栈优选、预取及各 TTL 默认值不变，未配置这些功能时保持 Mihomo 原有工作方式。
+
+`prefetch-domain: true` 默认采用新的 `prefetch-mode: proactive`：首次真实成功查询就激活，按剩余 TTL 约 80% 刷新，不再要求一分钟内三次请求，也不再因一分钟无访问而提前失效。真实需求补充有限热度，后台自身不补热；没有新需求时最多两次定时尝试，失败使用有限退避。候选使用 16 MiB / resolver 的记账预算，取代固定 1024 项；所有 resolver 共用 16 个活动刷新槽位，过期命中的按需刷新优先并使用有限队列。可选 `prefetch-mode: smartdns` 和 `serve-expired-prefetch-time` 提供上游式计时，但保留 DIRECT、有限热度与资源边界。完整规则见[缓存与预取](dns-proxy.md#缓存预取与过期回答)。
+
+新增 Linux 真实 `tcp-syn` / `tcp-syn:端口`，发送 SYN 并匹配 SYN-ACK 或 RST-ACK，不完成应用连接；支持 IPv4 / IPv6，继承 DIRECT 的接口和 mark，需要原始套接字权限。非支持平台显式配置报错；运行时不可用按测法失败处理，保留其他测法和有效 DNS 答案兜底。普通 TCP connect 的连接拒绝也计为可达 RTT。多种测法按约 100 毫秒逐步推进，共用实际探测并发上限；默认总等待预算保持不变。
+
+双栈优选分别缓存两族成功的正常答案和有界测量信息，优先复用有效另一族缓存；后台刷新不额外补查另一族。临时 SOA 只用于当次答复，不覆盖正向答案。当前族所有有效候选有实际网络不可达或探测超时证据、另一族可达时可以暂时偏向可达族；取消、未发起探测、资源或权限不足不冒充网络失败。缓存过期、清理、替换和来源 / 出口变化都会使旧比较证据失效。
+
+其他对齐与修复：
+
+- `max-reply-ip-num` 显式设置后，也限制未测速或非 DIRECT 的普通 A/AAAA 和静态 hosts；未配置且未启用优选时不裁剪原答复。测速全部失败时，可采用同一路径多个独立有效上游的重复地址兜底；没有共识则保留首个有效回答，不制造 RTT。
+- `first-ping` / `fastest-response` 取得后台名额并提前发布普通正向答案时，客户端 TTL 上限为 3 秒，内部缓存仍保留完整寿命。实际剩余 TTL 和 `rr-ttl-reply-max` 仍可进一步限制。
+- 查询中的 AD 能力标志不再误阻止未签名答案优化；真实认证和签名回答继续保护，本地 hosts / FakeIP 合成不冒充认证答案。
+- 专用 `force-AAAA-SOA` 同步去除可重写 HTTPS 答案的 `ipv6hint` 和对应 `mandatory` 项；通用 qtype 28 过滤不隐含此行为。
+- 负缓存遵守 SOA 头部 TTL、SOA.MINIMUM 和 CNAME 链的最短期限；本地别名 NODATA 的 CNAME 可以按安全条件隐藏，NXDOMAIN 和远端别名链保留完整身份。
+
+配置大小写继续严格使用 `force-no-CNAME`、`force-AAAA-SOA`、`force-qtype-SOA`、`dualstack-ip-allow-force-AAAA`，不增加小写别名。SmartDNS 对齐范围及明确保留的差异见[迁移对照](smartdns-migration.md)。CI 增加隔离网络环境下必须通过的 IPv4 / IPv6 真实 SYN 收发验证；仍采用 PR 代表平台编译、main 完整打包一次、发布复用产物的流程。本次只更新内核，面板继续为 `0.4.8`。
+
 ## 1.0.11：SmartDNS 多地址与配置对齐、DIRECT 固定目标、发布构建去重
 
 DIRECT DNS 优选不再固定缩为一个 IPv4 / IPv6。按 SmartDNS 当前源码的接近最快条件筛选，并将完整 CNAME 路径一致的多个上游答案合并、去重、按 RTT 排序；默认最多返回 8 个，新增 `max-reply-ip-num` 可设置上限。不同 CNAME 路径、受保护的 DNSSEC 数据不混合；重复地址和链采用保守 TTL，已有缓存隔离和 256 候选探测上限继续生效。`first-ping` 的首次答复可能只有一个，后台完成及缓存可以含多个；`fastest-ip` 返回本轮比较出的多个合格地址。数量设置只作用于 DIRECT 优选路径，不保证每次凑满。
