@@ -16,6 +16,9 @@ func validateTCPSYNPlatform() error {
 	return fmt.Errorf("dns.speed-check-mode: tcp-syn requires Linux raw TCP sockets; %s is unsupported (use tcp:<port>)", runtime.GOOS)
 }
 
-func probeTCPSYN(context.Context, netip.Addr, uint16, ...dialer.Option) (time.Duration, error) {
-	return 0, validateTCPSYNPlatform()
+func probeTCPSYN(ctx context.Context, _ netip.Addr, _ uint16, _ ...dialer.Option) (time.Duration, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	return 0, fmt.Errorf("%w: %w", errTCPSYNUnavailable, validateTCPSYNPlatform())
 }

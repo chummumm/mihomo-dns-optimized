@@ -68,7 +68,7 @@ func TestDNSResponseModeConfigurationAndDefault(t *testing.T) {
 	if ValidateResponseMode("first-response") == nil {
 		t.Fatal("unknown mode accepted")
 	}
-	if err := ValidateSpeedCheckConfig(SpeedCheckConfig{Mode: []string{"none"}, ResponseMode: "bogus"}); err == nil {
+	if err := ValidateSpeedCheckConfig(SpeedCheckConfig{Mode: []string{}, ResponseMode: "bogus"}); err == nil {
 		t.Fatal("disabled probes hid invalid response mode")
 	}
 }

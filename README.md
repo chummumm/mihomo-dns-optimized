@@ -2,7 +2,7 @@
 
 基于 [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) 稳定版维护的独立派生内核，让 DNS 查询直接复用已有业务分流规则。**不需要 SmartDNS，也不需要再维护一份 DNS 域名策略。** 本项目不是 MetaCubeX 官方发行版。
 
-**原生 DNS 上游支持 UDP、TCP、DoH、DoT、DoQ 和 DoH 的 HTTP/3。IP 测速与双栈优选只用于实际 DIRECT / Compatible 路径，走代理节点的 DNS 回答不测速。** 测速、双栈优选与主动预取默认关闭，可以按需开启。
+**原生 DNS 上游支持 UDP、TCP、DoH、DoT、DoQ 和 DoH 的 HTTP/3。IP 测速与双栈优选只用于实际 DIRECT / Compatible 路径，走代理节点的 DNS 回答不测速。** `speed-check-mode` 缺省使用 `auto`，在开启 DNS 自动选路且符合直连自动上游池条件时测速；双栈优选与主动预取默认关闭。
 
 [下载 Releases](https://github.com/chummumm/mihomo-optimized/releases) · [构建状态](https://github.com/chummumm/mihomo-optimized/actions/workflows/build.yml) · [完整配置说明](docs/dns-proxy.md) · [验证记录](docs/dns-rule-routing-validation.md)
 
@@ -39,7 +39,7 @@ UDP、TCP 和 DoT 上游在实际出口固定时共享连接，多个查询通�
 
 新增的 DNS 面板数据由本机控制器提供，查询记录、趋势和上游统计只保存在进程内存中，不写数据库或日志文件，也不发送遥测。无需维护第二份分流规则；观测不会改变 DNS 回答和出口选择。优化范围、缓存安全边界及测试方式见 [DNS 性能说明](docs/dns-performance.md)。
 
-正式版本采用 **`mihomo-optimized-vX.Y.Z`**，当前为 `mihomo-optimized-v1.0.11`。tag、发行标题、`version.txt` 和运行内核版本一致；`PROJECT_VERSION` 记录独立项目版本，上游 mihomo 的版本与提交另存于 `UPSTREAM_VERSION` / `UPSTREAM_COMMIT`。源码哈希保留在 BUILDINFO 中。**旧版 `v1.19.32-optimized-N` 及更早内核首次切换到新系列，需要手动安装一次**；新系列随后可通过 YAML 启用内核后台检查和更新，详见[更新说明](docs/releases.md#内核自动更新)。
+正式版本采用 **`mihomo-optimized-vX.Y.Z`**，当前为 `mihomo-optimized-v1.0.13`。tag、发行标题、`version.txt` 和运行内核版本一致；`PROJECT_VERSION` 记录独立项目版本，上游 mihomo 的版本与提交另存于 `UPSTREAM_VERSION` / `UPSTREAM_COMMIT`。源码哈希保留在 BUILDINFO 中。**旧版 `v1.19.32-optimized-N` 及更早内核首次切换到新系列，需要手动安装一次**；新系列随后可通过 YAML 启用内核后台检查和更新，详见[更新说明](docs/releases.md#内核自动更新)。
 
 ## DNS 状态与原版面板
 
@@ -138,7 +138,7 @@ geo-update-interval: 24 # 整数小时，默认 24，范围 1..2562047
 
 ## Linux 透明代理与自动路由恢复
 
-从内核 `1.0.6` 起，新增默认关闭的顶层 `transparent-proxy`。TCP、UDP 可分别选择 `tproxy`、`tun` 或 `"off"`；`1.0.7` 另支持 TCP `redir`。内核维护 IPv4 / IPv6 捕获、fwmark 规则、路由与动态接口前缀。以下示例对应 **TCP 走 TProxy、UDP 走 TUN**，沿用已有 DNS、节点与业务规则：
+从内核 `1.0.6` 起，新增默认关闭的顶层 `transparent-proxy`。TCP、UDP 可分别选择 `tproxy`、`tun`；`1.0.7` 另支持 TCP `redir`。从 `1.0.13` 起，某个协议字段显式留空、设为 `null` 或 `""` 时关闭该协议的捕获，旧 `"off"` 写法不再接受；省略字段仍采用 TCP `tproxy` / UDP `tun` 默认值。内核维护 IPv4 / IPv6 捕获、fwmark 规则、路由与动态接口前缀。以下示例对应 **TCP 走 TProxy、UDP 走 TUN**，沿用已有 DNS、节点与业务规则：
 
 ```yaml
 ipv6: true
@@ -231,7 +231,7 @@ chmod +x ./mihomo-optimized
 
 ### 完整配置示例
 
-下面列全本项目新增或调整的主要可配置项，并包含运行所需的基础设置。此例显式开启自动更新、DIRECT 测速、双栈优选与预取；它们的默认值及关闭方式见后面的字段表。直连池使用普通 DNS，代理池使用 Cloudflare DoH，请按网络可达性调整。`代理出口` 暂只含 DIRECT 占位项，**加入自己的节点后才会真正走代理**；接入已有配置时保留原节点和策略组，将字段并入现有 YAML，不要重复新增第二个 `dns:` 块。
+下面列全本项目新增或调整的主要可配置项，并包含运行所需的基础设置。此例显式开启自动更新、DNS 自动选路、双栈优选与预取，并使用默认的 DIRECT 自动测速策略；默认值及关闭方式见后面的字段表。直连池使用普通 DNS，代理池使用 Cloudflare DoH，请按网络可达性调整。`代理出口` 暂只含 DIRECT 占位项，**加入自己的节点后才会真正走代理**；接入已有配置时保留原节点和策略组，将字段并入现有 YAML，不要重复新增第二个 `dns:` 块。
 
 ```yaml
 mode: rule
@@ -269,8 +269,8 @@ dns:
     - https://cloudflare-dns.com/dns-query
     - https://1.1.1.1/dns-query
 
-  # 可选：这里显式开启；仅实际 DIRECT 优选 IP 与双栈。
-  speed-check-mode: [tcp:443, tcp:80, ping]
+  # 省略同样使用 auto；仅实际 DIRECT 的自动上游池优选 IP。
+  speed-check-mode: auto  # 自动选择 443、80、ping；写空值或 [] 关闭。
   response-mode: first-ping
   speed-check-timeout: 1000
   speed-check-concurrency: 16
@@ -280,8 +280,7 @@ dns:
   dualstack-ip-allow-force-AAAA: false
 
   # 缓存和预取；以下 TTL 均为秒。
-  prefetch-domain: true
-  prefetch-mode: proactive  # 只对实际 DIRECT 定时预取；本项不会单独开启预取。
+  prefetch-domain: true  # 只对实际 DIRECT 定时预取，按剩余 TTL 约 80% 提前刷新。
   serve-expired: true
   serve-expired-ttl: 604800
   serve-expired-reply-ttl: 1
@@ -340,10 +339,13 @@ FakeIP 的 IPv6 与 HTTPS / SVCB 处理也保持原行为：应使用虚拟地�
 
 - 仅内置 DNS 已选 DIRECT / Compatible、所选上游集合全部支持自动传输的 A / AAAA 查询参与；代理路径不参与。原生 DoH / DoT / DoQ 及自定义端口同样按实际出口判定。
 - 显式 DNS 出口等传输例外不做本地测速；有效缓存命中直接返回，不为这次命中重复探测。
+- `speed-check-mode` 省略或设为 `auto` / `[auto]` 时，按 443、80、ping 的顺序调度。TCP 项优先使用真实 SYN 的 RTT；只有发包前确认平台、原始套接字能力或权限不支持时才改用普通 TCP。SYN 已发出后的超时、网络错误、取消，以及资源不足，都不会触发第二次 TCP 探测。自动选择沿用同一个期限、并发名额和直连出口。
 - TCP connect 测连接响应，连接拒绝也可提供 RTT；Linux 的 `tcp-syn` 使用真实 SYN / SYN-ACK 或 RST-ACK，不完成应用连接，需要原始套接字权限；ping 测 ICMP 往返。探测继承所选直连出口的接口 / mark，不重新匹配规则。多种测法按 100 毫秒间隔逐步启动，所有实际探测共用并发上限。
 - 按实测 RTT 排序并保留接近最快的地址，默认最多 8 个；允许合并完整 CNAME 路径一致的上游答案，不混合不同路径。重复地址去重并取保守 TTL；DNSSEC 等保护场景不改写。全部探测失败时，优先使用同一路径多个有效上游重复返回的地址；无共识时保留首个有效回答顺序，并执行数量上限，不制造 RTT。
 
 测速不代表下载带宽，也不保证所有域名都更快。预取和过期缓存刷新属于新的查询，满足条件时可以重新优选。
+
+从 `1.0.13` 起，省略 `speed-check-mode` 表示自动策略；写了该字段但留空、设为 `null`、`""` 或 `[]` 都表示关闭。已经开启 `dns-rule-routing` 且希望继续关闭 IP 测速时，应显式填写其中一种空值。旧 `none` 写法不再接受。`auto` 可跨平台使用且必须独占，不能与其他测法混用；已有显式 `tcp`、`tcp-syn`、`ping` 列表保持原含义。顶层 `dns-rule-routing` 默认仍为 `false`，自动策略不会自行打开 DNS 选路。
 
 开启测速后，可用 `response-mode` 选择首次回答的时机。默认 `first-ping` 在候选 IP 首次探测成功后回答；`fastest-ip` 在本轮预算内充分比较候选；`fastest-response` 在首个通过当前策略检查的 DNS 回答到达时回答，不等待 IP 探测。提前回答后，剩余比较仅在有后台名额时继续，沿用本轮期限，结果可以更新缓存；这种提前发布的普通正向答案交给客户端时 TTL 最多 3 秒，内部缓存保留完整有效期。缓存命中直接回答，代理路径和关闭测速的配置保持原解析行为。具体边界见[响应模式](docs/dns-proxy.md#响应模式)。
 
@@ -368,7 +370,7 @@ FakeIP 的 IPv6 与 HTTPS / SVCB 处理也保持原行为：应使用虚拟地�
 
 | 测速字段 | 默认值 | 含义与单位 |
 | --- | --- | --- |
-| `speed-check-mode` | 空 / `[none]` | 关闭；最多 4 个不同测法：`tcp:端口`、`tcp-syn:端口`、`ping`；裸 `tcp` / `tcp-syn` 使用 80 端口；`none` 不能混用 |
+| `speed-check-mode` | `auto` | 省略、`auto`、`[auto]` 等价；自动依次选择 443、80、ping，TCP 项按能力选 SYN 或 connect；`auto` 必须独占。字段存在但为空、`null`、`""` 或 `[]` 时关闭；不接受旧 `none`。显式列表最多 4 个不同测法：`tcp:端口`、`tcp-syn:端口`、`ping`，裸 TCP 模式使用 80 端口 |
 | `response-mode` | `first-ping` | 开启测速时的首次回答策略；可选 `first-ping`、`fastest-ip`、`fastest-response` |
 | `speed-check-timeout` | 0 → 1000 | 毫秒；显式范围 1–5000，只限制本轮可选优选等待；无有效答复时，已发出的 DNS 继续使用正常解析期限 |
 | `speed-check-concurrency` | 0 → 16 | 最大 256；限制所有实际活动探测，不限制 DNS 上游请求；新测法满额时释放本轮旧阶段占用后尝试，不无限排队；每轮最多 256 个候选 IP |
@@ -377,20 +379,20 @@ FakeIP 的 IPv6 与 HTTPS / SVCB 处理也保持原行为：应使用虚拟地�
 | `dualstack-ip-selection-threshold` | 10 | 毫秒；0–1000，另一族至少快多少才过滤当前族 |
 | `dualstack-ip-allow-force-AAAA` | `false` | 是否允许反向过滤 A、只保留更快的 IPv6；默认保留 IPv4 |
 
-关闭测速可用 `speed-check-mode: [none]`；双栈优选还要求全局 `ipv6` 和 `dns.ipv6` 同时开启，任一 IPv6 开关关闭时不会进行双栈筛选。只想停止双栈优选可设 `dualstack-ip-selection: false`，保留原单族测速。
+关闭测速可用 `speed-check-mode: []` 或只写 `speed-check-mode:` 而不填写值；省略整个字段会恢复自动策略。双栈优选还要求全局 `ipv6` 和 `dns.ipv6` 同时开启，任一 IPv6 开关关闭时不会进行双栈筛选。只想停止双栈优选可设 `dualstack-ip-selection: false`，保留原单族测速。
 
 | 缓存字段 | 默认值 | 含义与单位 |
 | --- | --- | --- |
 | `prefetch-domain` | `false` | 只为实际 DIRECT / Compatible 的真实 DNS 来源定时预取 |
-| `prefetch-mode` | `proactive` | 按剩余 TTL 约 80% 刷新；`smartdns` 选择上游式计时规则，本项不单独开启预取 |
-| `serve-expired-prefetch-time` | 0 | 秒，0–2147483647；0 自动推导；非零只可配合 `prefetch-mode: smartdns` |
 | `serve-expired` | `true` | 允许返回过期缓存并触发有界后台更新 |
 | `serve-expired-ttl` | 0 | 秒；0 不限过期年龄，保留上游缺省行为；604800 表示最多过期 7 天 |
 | `serve-expired-reply-ttl` | 1 | 秒；过期回答交给客户端的 TTL，允许 0，不延长原记录过期时间 |
 
 `prefetch-domain: false` 关闭主动预取，`serve-expired: false` 停止返回过期缓存；正常未过期缓存仍可使用。这两个开关互不替代。
 
-第一次真实查询成功写入缓存即可激活预取，缓存命中补充热度但不延后已有刷新时间；不再受一分钟活跃窗口限制。没有新需求时最多两次定时尝试，后台自身不增加热度。每个 resolver 使用 16 MiB 候选记账预算，普通短查询通常约 1.2 万至 1.6 万项；所有 resolver 共用 16 个活动后台刷新任务。过期缓存命中触发的按需刷新优先调度，仍保留代理等原有出口行为。计时兼容模式、有限队列和切组边界见[缓存与预取](docs/dns-proxy.md#缓存预取与过期回答)。
+从 `1.0.13` 起移除 `prefetch-mode` 和仅服务于旧可选模式的 `serve-expired-prefetch-time`。旧配置包含这两个字段时会明确提示迁移，删除它们即可使用统一的提前刷新策略；预取仍由 `prefetch-domain` 开关控制。
+
+第一次真实查询成功写入缓存即可激活预取，按剩余 TTL 约 80% 提前刷新；缓存命中补充热度但不延后已有刷新时间，不再受一分钟活跃窗口限制。没有新需求时最多两次定时尝试，后台自身不增加热度。每个 resolver 使用 16 MiB 候选记账预算，普通短查询通常约 1.2 万至 1.6 万项；所有 resolver 共用 16 个活动后台刷新任务。过期缓存命中触发的按需刷新优先调度，仍保留代理等原有出口行为。计时规则、有限队列和切组边界见[缓存与预取](docs/dns-proxy.md#缓存预取与过期回答)。
 
 满足自动选路条件的正式答案缓存和预取热度可跨临时来源端口复用；在途查询合并仍按来源端口隔离。原有 `cache-algorithm` / `cache-max-size` 仍可使用，不承诺未经实测的命中率提升。
 

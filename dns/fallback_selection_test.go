@@ -153,7 +153,7 @@ func TestDNSFallbackFiltersCompleteAnswerBeforeSelection(t *testing.T) {
 					netip.MustParseAddr("198.51.100.6"): true,
 				}}
 				if !speed {
-					config.SpeedCheck.Mode = []string{"none"}
+					config.SpeedCheck.Mode = []string{}
 				}
 				rs := NewResolver(config)
 				defer rs.Close()

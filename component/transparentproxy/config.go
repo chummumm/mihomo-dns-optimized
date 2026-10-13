@@ -12,7 +12,7 @@ import (
 type Mode string
 
 const (
-	ModeOff    Mode = "off"
+	ModeOff    Mode = ""
 	ModeTProxy Mode = "tproxy"
 	ModeTUN    Mode = "tun"
 	ModeRedir  Mode = "redir"
@@ -102,11 +102,14 @@ func (c Config) Validate() error {
 		name string
 		mode Mode
 	}{{"tcp", c.TCP}, {"udp", c.UDP}} {
+		if strings.EqualFold(string(entry.mode), "off") {
+			return fmt.Errorf("transparent-proxy.%s no longer accepts off; use an empty value to disable", entry.name)
+		}
 		if entry.mode != ModeOff && entry.mode != ModeTProxy && entry.mode != ModeTUN && (entry.name != "tcp" || entry.mode != ModeRedir) {
 			if entry.name == "tcp" {
-				return fmt.Errorf("transparent-proxy.tcp must be tproxy, tun, redir or off")
+				return fmt.Errorf("transparent-proxy.tcp must be tproxy, tun, redir or empty to disable")
 			}
-			return fmt.Errorf("transparent-proxy.udp must be tproxy, tun or off; redir only supports TCP")
+			return fmt.Errorf("transparent-proxy.udp must be tproxy, tun or empty to disable; redir only supports TCP")
 		}
 	}
 	for _, entry := range []struct {
@@ -184,13 +187,33 @@ func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 	if err := node.Decode(&value); err != nil {
 		return err
 	}
+	// Null scalar values bypass Mode.UnmarshalYAML, so clear only explicitly
+	// empty protocols after applying defaults. ShortTag also resolves aliases.
+	for i := 0; i < len(node.Content); i += 2 {
+		if node.Content[i+1].ShortTag() != "!!null" {
+			continue
+		}
+		switch node.Content[i].Value {
+		case "tcp":
+			value.TCP = ModeOff
+		case "udp":
+			value.UDP = ModeOff
+		}
+	}
 	*c = Config(value)
 	return c.Validate()
 }
 
+func (c *Config) UnmarshalJSON(data []byte) error {
+	return yaml.Unmarshal(data, c)
+}
+
 func (m *Mode) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind != yaml.ScalarNode || node.Tag != "!!str" {
-		return fmt.Errorf("transparent-proxy backend must be tproxy, tun, redir (TCP only) or quoted off")
+		return fmt.Errorf("transparent-proxy backend must be tproxy, tun, redir (TCP only) or empty to disable")
+	}
+	if strings.EqualFold(node.Value, "off") {
+		return fmt.Errorf("transparent-proxy backend no longer accepts off; use an empty value to disable")
 	}
 	*m = Mode(node.Value)
 	if *m != ModeOff && *m != ModeTProxy && *m != ModeTUN && *m != ModeRedir {

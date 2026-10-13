@@ -2,7 +2,7 @@
 
 从 **`mihomo-optimized-v1.0.6`** 起，Linux 可通过顶层 `transparent-proxy` 分别选择 TCP / UDP 入口，由内核管理对应 nftables 捕获、策略规则和路由，并通过系统事件恢复缺失的自有资源。默认关闭；旧版本不识别此配置。后端选择不改变 mihomo 的业务分流规则。
 
-`1.0.7` 增加 TCP `redir`、按协议划分的 `bypass-ports`、默认 `mihomo` 用户旁路，并收紧 RA 事件合并和原生 TUN 的 DNS 连接重置条件。下面采用新格式。
+`1.0.7` 增加 TCP `redir`、按协议划分的 `bypass-ports`、默认 `mihomo` 用户旁路，并收紧 RA 事件合并和原生 TUN 的 DNS 连接重置条件。`1.0.13` 统一使用显式空值关闭某个协议的捕获，不再接受旧 `"off"`。下面采用新格式。
 
 ## YAML 入口
 
@@ -21,8 +21,8 @@ tun:
 
 transparent-proxy:
   enable: true
-  tcp: tproxy # tproxy | tun | redir | "off"
-  udp: tun   # tproxy | tun | "off"
+  tcp: tproxy # tproxy | tun | redir；留空 / null / "" 关闭。
+  udp: tun   # tproxy | tun；留空 / null / "" 关闭。
 
   routing:
     tproxy:
@@ -66,15 +66,26 @@ TProxy 与 TUN 各自使用 **`priority` 的查表规则和 `priority + 1` 的�
 
 标记应非零且互不相同，不能与内核出站防环标记冲突。路由表不能使用系统保留表，两个后端不能把不同默认路由写入同一张表。优先级、表和标记的冲突须在启用捕获前明确报告，不自动删除其他软件的规则，也不静默更改用户指定值。
 
-两个协议独立选后端，共用某后端时只创建一份路由资源；无人使用的后端不创建资源。`"off"` 表示本模块不捕获该协议，包括该协议的 FakeIP 流量，不代表在 mihomo 规则中选择 DIRECT。TCP / UDP 的入口选择不改变后续业务规则的出站选择。
+两个协议独立选后端，共用某后端时只创建一份路由资源；无人使用的后端不创建资源。显式空值表示本模块不捕获该协议，包括该协议的 FakeIP 流量，不代表在 mihomo 规则中选择 DIRECT。TCP / UDP 的入口选择不改变后续业务规则的出站选择。
+
+例如保留 TCP TProxy，关闭 UDP 捕获：
+
+```yaml
+transparent-proxy:
+  enable: true
+  tcp: tproxy
+  udp:
+```
+
+`udp: null` 或 `udp: ""` 与上面的空值等价；TCP 同理。**省略字段会使用默认后端，并非关闭。** `1.0.13` 不再接受 `"off"`，升级时应将这类旧值改为空值；整个模块仍由 `enable: false` 关闭。
 
 ### 默认值与必要条件
 
 | 配置 | 默认值 / 约束 |
 | --- | --- |
 | `enable` | `false`；仅 Linux 可启用 |
-| `tcp` | `tproxy`；支持 `tproxy`、`tun`、`redir`、`"off"` |
-| `udp` | `tun`；支持 `tproxy`、`tun`、`"off"` |
+| `tcp` | 省略时 `tproxy`；支持 `tproxy`、`tun`、`redir`；显式空值、`null` 或 `""` 关闭 |
+| `udp` | 省略时 `tun`；支持 `tproxy`、`tun`；显式空值、`null` 或 `""` 关闭 |
 | `routing.tproxy` | mark `0x1`、table `100`、priority `1000`（同时占用 `1001`） |
 | `routing.tun` | mark `0x162`、table `101`、priority `1010`（同时占用 `1011`） |
 | `local.enable` / `local.interfaces` | `true` / `[auto]`；`auto` 按地址族选择当前出口，`["*"]` 表示全部接口，空列表不接管本机流量 |
@@ -161,7 +172,7 @@ flowchart TD
 [Transparent Proxy] Network synchronization restored; applied backend availability: TCP=tproxy (IPv4=ready, IPv6=ready); UDP=tun (IPv4=ready, IPv6=protected)
 ```
 
-这里记录本次已应用的后端状态：`ready` 表示对应协议 / 地址族的后端就绪，不包含 WAN 连通性探测；`protected` 表示仍通过保护规则阻断，可能因后端尚未就绪或正在进行受控重启；`disabled` 表示配置或地址族停用，协议为 `off` 则显示 `off`。因此核对恢复可以与部分流量仍受保护同时发生。普通 RA 和后续健康核对保持静默，不重复输出恢复日志。
+这里记录本次已应用的后端状态：`ready` 表示对应协议 / 地址族的后端就绪，不包含 WAN 连通性探测；`protected` 表示仍通过保护规则阻断，可能因后端尚未就绪或正在进行受控重启；`disabled` 表示配置或地址族停用，某协议的捕获被显式空值关闭时，其状态仍显示 `off`。`off` 在这里是运行状态标签，不是 `1.0.13` 的配置值。因此核对恢复可以与部分流量仍受保护同时发生。普通 RA 和后续健康核对保持静默，不重复输出恢复日志。
 
 ### 复用范围与需要补齐的底层能力
 

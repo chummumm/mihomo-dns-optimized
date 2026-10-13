@@ -191,7 +191,7 @@ func TestCacheControlPrefetchOnlyCacheableSuccessActivates(t *testing.T) {
 	}
 }
 
-func TestCacheControlPrefetchSmartDNSTimingModes(t *testing.T) {
+func TestCacheControlPrefetchTimingDoesNotDependOnStaleRetention(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		options CacheOptions
@@ -199,12 +199,12 @@ func TestCacheControlPrefetchSmartDNSTimingModes(t *testing.T) {
 		first   time.Duration
 		next    time.Duration
 	}{
-		{"proactive", CacheOptions{Prefetch: true}, 300 * time.Second, 240 * time.Second, 240 * time.Second},
-		{"smartdns-fresh", CacheOptions{Prefetch: true, PrefetchMode: PrefetchModeSmartDNS}, 300 * time.Second, 297 * time.Second, 297 * time.Second},
-		{"smartdns-short-ttl", CacheOptions{Prefetch: true, PrefetchMode: PrefetchModeSmartDNS}, 2 * time.Second, time.Second, time.Second},
-		{"smartdns-default-expired", CacheOptions{Prefetch: true, PrefetchMode: PrefetchModeSmartDNS, ServeExpired: true}, 300 * time.Second, 8*time.Hour + 300*time.Second, 8 * time.Hour},
-		{"smartdns-half-retention", CacheOptions{Prefetch: true, PrefetchMode: PrefetchModeSmartDNS, ServeExpired: true, ServeExpiredTTL: 4 * time.Hour}, time.Hour, 3 * time.Hour, 2 * time.Hour},
-		{"smartdns-explicit-period", CacheOptions{Prefetch: true, PrefetchMode: PrefetchModeSmartDNS, ServeExpired: true, ServeExpiredPrefetchTime: time.Minute}, 300 * time.Second, 360 * time.Second, time.Minute},
+		{"stale-disabled", CacheOptions{Prefetch: true}, 300 * time.Second, 240 * time.Second, 240 * time.Second},
+		{"stale-disabled-with-retention", CacheOptions{Prefetch: true, ServeExpiredTTL: 24 * time.Hour}, 300 * time.Second, 240 * time.Second, 240 * time.Second},
+		{"short-ttl", CacheOptions{Prefetch: true}, 5 * time.Second, 4 * time.Second, 4 * time.Second},
+		{"stale-unlimited", CacheOptions{Prefetch: true, ServeExpired: true}, 300 * time.Second, 240 * time.Second, 240 * time.Second},
+		{"stale-four-hours", CacheOptions{Prefetch: true, ServeExpired: true, ServeExpiredTTL: 4 * time.Hour}, time.Hour, 48 * time.Minute, 48 * time.Minute},
+		{"stale-one-minute", CacheOptions{Prefetch: true, ServeExpired: true, ServeExpiredTTL: time.Minute}, 300 * time.Second, 240 * time.Second, 240 * time.Second},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, c, _ := cachePrefetchTestControl(t, &test.options)
@@ -226,7 +226,7 @@ func TestCacheControlPrefetchSmartDNSTimingModes(t *testing.T) {
 			c.tick(c.now())
 			cacheWaitIdle(t, c)
 			if calls.Load() != 1 {
-				t.Fatal("due timing-mode prefetch did not run")
+				t.Fatal("due prefetch did not run")
 			}
 			entry = cachePrefetchTestEntry(t, c, key)
 			if got := entry.next.Sub(c.now()); got != test.next {

@@ -145,7 +145,7 @@ func TestTCPSYNConfigurationUsesDistinctModesAndDefaultPort(t *testing.T) {
 	}
 	defer checker.pool.Close()
 	defer checker.candidates.Close()
-	want := []speedCheckMode{{port: 80}, {port: 80, syn: true}, {port: 443, syn: true}, {}}
+	want := []speedCheckMode{{port: 80}, {port: 80, tcpMode: tcpProbeSYN}, {port: 443, tcpMode: tcpProbeSYN}, {}}
 	if len(checker.modes) != len(want) {
 		t.Fatalf("mode count=%d, want %d", len(checker.modes), len(want))
 	}
@@ -219,5 +219,53 @@ func TestTCPSYNSourceSetupExpiryNeedsNoRawSocket(t *testing.T) {
 	_, err = probeTCPSYN(expired, netip.MustParseAddr("127.0.0.1"), 80, selector)
 	if !errors.Is(err, errDNSProbeNotStarted) || sourceSelections.Load() != 1 {
 		t.Fatalf("already expired probe entered source selection: selections=%d error=%v", sourceSelections.Load(), err)
+	}
+}
+
+func TestTCPSYNUnavailableOnlyMeansRawCapabilityFailureBeforeSend(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		err         error
+		policyErr   error
+		unavailable bool
+	}{
+		{name: "permission", err: unix.EPERM, unavailable: true},
+		{name: "access", err: unix.EACCES, unavailable: true},
+		{name: "protocol", err: unix.EPROTONOSUPPORT, unavailable: true},
+		{name: "family", err: unix.EAFNOSUPPORT, unavailable: true},
+		{name: "socket-kind", err: unix.ESOCKTNOSUPPORT, unavailable: true},
+		{name: "operation", err: unix.EOPNOTSUPP, unavailable: true},
+		{name: "protocol-option", err: unix.ENOPROTOOPT, unavailable: true},
+		{name: "system-call", err: unix.ENOSYS, unavailable: true},
+		{name: "mark-permission", err: unix.EPERM, policyErr: unix.EPERM},
+		{name: "interface-permission", err: unix.EACCES, policyErr: unix.EACCES},
+		{name: "hook-protocol", err: unix.EPROTONOSUPPORT, policyErr: unix.EPROTONOSUPPORT},
+		{name: "hook-family", err: unix.EAFNOSUPPORT, policyErr: unix.EAFNOSUPPORT},
+		{name: "missing-interface", err: unix.ENODEV},
+		{name: "source-address", err: unix.EADDRNOTAVAIL},
+		{name: "network-route", err: unix.ENETUNREACH},
+		{name: "host-route", err: unix.EHOSTUNREACH},
+		{name: "file-limit", err: unix.EMFILE},
+		{name: "system-file-limit", err: unix.ENFILE},
+		{name: "buffer-limit", err: unix.ENOBUFS},
+		{name: "memory", err: unix.ENOMEM},
+		{name: "invalid-argument", err: unix.EINVAL},
+		{name: "timeout", err: unix.ETIMEDOUT},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := tcpSYNRawSocketError(context.Background(), "ip4:tcp", &net.OpError{Op: "listen", Net: "ip4:tcp", Err: test.err}, test.policyErr)
+			if errors.Is(err, errTCPSYNUnavailable) != test.unavailable {
+				t.Fatalf("raw creation failure wrongly classified: %v, want unavailable=%v", err, test.unavailable)
+			}
+			// The same errno after writing a SYN is never a capability result.
+			if err := tcpSYNContextError(context.Background(), "receive TCP SYN reply", test.err); errors.Is(err, errTCPSYNUnavailable) {
+				t.Fatalf("send/receive failure allowed a second probe: %v", err)
+			}
+		})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := tcpSYNRawSocketError(ctx, "ip4:tcp", unix.EPERM, nil); !errors.Is(err, context.Canceled) || errors.Is(err, errTCPSYNUnavailable) {
+		t.Fatalf("cancellation lost to a raw capability failure: %v", err)
 	}
 }

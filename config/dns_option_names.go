@@ -19,6 +19,18 @@ func (raw *RawDNS) UnmarshalYAML(node *yaml.Node) error {
 	if err := node.Decode(&decoded); err != nil {
 		return err
 	}
+	// YAML skips a field's UnmarshalYAML method for null. Resolve the effective
+	// mapping (including merges) so only an explicitly empty field disables
+	// probes; an absent field must retain the automatic default.
+	if decoded.SpeedCheckMode == nil {
+		var fields map[string]yaml.Node
+		if err := node.Decode(&fields); err != nil {
+			return err
+		}
+		if _, present := fields["speed-check-mode"]; present {
+			decoded.SpeedCheckMode = RawDNSSpeedCheckModes{}
+		}
+	}
 	*raw = RawDNS(decoded)
 	return nil
 }
@@ -49,6 +61,9 @@ func validateDNSOptionNames(node *yaml.Node, visited map[*yaml.Node]bool) error 
 			var name string
 			if err := node.Content[i].Decode(&name); err != nil {
 				return err
+			}
+			if strings.EqualFold(name, "prefetch-mode") || strings.EqualFold(name, "serve-expired-prefetch-time") {
+				return fmt.Errorf("dns.%s is no longer supported; remove it and use dns.prefetch-domain to enable the fixed DIRECT prefetch policy", name)
 			}
 			for _, canonical := range []string{"force-no-CNAME", "force-AAAA-SOA", "force-qtype-SOA", "dualstack-ip-allow-force-AAAA"} {
 				if name != canonical && strings.EqualFold(name, canonical) {

@@ -10,7 +10,56 @@ import (
 	"time"
 )
 
+// Only failures which establish that raw TCP is unavailable before transmitting
+// a SYN may wrap this sentinel. Socket policy, resource and network failures
+// must remain ordinary probe errors rather than trigger a second measurement.
 var errTCPSYNUnavailable = errors.New("TCP SYN speed checking is unavailable")
+
+type tcpProbeMode uint8
+
+const (
+	tcpProbeConnect tcpProbeMode = iota
+	tcpProbeSYN
+	tcpProbeAuto
+)
+
+// Auto chooses a supported TCP measurement, not an additional probe stage.
+// Both attempts use the caller's deadline, worker and frozen DIRECT route. SYN
+// setup has fully released its sockets before a capability fallback can start.
+// Keeping selection here makes native and route-bound probes obey one policy.
+func probeTCPMode(ctx context.Context, mode tcpProbeMode, syn dnsProbeWork, connect func(context.Context) (net.Conn, error)) (time.Duration, error) {
+	if err := ctx.Err(); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return 0, errDNSProbeNotStarted
+		}
+		return 0, err
+	}
+	if _, bounded := ctx.Deadline(); !bounded {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultSpeedCheckTimeout)
+		defer cancel()
+	}
+	switch mode {
+	case tcpProbeConnect:
+		return measureTCPConnect(ctx, connect)
+	case tcpProbeSYN:
+		return syn(ctx)
+	case tcpProbeAuto:
+		rtt, err := syn(ctx)
+		if !errors.Is(err, errTCPSYNUnavailable) {
+			return rtt, err
+		}
+		if err := ctx.Err(); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return 0, errDNSProbeNotStarted
+			}
+			return 0, err
+		}
+		return measureTCPConnect(ctx, connect)
+	default:
+		return 0, errors.New("invalid TCP speed check mode")
+	}
+}
 
 // A refusal is a TCP response with a usable network RTT. It says that the
 // selected port is closed, not that the destination IP cannot be reached.

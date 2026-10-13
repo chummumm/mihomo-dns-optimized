@@ -38,10 +38,13 @@ dns:
   cache-algorithm: lru
   cache-max-size: 4096
 
-  # 以下为显式启用的可选优化；测速/双栈优选/预取缺省均关闭。
+  # 测速省略时采用 auto；双栈优选和预取仍需显式开启。
   # 仅 DIRECT/Compatible 的自动上游集合测速；代理与签名回答跳过。
-  speed-check-mode: [tcp:443, tcp:80, ping]
-  # Linux 可显式用 [tcp-syn:443, ping]；真实 SYN 需要原始套接字权限。
+  speed-check-mode: auto
+  # 省略 / auto / [auto] 等价，依次选择 443、80、ping。
+  # 写了字段但为空、null、"" 或 [] 时关闭；不再接受旧 none。
+  # TCP 项有原始套接字能力时直接用 SYN；发包前确认不支持才用 connect。
+  # 已有 [tcp:443, tcp:80, ping] 或 Linux [tcp-syn:443, ping] 仍按显式测法执行。
   response-mode: first-ping
   speed-check-timeout: 1000       # 毫秒；0采用1000，最大5000
   speed-check-concurrency: 16    # 0采用16，最大256
@@ -56,10 +59,7 @@ dns:
   rr-ttl-reply-max: 0            # 仅限制客户端TTL，不缩短内部缓存
   rr-ttl-min: 0                 # 不抬高原TTL
   rr-ttl-max: 3600              # 正常回答与缓存的TTL上限，秒
-  prefetch-domain: true
-  prefetch-mode: proactive      # 仅实际DIRECT定时预取；首次真实成功查询即可激活
-  # 可选 smartdns 计时；serve-expired-prefetch-time 非零只能配合该模式。
-  # serve-expired-prefetch-time: 0  # 秒；0自动推导，不改变proactive的提前刷新
+  prefetch-domain: true         # 仅实际DIRECT；首次成功缓存后按剩余TTL约80%提前刷新
   serve-expired: true
   serve-expired-ttl: 604800      # 秒；示例最多使用过期7天的记录，0不限制
   serve-expired-reply-ttl: 1     # 返回过期回答的TTL，允许0

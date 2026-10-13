@@ -3,20 +3,22 @@ package config
 import (
 	"fmt"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/metacubex/mihomo/dns"
 )
 
-// Keep optional SmartDNS-style tuning next to the existing DNS fields. The
-// defaults preserve upstream cache behavior and never enable probes/prefetch.
+// Keep optional SmartDNS-style tuning next to the existing DNS fields.
+// Defaults retain upstream cache behavior and require an eligible DIRECT route
+// for automatic probes. Prefetch remains an independent, explicit switch.
 func parseDNSOptimizations(raw RawDNS) (dns.SpeedCheckConfig, *dns.CacheOptions, error) {
 	var speed dns.SpeedCheckConfig
 	if raw.SpeedCheckTimeout < 0 || raw.SpeedCheckTimeout > int64(5*time.Second/time.Millisecond) {
 		return speed, nil, fmt.Errorf("dns.speed-check-timeout must be 0 (default) or 1..5000 milliseconds")
 	}
 	speed = dns.SpeedCheckConfig{
-		Mode:          append([]string(nil), raw.SpeedCheckMode...),
+		Mode:          slices.Clone([]string(raw.SpeedCheckMode)),
 		ResponseMode:  raw.ResponseMode,
 		Timeout:       time.Duration(raw.SpeedCheckTimeout) * time.Millisecond,
 		Concurrency:   raw.SpeedCheckConcurrency,
@@ -43,26 +45,11 @@ func parseDNSOptimizations(raw RawDNS) (dns.SpeedCheckConfig, *dns.CacheOptions,
 	if raw.ServeExpiredTTL < 0 || raw.ServeExpiredTTL > math.MaxInt64/int64(time.Second) {
 		return speed, nil, fmt.Errorf("dns.serve-expired-ttl must be a non-negative duration in seconds")
 	}
-	mode := dns.PrefetchMode(raw.PrefetchMode)
-	if mode == "" {
-		mode = dns.PrefetchModeProactive
-	}
-	if err := dns.ValidatePrefetchMode(mode); err != nil {
-		return speed, nil, err
-	}
-	if raw.ServeExpiredPrefetchTime < 0 || raw.ServeExpiredPrefetchTime > math.MaxInt32 {
-		return speed, nil, fmt.Errorf("dns.serve-expired-prefetch-time must be between 0 and %d seconds", int64(math.MaxInt32))
-	}
-	if raw.ServeExpiredPrefetchTime != 0 && mode != dns.PrefetchModeSmartDNS {
-		return speed, nil, fmt.Errorf("dns.serve-expired-prefetch-time requires dns.prefetch-mode: smartdns")
-	}
 	options := &dns.CacheOptions{
-		ServeExpired:             true,
-		ServeExpiredTTL:          time.Duration(raw.ServeExpiredTTL) * time.Second,
-		ServeExpiredReplyTTL:     1,
-		Prefetch:                 raw.PrefetchDomain,
-		PrefetchMode:             mode,
-		ServeExpiredPrefetchTime: time.Duration(raw.ServeExpiredPrefetchTime) * time.Second,
+		ServeExpired:         true,
+		ServeExpiredTTL:      time.Duration(raw.ServeExpiredTTL) * time.Second,
+		ServeExpiredReplyTTL: 1,
+		Prefetch:             raw.PrefetchDomain,
 	}
 	if raw.ServeExpired != nil {
 		options.ServeExpired = *raw.ServeExpired

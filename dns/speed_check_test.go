@@ -84,7 +84,7 @@ func speedCheckTestChecker(t *testing.T, timeout time.Duration, concurrency int)
 }
 
 func TestSpeedCheckConfiguration(t *testing.T) {
-	for _, config := range []SpeedCheckConfig{{}, {Mode: []string{"none"}}} {
+	for _, config := range []SpeedCheckConfig{{Mode: []string{}}} {
 		s, err := newDirectSpeedChecker(config)
 		if err != nil || s != nil {
 			t.Fatalf("disabled checker: %v, %v", s, err)

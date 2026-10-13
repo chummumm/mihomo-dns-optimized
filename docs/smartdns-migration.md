@@ -12,6 +12,7 @@
 | `server-https` / `server-tls` / QUIC 上游 | 原生 `https://` / `tls://` / `quic://`；继承本次已冻结出口，保留 TLS 证书校验 |
 | `speed-check-mode tcp:443,tcp:80,ping` | `speed-check-mode: [tcp:443, tcp:80, ping]`，仅实际 DIRECT / Compatible 进行 IP 探测 |
 | `speed-check-mode tcp-syn:443,ping` | `speed-check-mode: [tcp-syn:443, ping]`；Linux 真实 SYN 探测，需要原始套接字权限 |
+| 默认测速选择 | 本项目从 `1.0.13` 起，省略 `speed-check-mode` 或写 `auto` / `[auto]` 使用自动策略；这不是 SmartDNS 配置键的逐字兼容，具体默认与边界见下文 |
 | `response-mode fastest-ip` | `response-mode: fastest-ip`；也支持 `first-ping`、`fastest-response`，开启测速后按所选时机回答 |
 | `max-reply-ip-num 8` | `max-reply-ip-num: 8`；优选时默认 8；显式设置也限制普通 A/AAAA 和静态 hosts，范围 1–2147483647；省略时不裁剪未优选答案 |
 | Global `-no-speed-check` | 代理 DNS 路径始终不做本地 IP 测速 |
@@ -19,8 +20,7 @@
 | `dualstack-ip-selection-threshold 10` | 同名字段，毫秒，默认 10，允许 0–1000 |
 | `dualstack-ip-allow-force-AAAA no` | `dualstack-ip-allow-force-AAAA: false`，默认保留 IPv4 |
 | Global `-no-dualstack-selection` | 代理路径不做双栈探测，也不为了本地优选额外查询另一族 |
-| `prefetch-domain yes` | `prefetch-domain: true`；仅 DIRECT，首次真实查询即可激活；默认提前刷新，也可选 `prefetch-mode: smartdns` |
-| `serve-expired-prefetch-time 60` | 同名秒数字段，配合 `prefetch-mode: smartdns`；默认 0 自动推导间隔 |
+| `prefetch-domain yes` | `prefetch-domain: true`；仅 DIRECT，首次真实查询即可激活；统一按剩余 TTL 约 80% 提前刷新 |
 | `serve-expired yes` | `serve-expired: true` |
 | `serve-expired-ttl 604800` | 同名字段，秒，允许最多使用过期 7 天的回答 |
 | `serve-expired-reply-ttl 0` | 同名字段，可显式设为 0；不延长原缓存过期点 |
@@ -38,9 +38,13 @@
 
 ### 测速与双栈的边界
 
+从 `1.0.13` 起，省略 `speed-check-mode`、`speed-check-mode: auto` 和 `speed-check-mode: [auto]` 等价。自动策略按 443、80、ping 的顺序调度，TCP 项优先使用真实 SYN 的 RTT；在发包前确认平台或原始套接字能力 / 权限不可用时，才改用普通 connect。选择在实际探测时完成，不依赖启动时权限检查和默认列表初始化的先后顺序。真实 SYN 发包后的超时、网络失败、取消，以及资源不足、接口 / mark 设置错误，均不追加另一轮 connect；预算、并发限制和 DIRECT 选路保持一致。
+
+`auto` 是独占的自动策略，不能加端口或与其他测法混写；显式 `tcp`、`tcp-syn`、`ping` 列表仍按原来的测法执行。写了测速字段但留空，或设为 `null`、`""`、`[]` 时关闭；旧 `none` 不再接受，不能直接照搬。已开启 `dns-rule-routing` 且省略测速字段的配置，升级后会对合格的 DIRECT 自动上游池启用此策略；顶层 `dns-rule-routing` 默认仍为 `false`，自动策略不会自行启用 DNS 选路。这里明确约定本项目的默认行为，不假定 SmartDNS 各版本未配置时一定选择 SYN。
+
 `fastest-ip` 迁移的是在候选中优选最快可达 IP 的目标。本项目保留原有可选优选总预算，默认 1000 毫秒；不会把 `first-ping` 暗中改成 SmartDNS 的 200 毫秒预算。到期仍无合格 DNS 答复时，已有 DNS 查询继续使用正常解析期限，不重发整批上游。多种测法约每 100 毫秒推进下一阶段，可重叠但共用实际探测并发上限；满额时本轮释放不再等待的旧阶段探针，再尝试后续测法，不无限排队。
 
-普通 `tcp` 成功建连或收到连接拒绝都可测 RTT；`tcp-syn` 构造真实 TCP SYN，只接受源 / 目的地址、端口、ACK 和校验和匹配的 SYN-ACK 或 RST-ACK，不完成应用连接。裸 `tcp` / `tcp-syn` 使用 80 端口。SYN 当前仅支持 Linux，其他平台显式配置会报错；缺少运行权限时按测法失败处理，不伪装成 connect。
+普通 `tcp` 成功建连或收到连接拒绝都可测 RTT；`tcp-syn` 构造真实 TCP SYN，只接受源 / 目的地址、端口、ACK 和校验和匹配的 SYN-ACK 或 RST-ACK，不完成应用连接。裸 `tcp` / `tcp-syn` 使用 80 端口。显式 SYN 当前仅支持 Linux，其他平台显式配置会报错；缺少运行权限时按测法失败处理，不伪装成 connect。跨平台部署需要自动选取可用 TCP 测法时，可使用上面的 `auto`。
 
 候选可来自多个已通过原版过滤的完整回答；只合并完整 CNAME 路径一致的终点地址，重复地址和链 TTL 取保守值。筛选采用 SmartDNS 当前源码的 0.1 ms 精度与近最快条件，按 RTT 排序并限制数量；全部探测失败时，同一路径多个独立有效上游重复返回的地址可作为兜底。没有这种共识时保留首个有效回答及其顺序，这是保留 Mihomo 有效答复的选择，不伪造测速结果。初次 `first-ping` 可能只有一个地址，后台完成或缓存命中才返回多个。
 
@@ -72,15 +76,11 @@ DO / CD 查询以及 AD、RRSIG、SIG、TSIG 等受保护回答不进行地址�
 
 从 `1.0.12` 起，定时预取严格限于实际 DIRECT / Compatible 的自动上游池，只由带有效来源的真实 DNS 入站激活；首次成功缓存即可，不再要求一分钟三次访问，也不因一分钟无新访问就失去资格。真实需求补充有限热度，后台自身不补热；没有新需求时最多两次定时尝试。每次执行前重新选路，发现代理、拒绝或作用域改变后丢弃旧候选。匿名、内部、bootstrap 和 FakeIP 合成不会激活任务。
 
-| 预取模式 | 计时规则 | 与 SmartDNS 的关系 |
-| --- | --- | --- |
-| `proactive`（开启预取后的默认） | 剩余 TTL 的约 80%，最小一秒；缓存命中不推迟原定时刻 | 本项目更早刷新的默认选择；不受长过期保留期限制 |
-| `smartdns`，关闭过期回答 | TTL 到期前约 3 秒，最小一秒 | 对齐到期前的计时规则 |
-| `smartdns`，开启过期回答 | 首次 TTL + P，后续成功刷新按 P | P 显式设置，或自动取过期保留期一半、最多 8 小时；保留本项目有限热度与 DIRECT 边界 |
+从 `1.0.13` 起只保留统一的提前刷新策略，移除 `prefetch-mode` 选择器及其附属的 `serve-expired-prefetch-time`；配置中存在这两个旧键会明确报迁移错误，应删除后通过 `prefetch-domain` 控制预取。首次成功缓存后，按剩余 TTL 的约 80% 安排刷新，最小一秒；命中缓存不推迟原定时刻。这样不会因为过期缓存保留期很长而推迟新鲜记录的预取，也无需另设一个 SmartDNS 原版没有的模式字段。SmartDNS 的 `serve-expired-prefetch-time` 不再作为本项目支持的配置迁入，不赋予它新的语义。
 
-`serve-expired-prefetch-time` 为秒数，默认 0 自动推导；非零值只可配合 `prefetch-mode: smartdns`。本项目不复制没有新请求仍无限维持冷域名的行为。预取候选使用 16 MiB / resolver 记账预算，通常约 1.2 万至 1.6 万个普通短查询，不再固定 1024 项；按到期先后调度，共用 16 个活动后台刷新槽位。按需过期刷新优先，有限排队且不阻塞前台。
+本项目不复制没有新请求仍无限维持冷域名的行为。预取候选使用 16 MiB / resolver 记账预算，通常约 1.2 万至 1.6 万个普通短查询，不再固定 1024 项；按到期先后调度，共用 16 个活动后台刷新槽位。按需过期刷新优先，有限排队且不阻塞前台。
 
-**DIRECT 限制只针对定时预取。** 客户端命中过期答案后，原来的按需刷新继续对包括代理在内的正常路径生效；关闭预取不关闭该行为。`serve-expired`、缓存容量、测速、双栈和各 TTL 设置的 Mihomo 默认值保留，不因接入这些 SmartDNS 能力而自动开启测速或预取。
+**预取的 DIRECT 限制只针对定时任务。** 客户端命中过期答案后，原来的按需刷新继续对包括代理在内的正常路径生效；关闭预取不关闭该行为。`serve-expired`、缓存容量、双栈和各 TTL 设置的默认值保留，主动预取默认关闭；`1.0.13` 的测速默认改为上述 `auto`，不会连带开启预取或双栈优选。代理组 `url-test`、节点健康检查及其他代理路径的原生 `tcp-concurrent` 行为继续保留。
 
 Mihomo 的 `serve-expired-ttl: 0` 在本项目表示不限制过期年龄，保留本项目之前的默认行为；迁移时应明确填写需要的正数上限，不能假定它等于 SmartDNS 每个版本的零值语义。
 

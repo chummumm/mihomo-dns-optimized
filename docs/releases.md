@@ -2,6 +2,20 @@
 
 项目使用独立版本 **`mihomo-optimized-vX.Y.Z`**，首版为 `mihomo-optimized-v1.0.0`。`main` 的源码、依赖或构建配置变更在全部测试和完整编译成功后生成固定提交的 GitHub Release。Latest 仅在该构建仍对应当前 `main` 时更新；PR 只做合并前检查，不生成正式发布包。纯文档变更不消耗版本号，也不触发自动发布。
 
+## 1.0.13：默认自动测速与空值关闭模式
+
+`speed-check-mode` 省略、设为 `auto` 或 `[auto]` 时，使用同一自动策略，按 443、80、ping 的顺序调度。TCP 项有原始套接字能力时直接使用真实 SYN 的 RTT 参与优选；只有发包前确认平台、能力或权限不支持时，才改用普通 TCP connect。选择发生在实际探测时，不保留启动时固定的全局能力结论。SYN 已发出后的超时、网络错误、取消，以及资源不足、接口 / mark 设置失败，均不追加第二轮 connect。整个选择共用原本的超时期限、并发名额和 DIRECT 路由约束。
+
+**升级行为：已启用 `dns-rule-routing` 且省略 `speed-check-mode` 的配置，会对符合条件的 DIRECT / Compatible 自动上游池采用自动测速。** 需要关闭时，写出该字段并留空，或设为 `null`、`""`、`[]`；与省略字段不同。旧 `none` 写法不再接受，需替换为空值。`auto` 可跨平台配置，必须独占且不接受端口后缀。已有显式 `tcp`、`tcp-syn`、`ping` 列表保持原测法，不被自动改写；显式 SYN 仍要求支持的平台和权限。
+
+`transparent-proxy.tcp` / `udp` 同步采用空值关闭：字段显式留空、设为 `null` 或 `""` 时，本模块不捕获相应协议；省略仍分别使用 `tproxy` / `tun`。旧 `"off"` 会明确提示迁移为空值。布尔开关仍用 `false`，`response-mode` 的空值继续选择其默认策略；原生协议参数和观测状态中的 `none` / `off` 保留原含义。示例见[透明代理配置](transparent-proxy-plan.md#yaml-入口)。
+
+移除本项目额外增加的 `prefetch-mode` 选择器，以及仅控制被撤回模式的 `serve-expired-prefetch-time`，统一使用已有的提前刷新策略。旧配置包含任一字段时会明确提示迁移，删除即可；预取由 `prefetch-domain` 开关控制，不给旧间隔字段附加新的含义。开启后，首次真实成功缓存就激活，按剩余 TTL 约 80% 预取，仍保留 DIRECT 范围、有限热度、共享并发与队列限制。
+
+顶层 `dns-rule-routing` 默认仍为 `false`。双栈优选、主动预取和各 TTL 设置的默认值保留，定时预取继续只对实际 DIRECT 生效；客户端命中过期缓存后的按需刷新继续保留代理等原路径。代理组 `url-test`、节点健康检查及其他代理路径的原生 `tcp-concurrent` 行为不变。自动测速的语义、配置示例和兼容边界见 [IP 测速](dns-proxy.md#可选-ip-测速)与 [SmartDNS 对照](smartdns-migration.md#测速与双栈的边界)。
+
+本次只更新内核，面板继续为 `0.4.8`。发布说明同步补入 `1.0.12` 的 DIRECT 预取、真实 SYN、双栈缓存与答案处理更新；PR 代表平台编译、main 完整打包一次、发布复用产物的流程不变。
+
 ## 1.0.12：DIRECT 预取、真实 TCP SYN 与 SmartDNS 行为补齐
 
 定时预取严格限于实际 DIRECT / Compatible 的自动 DNS 上游池，执行前重新检查来源、当前规则和出口；切到代理、拒绝或其他缓存作用域后，旧候选不再继续查询。客户端命中过期缓存触发的按需刷新仍保留原有代理等路径行为。测速、双栈优选、预取及各 TTL 默认值不变，未配置这些功能时保持 Mihomo 原有工作方式。
@@ -198,7 +212,14 @@ python3 scripts/release-build.py matrix --profile pr
 python3 scripts/release-build.py compile-check linux-amd64
 ```
 
-运行 `bash scripts/ci-check.sh build <target> <绝对输出目录> mihomo-optimized-v1.0.11 <ISO时间>` 可构建单个目标；版本参数须与当前 `PROJECT_VERSION` 一致，`amd64` / `arm64` 是 Linux 别名。依赖 `dpkg-deb`、`rpm`/`rpmbuild`/`rpm2cpio`、`cpio`、`zstd`、`fakeroot`、Python 3.12 和 MetaCubeX Go；Android 还需矩阵指定的固定 NDK。
+构建单个目标时，从当前 `PROJECT_VERSION` 读取版本；替换下面的目标、绝对输出目录和 ISO 时间占位项。`amd64` / `arm64` 是 Linux 别名。
+
+```sh
+mihomo_release_version="mihomo-optimized-v$(tr -d '[:space:]' < PROJECT_VERSION)"
+bash scripts/ci-check.sh build <target> <绝对输出目录> "$mihomo_release_version" <ISO时间>
+```
+
+依赖 `dpkg-deb`、`rpm`/`rpmbuild`/`rpm2cpio`、`cpio`、`zstd`、`fakeroot`、Python 3.12 和 MetaCubeX Go；Android 还需矩阵指定的固定 NDK。
 
 ## 内核自动更新
 

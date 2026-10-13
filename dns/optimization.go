@@ -48,17 +48,20 @@ func (r *Resolver) exchangeBatch(ctx context.Context, clients []dnsClient, query
 	}
 	route := queryRoute(ctx)
 	probe := func(ctx context.Context, address netip.Addr, mode speedCheckMode) (time.Duration, error) {
-		if mode.port == 0 || mode.syn {
+		if mode.port == 0 {
 			options, err := route.plan.DirectProbeOptions()
 			if err != nil {
 				return 0, err
 			}
-			if mode.syn {
-				return probeTCPSYN(ctx, address, mode.port, options...)
-			}
 			return pingDirectIP(ctx, address, options...)
 		}
-		return measureTCPConnect(ctx, func(ctx context.Context) (net.Conn, error) {
+		return probeTCPMode(ctx, mode.tcpMode, func(ctx context.Context) (time.Duration, error) {
+			options, err := route.plan.DirectProbeOptions()
+			if err != nil {
+				return 0, err
+			}
+			return probeTCPSYN(ctx, address, mode.port, options...)
+		}, func(ctx context.Context) (net.Conn, error) {
 			return route.plan.DialDirectProbe(ctx, address, mode.port)
 		})
 	}

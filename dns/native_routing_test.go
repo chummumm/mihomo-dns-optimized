@@ -20,6 +20,8 @@ func nativeRoutingTestConfig() Config {
 		RuleRouting:  true,
 		Main:         []NameServer{{Addr: "192.0.2.53:53"}},
 		DirectServer: []NameServer{{Addr: "198.51.100.53:53"}},
+		// Routing-only fixtures must not start optional destination probes.
+		SpeedCheck: SpeedCheckConfig{Mode: []string{}},
 	}
 }
 
