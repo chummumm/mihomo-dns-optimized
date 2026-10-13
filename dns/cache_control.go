@@ -19,11 +19,12 @@ import (
 // A nil option preserves upstream behavior: expired answers have TTL 1, no
 // maximum stale age, and there is no proactive prefetch.
 type CacheOptions struct {
-	ServeExpired             bool
-	ServeExpiredTTL          time.Duration
-	ServeExpiredReplyTTL     uint32
-	Prefetch                 bool
-	PrefetchMode             PrefetchMode
+	ServeExpired         bool
+	ServeExpiredTTL      time.Duration
+	ServeExpiredReplyTTL uint32
+	Prefetch             bool
+	// Expired-only scheduled interval; zero derives half the stale retention,
+	// capped at eight hours. It neither enables Prefetch nor delays demand.
 	ServeExpiredPrefetchTime time.Duration
 }
 
@@ -96,12 +97,9 @@ func newCacheControl(r *Resolver, options *CacheOptions) *cacheControl {
 	if options != nil {
 		value = *options
 	}
-	if value.PrefetchMode == "" {
-		value.PrefetchMode = PrefetchModeProactive
-	}
-	if ValidatePrefetchMode(value.PrefetchMode) != nil || value.ServeExpiredPrefetchTime < 0 {
-		// Parsed configurations are validated; invalid programmatic options
-		// cannot silently start an unrecognized background policy.
+	if value.ServeExpiredPrefetchTime < 0 {
+		// Parsed configurations reject negative intervals. Programmatic callers
+		// must not accidentally start an invalid proactive refresh policy.
 		value.Prefetch = false
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -341,9 +339,6 @@ func (c *cacheControl) run(job cacheRefreshJob) {
 		c.mu.Unlock()
 	}()
 	ctx, cancel := context.WithTimeout(context.WithValue(job.ctx, cacheBackgroundKey{}, true), resolver.DefaultDNSTimeout)
-	if job.prefetch != nil {
-		ctx = context.WithValue(ctx, cacheScheduledPrefetchKey{}, job.prefetch)
-	}
 	stop := contextutils.AfterFunc(job.lifetime, cancel)
 	defer stop()
 	defer cancel()

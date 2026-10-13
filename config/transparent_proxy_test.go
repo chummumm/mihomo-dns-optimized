@@ -117,6 +117,25 @@ func TestTransparentProxyRedirOnlyRequiresItsOwnTCPListener(t *testing.T) {
 	}
 }
 
+func TestTransparentProxyEmptyBackendsDoNotRequireCaptureListeners(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("managed capture is Linux-only")
+	}
+	for _, fields := range []string{"  tcp:\n  udp:\n", "  tcp: null\n  udp: \"\"\n", "  tcp: &empty\n  udp: *empty\n"} {
+		raw, err := UnmarshalRawConfig([]byte("transparent-proxy:\n  enable: true\n" + fields))
+		if err != nil {
+			t.Fatal(err)
+		}
+		general, err := parseGeneral(raw)
+		if err != nil {
+			t.Fatalf("explicitly empty protocols still require an active listener: %v", err)
+		}
+		if !general.TransparentProxy.Enable || general.TransparentProxy.TCP != transparentproxy.ModeOff || general.TransparentProxy.UDP != transparentproxy.ModeOff {
+			t.Fatalf("empty protocol settings changed while parsing: %+v", general.TransparentProxy)
+		}
+	}
+}
+
 func TestTransparentProxyKeepsIPv6IntentUntilExplicitlyDisabled(t *testing.T) {
 	raw := DefaultRawConfig()
 	raw.TransparentProxy.Enable = true

@@ -40,9 +40,10 @@ const (
 // address answers. It does not require padding a reply with slower addresses.
 const DefaultMaxReplyIPNum = 8
 
-// SpeedCheckConfig controls optional DIRECT destination-IP selection. A zero
-// value disables it. Timeout bounds optional selection work; an upstream which
-// has not answered yet retains the normal DNS deadline after that budget ends.
+// SpeedCheckConfig controls optional DIRECT destination-IP selection. A nil
+// Mode selects automatic probes; an explicitly empty Mode disables
+// them. Timeout bounds selection work; an upstream which has not answered yet
+// retains the normal DNS deadline after that budget ends.
 // Concurrency limits active IP probes across queries sharing a checker.
 // MaxReplyIPNum bounds the retained fast addresses, with zero selecting eight.
 type SpeedCheckConfig struct {
@@ -54,16 +55,19 @@ type SpeedCheckConfig struct {
 }
 
 type speedCheckMode struct {
-	port uint16 // zero denotes ICMP echo
-	syn  bool
+	port    uint16 // zero denotes ICMP echo
+	tcpMode tcpProbeMode
 }
 
 func (m speedCheckMode) String() string {
 	if m.port == 0 {
 		return "ping"
 	}
-	if m.syn {
+	switch m.tcpMode {
+	case tcpProbeSYN:
 		return "tcp-syn:" + strconv.Itoa(int(m.port))
+	case tcpProbeAuto:
+		return "auto:" + strconv.Itoa(int(m.port))
 	}
 	return "tcp:" + strconv.Itoa(int(m.port))
 }
@@ -104,14 +108,21 @@ func newDirectSpeedChecker(config SpeedCheckConfig) (*directSpeedChecker, error)
 		return nil, fmt.Errorf("dns.max-reply-ip-num must be between 1 and %d (or 0 for default)", int64(math.MaxInt32))
 	}
 	var modes []speedCheckMode
+	if config.Mode == nil {
+		config.Mode = []string{"auto"}
+	}
 	seen := make(map[speedCheckMode]bool)
 	for _, value := range config.Mode {
 		value = strings.TrimSpace(strings.ToLower(value))
-		if value == "none" {
+		if value == "auto" {
 			if len(config.Mode) != 1 {
-				return nil, errors.New("dns.speed-check-mode: none must be used alone")
+				return nil, errors.New("dns.speed-check-mode: auto must be used alone")
 			}
-			return nil, nil
+			modes = []speedCheckMode{{port: 443, tcpMode: tcpProbeAuto}, {port: 80, tcpMode: tcpProbeAuto}, {}}
+			break
+		}
+		if value == "none" {
+			return nil, errors.New("dns.speed-check-mode: none is no longer supported; use an empty value or [] to disable")
 		}
 		var mode speedCheckMode
 		switch {
@@ -130,7 +141,10 @@ func newDirectSpeedChecker(config SpeedCheckConfig) (*directSpeedChecker, error)
 					return nil, err
 				}
 			}
-			mode = speedCheckMode{port: uint16(port), syn: name == "tcp-syn"}
+			mode.port = uint16(port)
+			if name == "tcp-syn" {
+				mode.tcpMode = tcpProbeSYN
+			}
 		default:
 			return nil, fmt.Errorf("dns.speed-check-mode: unsupported mode %q", value)
 		}
@@ -513,7 +527,7 @@ func speedCheckQueryProtected(message *D.Msg) bool {
 }
 
 func (s *directSpeedChecker) checkMode(ctx context.Context, ip netip.Addr, mode speedCheckMode, probe speedCheckProbe) (time.Duration, error) {
-	if err := ctx.Err(); err != nil {
+	if !dnsProbeContextActive(ctx) {
 		return 0, errDNSProbeNotStarted
 	}
 	select {
@@ -524,7 +538,7 @@ func (s *directSpeedChecker) checkMode(ctx context.Context, ip netip.Addr, mode 
 	default:
 		return 0, errDNSProbeBusy
 	}
-	if ctx.Err() != nil {
+	if !dnsProbeContextActive(ctx) {
 		return 0, errDNSProbeNotStarted
 	}
 	return probe(ctx, ip, mode)
@@ -534,13 +548,12 @@ func probeDirectIP(ctx context.Context, ip netip.Addr, mode speedCheckMode) (tim
 	if mode.port == 0 {
 		return pingDirectIP(ctx, ip)
 	}
-	if mode.syn {
-		return probeTCPSYN(ctx, ip, mode.port)
-	}
 	// Numeric addresses avoid DNS recursion. The low-level dialer preserves
 	// Mihomo's socket/interface policy without entering tunnel rule matching
 	// or adding synthetic connection entries to the traffic panel.
-	return measureTCPConnect(ctx, func(ctx context.Context) (net.Conn, error) {
+	return probeTCPMode(ctx, mode.tcpMode, func(ctx context.Context) (time.Duration, error) {
+		return probeTCPSYN(ctx, ip, mode.port)
+	}, func(ctx context.Context) (net.Conn, error) {
 		return dialer.DialContext(ctx, "tcp", netip.AddrPortFrom(ip, mode.port).String(), dialer.WithTFO(false))
 	})
 }

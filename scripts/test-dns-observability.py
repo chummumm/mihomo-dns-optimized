@@ -130,6 +130,8 @@ dns:
   default-nameserver: [127.0.0.1:{self.upstream_port}]
   direct-nameserver: [127.0.0.1:{self.upstream_port}]
   nameserver: [127.0.0.1:{self.upstream_port}]
+  # Keep observation checks independent of destination-IP reachability.
+  speed-check-mode: []
   prefetch-domain: false
   serve-expired: false
 """

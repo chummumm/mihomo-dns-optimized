@@ -96,7 +96,7 @@ func TestCacheControlPrefetchSingleSuccessfulQueryAcrossTTL(t *testing.T) {
 			}
 			cachePrefetchTestStore(t, c, ctx, query, ttl)
 			entry := cachePrefetchTestEntry(t, c, key)
-			wantDelay := ttl - ttl/5
+			wantDelay := ttl / 2
 			if entry.heat != 3 || entry.next.Sub(base) != wantDelay {
 				t.Fatalf("first real success did not grant finite TTL-based prefetch: heat=%d next=%s", entry.heat, entry.next.Sub(base))
 			}
@@ -149,7 +149,7 @@ func TestCacheControlPrefetchHitKeepsDeadlineAndFiniteHeat(t *testing.T) {
 	ctx = c.Observe(ctx, query, key)
 	cachePrefetchTestStore(t, c, ctx, query, 300*time.Second)
 	initial := cachePrefetchTestEntry(t, c, key)
-	clock.Store(c.now().Add(200 * time.Second).UnixNano())
+	clock.Store(c.now().Add(100 * time.Second).UnixNano())
 	for i := 0; i < 100; i++ {
 		c.Observe(ctx, query, key)
 	}
@@ -191,7 +191,7 @@ func TestCacheControlPrefetchOnlyCacheableSuccessActivates(t *testing.T) {
 	}
 }
 
-func TestCacheControlPrefetchSmartDNSTimingModes(t *testing.T) {
+func TestCacheControlPrefetchFreshTimingIgnoresExpiredOptions(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		options CacheOptions
@@ -199,12 +199,16 @@ func TestCacheControlPrefetchSmartDNSTimingModes(t *testing.T) {
 		first   time.Duration
 		next    time.Duration
 	}{
-		{"proactive", CacheOptions{Prefetch: true}, 300 * time.Second, 240 * time.Second, 240 * time.Second},
-		{"smartdns-fresh", CacheOptions{Prefetch: true, PrefetchMode: PrefetchModeSmartDNS}, 300 * time.Second, 297 * time.Second, 297 * time.Second},
-		{"smartdns-short-ttl", CacheOptions{Prefetch: true, PrefetchMode: PrefetchModeSmartDNS}, 2 * time.Second, time.Second, time.Second},
-		{"smartdns-default-expired", CacheOptions{Prefetch: true, PrefetchMode: PrefetchModeSmartDNS, ServeExpired: true}, 300 * time.Second, 8*time.Hour + 300*time.Second, 8 * time.Hour},
-		{"smartdns-half-retention", CacheOptions{Prefetch: true, PrefetchMode: PrefetchModeSmartDNS, ServeExpired: true, ServeExpiredTTL: 4 * time.Hour}, time.Hour, 3 * time.Hour, 2 * time.Hour},
-		{"smartdns-explicit-period", CacheOptions{Prefetch: true, PrefetchMode: PrefetchModeSmartDNS, ServeExpired: true, ServeExpiredPrefetchTime: time.Minute}, 300 * time.Second, 360 * time.Second, time.Minute},
+		{"stale-disabled", CacheOptions{Prefetch: true}, 300 * time.Second, 150 * time.Second, 150 * time.Second},
+		{"stale-disabled-with-retention", CacheOptions{Prefetch: true, ServeExpiredTTL: 24 * time.Hour}, 300 * time.Second, 150 * time.Second, 150 * time.Second},
+		{"short-ttl", CacheOptions{Prefetch: true}, 4 * time.Second, 2 * time.Second, 2 * time.Second},
+		{"minimum-period", CacheOptions{Prefetch: true, ServeExpired: true}, time.Second, time.Second, time.Second},
+		{"stale-unlimited", CacheOptions{Prefetch: true, ServeExpired: true}, 300 * time.Second, 150 * time.Second, 150 * time.Second},
+		{"stale-four-hours", CacheOptions{Prefetch: true, ServeExpired: true, ServeExpiredTTL: 4 * time.Hour}, time.Hour, 30 * time.Minute, 30 * time.Minute},
+		{"stale-one-minute", CacheOptions{Prefetch: true, ServeExpired: true, ServeExpiredTTL: time.Minute}, 300 * time.Second, 150 * time.Second, 150 * time.Second},
+		{"expired-period-shorter", CacheOptions{Prefetch: true, ServeExpired: true, ServeExpiredPrefetchTime: time.Second}, 300 * time.Second, 150 * time.Second, 150 * time.Second},
+		{"expired-period-longer", CacheOptions{Prefetch: true, ServeExpired: true, ServeExpiredPrefetchTime: 24 * time.Hour}, 300 * time.Second, 150 * time.Second, 150 * time.Second},
+		{"unused-expired-period", CacheOptions{Prefetch: true, ServeExpiredPrefetchTime: time.Minute}, 300 * time.Second, 150 * time.Second, 150 * time.Second},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, c, _ := cachePrefetchTestControl(t, &test.options)
@@ -226,7 +230,7 @@ func TestCacheControlPrefetchSmartDNSTimingModes(t *testing.T) {
 			c.tick(c.now())
 			cacheWaitIdle(t, c)
 			if calls.Load() != 1 {
-				t.Fatal("due timing-mode prefetch did not run")
+				t.Fatal("due prefetch did not run")
 			}
 			entry = cachePrefetchTestEntry(t, c, key)
 			if got := entry.next.Sub(c.now()); got != test.next {
@@ -245,7 +249,7 @@ func TestCacheControlPrefetchLargeTTLDoesNotRefreshImmediately(t *testing.T) {
 	r.cache.SetWithExpire(key, cacheTestReply(query, math.MaxUint32), c.now().Add(ttl))
 	c.Observe(ctx, query, key)
 	entry := cachePrefetchTestEntry(t, c, key)
-	if entry.next.Sub(c.now()) != ttl-ttl/5 {
+	if entry.next.Sub(c.now()) != ttl/2 {
 		t.Fatal("valid large DNS TTL overflowed its refresh deadline")
 	}
 	var calls atomic.Int32
@@ -261,7 +265,7 @@ func TestCacheControlPrefetchLargeTTLDoesNotRefreshImmediately(t *testing.T) {
 }
 
 func TestCacheControlPrefetchFailureBackoffDoesNotRenewRetention(t *testing.T) {
-	r, c, _ := cachePrefetchTestControl(t, &CacheOptions{Prefetch: true, ServeExpired: true, ServeExpiredTTL: time.Minute})
+	r, c, _ := cachePrefetchTestControl(t, &CacheOptions{Prefetch: true, ServeExpired: true, ServeExpiredTTL: time.Minute, ServeExpiredPrefetchTime: 24 * time.Hour})
 	clock := cachePrefetchTestClock(c)
 	query := routingTestQuery("unavailable.example", 45)
 	ctx, key := cachePrefetchTestPrepare(t, c, query, routingTestOrigin())
@@ -274,7 +278,9 @@ func TestCacheControlPrefetchFailureBackoffDoesNotRenewRetention(t *testing.T) {
 		return nil, errors.New("upstream unavailable")
 	}
 	entry := cachePrefetchTestEntry(t, c, key)
-	clock.Store(entry.next.UnixNano())
+	// A delayed scheduler finds this fresh-origin task after expiration. Its
+	// failed attempt must keep the short retry rather than wait the stale period.
+	clock.Store(entry.expires.Add(time.Second).UnixNano())
 	c.tick(c.now())
 	cacheWaitIdle(t, c)
 	entry = cachePrefetchTestEntry(t, c, key)

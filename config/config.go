@@ -260,13 +260,12 @@ type RawDNS struct {
 	DefaultNameserver             []string                            `yaml:"default-nameserver" json:"default-nameserver"`
 	CacheAlgorithm                string                              `yaml:"cache-algorithm" json:"cache-algorithm"`
 	CacheMaxSize                  int                                 `yaml:"cache-max-size" json:"cache-max-size"`
-	SpeedCheckMode                []string                            `yaml:"speed-check-mode" json:"speed-check-mode"`
+	SpeedCheckMode                RawDNSSpeedCheckModes               `yaml:"speed-check-mode" json:"speed-check-mode"`
 	ResponseMode                  string                              `yaml:"response-mode" json:"response-mode"`
 	SpeedCheckTimeout             int64                               `yaml:"speed-check-timeout" json:"speed-check-timeout"`
 	SpeedCheckConcurrency         int                                 `yaml:"speed-check-concurrency" json:"speed-check-concurrency"`
 	MaxReplyIPNum                 *int64                              `yaml:"max-reply-ip-num" json:"max-reply-ip-num"`
 	PrefetchDomain                bool                                `yaml:"prefetch-domain" json:"prefetch-domain"`
-	PrefetchMode                  string                              `yaml:"prefetch-mode" json:"prefetch-mode"`
 	ServeExpired                  *bool                               `yaml:"serve-expired" json:"serve-expired"`
 	ServeExpiredTTL               int64                               `yaml:"serve-expired-ttl" json:"serve-expired-ttl"`
 	ServeExpiredPrefetchTime      int64                               `yaml:"serve-expired-prefetch-time" json:"serve-expired-prefetch-time"`

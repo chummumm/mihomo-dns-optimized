@@ -11,7 +11,7 @@ import (
 
 func TestConfigPartialDefaultsAndIndependentBackends(t *testing.T) {
 	var cfg Config
-	err := yaml.Unmarshal([]byte("enable: true\ntcp: tun\nudp: off\nrouting:\n  tun:\n    table: 123\nlocal:\n  interfaces: [eth0]\n"), &cfg)
+	err := yaml.Unmarshal([]byte("enable: true\ntcp: tun\nudp:\nrouting:\n  tun:\n    table: 123\nlocal:\n  interfaces: [eth0]\n"), &cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,6 +26,99 @@ func TestConfigPartialDefaultsAndIndependentBackends(t *testing.T) {
 	clone.Local.BypassPorts.UDP[0] = 53
 	if cfg.Local.Interfaces[0] != "eth0" || cfg.Local.BypassPorts.UDP[0] != 123 {
 		t.Fatal("configuration clone aliases mutable slices")
+	}
+}
+
+func TestConfigEmptyBackendsDisableWithoutChangingOmittedDefaults(t *testing.T) {
+	for _, test := range []struct {
+		name, input string
+		tcp, udp    Mode
+	}{
+		{"omitted", "{}", ModeTProxy, ModeTUN},
+		{"tcp-empty", "tcp:\n", ModeOff, ModeTUN},
+		{"udp-empty", "udp:\n", ModeTProxy, ModeOff},
+		{"tcp-null", "tcp: null\n", ModeOff, ModeTUN},
+		{"udp-tilde", "udp: ~\n", ModeTProxy, ModeOff},
+		{"empty-strings", "tcp: \"\"\nudp: ''\n", ModeOff, ModeOff},
+		{"empty-alias", "tcp: &empty\nudp: *empty\n", ModeOff, ModeOff},
+		{"string-alias", "tcp: &empty ''\nudp: *empty\n", ModeOff, ModeOff},
+		{"selected-backend-alias", "tcp: &backend tun\nudp: *backend\n", ModeTUN, ModeTUN},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var cfg Config
+			if err := yaml.Unmarshal([]byte(test.input), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.TCP != test.tcp || cfg.UDP != test.udp {
+				t.Fatalf("empty or omitted backend lost: TCP=%q UDP=%q, want %q/%q", cfg.TCP, cfg.UDP, test.tcp, test.udp)
+			}
+			cfg.Enable = true
+			if err := cfg.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			for _, mode := range []Mode{ModeTProxy, ModeTUN, ModeRedir} {
+				if cfg.Uses(mode) != (test.tcp == mode || test.udp == mode) {
+					t.Fatalf("empty backend selected %q capture", mode)
+				}
+			}
+		})
+	}
+}
+
+func TestConfigJSONBackendsMatchYAMLandRoundTrip(t *testing.T) {
+	for _, test := range []struct {
+		input    string
+		tcp, udp Mode
+	}{
+		{`{}`, ModeTProxy, ModeTUN},
+		{`{"tcp":null}`, ModeOff, ModeTUN},
+		{`{"udp":""}`, ModeTProxy, ModeOff},
+		{`{"enable":true,"tcp":null,"udp":""}`, ModeOff, ModeOff},
+		{`{"enable":true,"tcp":"redir","udp":""}`, ModeRedir, ModeOff},
+	} {
+		t.Run(test.input, func(t *testing.T) {
+			var cfg Config
+			if err := json.Unmarshal([]byte(test.input), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.TCP != test.tcp || cfg.UDP != test.udp {
+				t.Fatalf("JSON changed empty/omitted intent: %+v", cfg)
+			}
+			for _, codec := range []struct {
+				marshal   func(any) ([]byte, error)
+				unmarshal func([]byte, any) error
+			}{{json.Marshal, json.Unmarshal}, {yaml.Marshal, yaml.Unmarshal}} {
+				data, err := codec.marshal(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var restored Config
+				if err := codec.unmarshal(data, &restored); err != nil {
+					t.Fatalf("serialized backends cannot be read: %s: %v", data, err)
+				}
+				if restored.TCP != test.tcp || restored.UDP != test.udp {
+					t.Fatalf("round trip changed capture intent: %+v", restored)
+				}
+			}
+		})
+	}
+}
+
+func TestConfigLegacyOffRequiresEmptySetting(t *testing.T) {
+	for _, field := range []string{"tcp", "udp"} {
+		for _, value := range []string{"off", "OFF", "Off"} {
+			for _, input := range []string{field + ": " + value, `{"` + field + `":"` + value + `"}`} {
+				var cfg Config
+				err := yaml.Unmarshal([]byte(input), &cfg)
+				if err == nil || !strings.Contains(err.Error(), "off") || !strings.Contains(err.Error(), "empty") {
+					t.Fatalf("legacy backend %s did not explain empty-value migration: %v", input, err)
+				}
+			}
+		}
+	}
+	var cfg Config
+	if err := json.Unmarshal([]byte(`{"tcp":"off"}`), &cfg); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("JSON silently accepted removed off setting: %v", err)
 	}
 }
 

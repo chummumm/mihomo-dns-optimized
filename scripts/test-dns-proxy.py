@@ -722,7 +722,7 @@ def check_native_dns_pools(config, api_port, upstream_a, upstream_b):
   respect-rules: false
   nameserver: [203.0.113.53]
   direct-nameserver: [{endpoint}]
-  speed-check-mode: [none]
+  speed-check-mode: []
   speed-check-timeout: 1000
   speed-check-concurrency: 16
   prefetch-domain: true
@@ -897,7 +897,7 @@ dns:
   nameserver-policy:
     '{blocked}': [127.0.0.1:{blocked_port}]
     '{allowed}': [127.0.0.1:{allowed_port}]
-  speed-check-mode: [none]
+  speed-check-mode: []
   prefetch-domain: false
   serve-expired: false
 sniffer:

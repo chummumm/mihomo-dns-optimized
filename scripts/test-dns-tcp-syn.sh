@@ -13,7 +13,7 @@ fail() {
 
 [[ $# == 1 ]] || fail "usage: $0 <precompiled-dns-test-binary>"
 [[ $EUID == 0 ]] || fail 'requires root with network namespace and raw socket capabilities'
-for command in ip ethtool python3 sysctl realpath mktemp; do
+for command in ip ethtool python3 sysctl realpath mktemp setpriv; do
   command -v "$command" >/dev/null || fail "required command is missing: $command"
 done
 test_binary=$(realpath -- "$1")
@@ -166,7 +166,7 @@ def describe(frame):
     if len(segment) < 20:
         return None
     source_port, destination_port, sequence, acknowledgment = struct.unpack_from("!HHII", segment)
-    if source_port not in (16080, 16081) and destination_port not in (16080, 16081):
+    if source_port not in (16080, 16081, 16082) and destination_port not in (16080, 16081, 16082):
         return None
     flags = segment[13]
     names = [name for bit, name in ((1, "FIN"), (2, "SYN"), (4, "RST"),
@@ -199,6 +199,8 @@ with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3)) as captur
             continue
         direction = "OUT" if address[2] == socket.PACKET_OUTGOING else "IN"
         print("TCP SYN trace %.6f %s %s %s" % (time.monotonic(), interface, direction, detail), flush=True)
+        if "checksum=INVALID" in detail:
+            raise RuntimeError("fixture received a TCP packet with an invalid wire checksum")
         count += 1
         if count >= 128:
             raise RuntimeError("fixture packet trace exceeded its 128-frame limit")
@@ -220,8 +222,9 @@ done
 [[ -f "$fixture_dir/trace-client.ready" && -f "$fixture_dir/trace-peer.ready" ]] ||
   fail 'fixture packet traces did not become ready within five seconds'
 
-# The peer never accepts a completed handshake. Any accepted connection means
-# tcp-syn accidentally used a connect probe; that makes this required gate fail.
+# The SYN port never accepts a completed handshake, including automatic probes
+# with raw permission. A separate port must accept exactly one IPv4 and one
+# IPv6 connection from the process whose raw permission has been removed.
 ip netns exec "$peer_namespace" python3 - "$fixture_dir/ready" "$fixture_dir/stop" >"$fixture_dir/peer.log" 2>&1 <<'PY' &
 import pathlib
 import selectors
@@ -231,25 +234,36 @@ import sys
 ready, stop = map(pathlib.Path, sys.argv[1:])
 listeners = []
 selector = selectors.DefaultSelector()
+accepted_fallbacks = {socket.AF_INET: 0, socket.AF_INET6: 0}
 try:
     for family, address in ((socket.AF_INET, "192.0.2.2"), (socket.AF_INET6, "fd00:6d69:686f::2")):
-        listener = socket.socket(family, socket.SOCK_STREAM)
-        listeners.append(listener)
-        if family == socket.AF_INET6:
-            listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
-        listener.bind((address, 16080))
-        listener.listen(8)
-        listener.setblocking(False)
-        selector.register(listener, selectors.EVENT_READ)
+        for port in (16080, 16082):
+            listener = socket.socket(family, socket.SOCK_STREAM)
+            listeners.append(listener)
+            if family == socket.AF_INET6:
+                listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            listener.bind((address, port))
+            listener.listen(8)
+            listener.setblocking(False)
+            selector.register(listener, selectors.EVENT_READ, (family, port))
     ready.write_text("ready\n")
     while True:
         events = selector.select(timeout=0.02)
         for event, _ in events:
             connection, _ = event.fileobj.accept()
             connection.close()
-            raise RuntimeError("tcp-syn completed a TCP handshake instead of sending a SYN probe")
+            family, port = event.data
+            if port == 16080:
+                raise RuntimeError("raw-capable probe completed a TCP handshake instead of sending a SYN probe")
+            accepted_fallbacks[family] += 1
+            if accepted_fallbacks[family] > 1:
+                raise RuntimeError("automatic TCP fallback opened more than one connection for a family")
+            print("automatic TCP fallback: accepted IPv%d connection" %
+                  (4 if family == socket.AF_INET else 6), flush=True)
         if stop.exists():
             break
+    if accepted_fallbacks != {socket.AF_INET: 1, socket.AF_INET6: 1}:
+        raise RuntimeError("automatic TCP fallback did not complete one connection per family: %r" % accepted_fallbacks)
 finally:
     selector.close()
     for listener in listeners:
@@ -266,16 +280,32 @@ for ((attempt = 0; attempt < 250; attempt++)); do
 done
 [[ -f "$fixture_dir/ready" ]] || fail 'IPv4/IPv6 fixture peer did not become ready within five seconds'
 
+fixture_environment=(
+  MIHOMO_TCP_SYN_INTEGRATION=1
+  MIHOMO_TCP_SYN_TEST_INTERFACE=syn-client
+  MIHOMO_TCP_SYN_TEST_IPV4_CLOSED=192.0.2.2:16081
+  MIHOMO_TCP_SYN_TEST_IPV6_CLOSED='[fd00:6d69:686f::2]:16081'
+)
 test_status=0
-ip netns exec "$client_namespace" env \
-  MIHOMO_TCP_SYN_INTEGRATION=1 \
-  MIHOMO_TCP_SYN_TEST_INTERFACE=syn-client \
+ip netns exec "$client_namespace" env "${fixture_environment[@]}" \
+  MIHOMO_TCP_AUTO_EXPECT=raw \
   MIHOMO_TCP_SYN_TEST_IPV4=192.0.2.2:16080 \
-  MIHOMO_TCP_SYN_TEST_IPV4_CLOSED=192.0.2.2:16081 \
   MIHOMO_TCP_SYN_TEST_IPV6='[fd00:6d69:686f::2]:16080' \
-  MIHOMO_TCP_SYN_TEST_IPV6_CLOSED='[fd00:6d69:686f::2]:16081' \
   "$test_binary" -test.v -test.timeout 1m \
-  -test.run '^TestTCPSYN(KernelRepliesWithoutOpeningTCPConnection|PortReservationIsExclusiveAndReleased|RejectsCanceledAndWrongFamilyProbes)$' || test_status=$?
+  -test.run '^Test(TCPSYN(KernelRepliesWithoutOpeningTCPConnection|PortReservationIsExclusiveAndReleased|RejectsCanceledAndWrongFamilyProbes)|TCPAutoKernelSelectsAvailableMethod)$' || test_status=$?
+
+# Dropping capabilities applies only to this newly exec'd test process. The
+# parent keeps the capabilities required to inspect and clean up the fixture.
+if [[ "$test_status" == 0 ]]; then
+  ip netns exec "$client_namespace" setpriv \
+    --bounding-set=-net_raw --inh-caps=-net_raw --ambient-caps=-net_raw \
+    env "${fixture_environment[@]}" \
+    MIHOMO_TCP_AUTO_EXPECT=tcp \
+    MIHOMO_TCP_SYN_TEST_IPV4=192.0.2.2:16082 \
+    MIHOMO_TCP_SYN_TEST_IPV6='[fd00:6d69:686f::2]:16082' \
+    "$test_binary" -test.v -test.timeout 1m \
+    -test.run '^TestTCPAutoKernelSelectsAvailableMethod$' || test_status=$?
+fi
 
 touch "$fixture_dir/stop"
 for trace_pid in "${trace_pids[@]}"; do
@@ -286,8 +316,9 @@ print_traces
 if ! wait "$peer_pid"; then
   peer_pid=
   cat "$fixture_dir/peer.log" >&2
-  fail 'fixture peer detected an unexpected completed TCP connection'
+  fail 'fixture peer detected a missing fallback or unexpected completed TCP connection'
 fi
 peer_pid=
+cat "$fixture_dir/peer.log"
 [[ "$test_status" == 0 ]] || exit "$test_status"
-printf 'TCP SYN integration: IPv4/IPv6 SYN-ACK and RST-ACK verified with full wire checksums.\n'
+printf 'TCP SYN integration: IPv4/IPv6 raw auto selection, permission-only TCP fallback and wire checksums verified.\n'

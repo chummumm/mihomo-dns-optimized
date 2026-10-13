@@ -3,7 +3,7 @@ package config
 import "testing"
 
 func TestDNSOptimizationExplicitReplyLimitPreservesDefaults(t *testing.T) {
-	for _, fields := range []string{"", "  max-reply-ip-num: 2\n", "  speed-check-mode: [none]\n  max-reply-ip-num: 3\n"} {
+	for _, fields := range []string{"", "  max-reply-ip-num: 2\n", "  speed-check-mode: []\n  max-reply-ip-num: 3\n"} {
 		raw, err := UnmarshalRawConfig([]byte("dns:\n  nameserver: [192.0.2.53]\n" + fields))
 		if err != nil {
 			t.Fatal(err)

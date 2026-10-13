@@ -4,9 +4,7 @@ import (
 	"container/heap"
 	"container/list"
 	"context"
-	"fmt"
 	"hash/fnv"
-	"math"
 	"strings"
 	"time"
 
@@ -16,12 +14,7 @@ import (
 	D "github.com/miekg/dns"
 )
 
-type PrefetchMode string
-
 const (
-	PrefetchModeProactive PrefetchMode = "proactive"
-	PrefetchModeSmartDNS  PrefetchMode = "smartdns"
-
 	cachePrefetchInitialHeat = 3
 	cacheRefreshMinPeriod    = time.Second
 	cachePrefetchRetryBase   = 5 * time.Second
@@ -38,17 +31,7 @@ const (
 	cachePrefetchEntryOverhead = 1024
 )
 
-func ValidatePrefetchMode(mode PrefetchMode) error {
-	switch mode {
-	case "", PrefetchModeProactive, PrefetchModeSmartDNS:
-		return nil
-	default:
-		return fmt.Errorf("dns.prefetch-mode must be proactive or smartdns")
-	}
-}
-
 type cachePrefetchDemandKey struct{}
-type cacheScheduledPrefetchKey struct{}
 
 // A miss retains this only in its bounded foreground exchange. A successful
 // cacheable write claims it once, including when response selection publishes
@@ -76,7 +59,6 @@ type cacheHotEntry struct {
 	next       time.Time
 	heat       uint8
 	failures   uint8
-	periodic   bool
 	running    bool
 	demand     uint64
 	revision   uint64
@@ -334,8 +316,6 @@ func (c *cacheControl) storedPrefetchLocked(ctx context.Context, key string) {
 		c.activatePrefetchLocked(key, demand, expires)
 	}
 	if entry := c.hot[key]; entry != nil {
-		scheduled, _ := ctx.Value(cacheScheduledPrefetchKey{}).(*cacheHotEntry)
-		entry.periodic = scheduled == entry && c.options.PrefetchMode == PrefetchModeSmartDNS && c.options.ServeExpired
 		entry.expires = expires
 		entry.revision++
 		entry.failures = 0
@@ -344,28 +324,12 @@ func (c *cacheControl) storedPrefetchLocked(ctx context.Context, key string) {
 }
 
 func (c *cacheControl) schedulePrefetchLocked(entry *cacheHotEntry, now time.Time) {
-	delay := entry.expires.Sub(now)
-	if c.options.PrefetchMode == PrefetchModeSmartDNS {
-		if c.options.ServeExpired {
-			period := c.expiredPrefetchPeriod()
-			if entry.periodic {
-				delay = period
-			} else {
-				if delay < 0 {
-					delay = 0
-				}
-				if delay > time.Duration(math.MaxInt64)-period {
-					delay = time.Duration(math.MaxInt64)
-				} else {
-					delay += period
-				}
-			}
-		} else {
-			delay -= 3 * time.Second
-		}
-	} else {
-		// Subtraction avoids overflowing a large but valid uint32 DNS TTL.
-		delay -= delay / 5
+	// Fresh entries refresh halfway through their remaining TTL. The expired
+	// interval only applies when real demand activates an already stale answer;
+	// it neither changes fresh deadlines nor postpones overdue work or retries.
+	delay := entry.expires.Sub(now) / 2
+	if !entry.expires.After(now) {
+		delay = entry.expires.Add(c.expiredPrefetchPeriod()).Sub(now)
 	}
 	if delay < cacheRefreshMinPeriod {
 		delay = cacheRefreshMinPeriod

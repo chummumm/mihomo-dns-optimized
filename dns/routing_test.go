@@ -221,7 +221,12 @@ func routingTestEnable(t *testing.T) {
 }
 
 func routingTestResolver() *Resolver {
-	return NewResolver(Config{RuleRouting: true, Main: []NameServer{{Addr: "192.0.2.53:53"}}}).Resolver
+	return NewResolver(Config{
+		RuleRouting: true,
+		Main:        []NameServer{{Addr: "192.0.2.53:53"}},
+		// These fixtures count DNS transport dials, not destination-IP probes.
+		SpeedCheck: SpeedCheckConfig{Mode: []string{}},
+	}).Resolver
 }
 
 func routingTestOrigin() *C.Metadata {

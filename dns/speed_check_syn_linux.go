@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"syscall"
 	"time"
 
 	"github.com/metacubex/mihomo/component/dialer"
@@ -44,14 +45,15 @@ func probeTCPSYN(ctx context.Context, destination netip.Addr, port uint16, optio
 	if destination.Is6() {
 		network = "ip6:tcp"
 	}
-	listener := net.ListenConfig{Control: dialer.SocketControlWithOptions(destination, options...)}
+	control := dialer.SocketControlWithOptions(destination, options...)
+	var policyErr error
+	listener := net.ListenConfig{Control: func(network, address string, conn syscall.RawConn) error {
+		policyErr = control(network, address, conn)
+		return policyErr
+	}}
 	packetConn, err := listener.ListenPacket(ctx, network, source.String())
 	if err != nil {
-		err = tcpSYNSetupError(ctx, err)
-		if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPROTONOSUPPORT) || errors.Is(err, unix.EAFNOSUPPORT) {
-			return 0, fmt.Errorf("%w: opening %s needs kernel raw TCP support and CAP_NET_RAW: %w", errTCPSYNUnavailable, network, err)
-		}
-		return 0, fmt.Errorf("open TCP SYN raw socket: %w", err)
+		return 0, tcpSYNRawSocketError(ctx, network, err, policyErr)
 	}
 	defer packetConn.Close()
 	stop := context.AfterFunc(ctx, func() { _ = packetConn.Close() })
@@ -109,6 +111,21 @@ func probeTCPSYN(ctx context.Context, destination netip.Addr, port uint16, optio
 		}
 		return elapsed, nil
 	}
+}
+
+// A socket policy failure may use the same errno as a missing raw capability.
+// In particular SO_MARK, interface binding and application hooks must never be
+// treated as permission to change probe methods. This classification is only
+// used before the first SYN write; send/receive failures do not pass through it.
+func tcpSYNRawSocketError(ctx context.Context, network string, err, policyErr error) error {
+	err = tcpSYNSetupError(ctx, err)
+	if policyErr == nil && (errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) ||
+		errors.Is(err, unix.EPROTONOSUPPORT) || errors.Is(err, unix.EAFNOSUPPORT) ||
+		errors.Is(err, unix.ESOCKTNOSUPPORT) || errors.Is(err, unix.EOPNOTSUPP) ||
+		errors.Is(err, unix.ENOPROTOOPT) || errors.Is(err, unix.ENOSYS)) {
+		return fmt.Errorf("%w: opening %s needs kernel raw TCP support and CAP_NET_RAW: %w", errTCPSYNUnavailable, network, err)
+	}
+	return fmt.Errorf("open TCP SYN raw socket: %w", err)
 }
 
 // Connecting UDP selects a source address through the same native DIRECT
