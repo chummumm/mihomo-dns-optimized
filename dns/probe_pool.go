@@ -18,6 +18,16 @@ var errDNSProbeClosed = errors.New("DIRECT probe pool closed")
 // not an attempted network timeout and cannot justify hiding an IP family.
 var errDNSProbeNotStarted = errors.New("DIRECT probe canceled before starting")
 
+// Context timers can publish cancellation after their deadline has passed.
+// Such a task must not start network work or acquire another shared waiter.
+func dnsProbeContextActive(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	deadline, bounded := ctx.Deadline()
+	return !bounded || time.Now().Before(deadline)
+}
+
 type dnsProbeWork func(context.Context) (time.Duration, error)
 type dnsProbeDeliver func(time.Duration, error)
 type dnsProbeSample struct {
@@ -102,7 +112,7 @@ func (p *dnsProbePool) submit(ctx context.Context, key string, work dnsProbeWork
 	if !share {
 		key = fmt.Sprintf("private:%d", id)
 	}
-	if task := p.tasks[key]; task != nil && task.ctx.Err() == nil {
+	if task := p.tasks[key]; task != nil && dnsProbeContextActive(task.ctx) {
 		task.waiters[id] = deliver
 		p.mu.Unlock()
 		return &dnsProbeTicket{p, task, id}, nil
@@ -118,11 +128,13 @@ func (p *dnsProbePool) submit(ctx context.Context, key string, work dnsProbeWork
 		p.mu.Unlock()
 		return nil, errDNSProbeBusy
 	}
-	budget := p.timeout
-	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < budget {
-		budget = time.Until(deadline)
+	// Preserve the caller's absolute deadline while isolating each waiter's
+	// cancellation. Rebuilding a relative timeout would extend that deadline.
+	deadline := time.Now().Add(p.timeout)
+	if callerDeadline, bounded := ctx.Deadline(); bounded && callerDeadline.Before(deadline) {
+		deadline = callerDeadline
 	}
-	jobCtx, cancel := context.WithTimeout(contextutils.WithoutCancel(ctx), budget)
+	jobCtx, cancel := context.WithDeadline(contextutils.WithoutCancel(ctx), deadline)
 	task := &dnsProbeTask{key: key, share: share, ctx: jobCtx, cancel: cancel,
 		work: work, waiters: map[uint64]dnsProbeDeliver{id: deliver}}
 	task.stop = context.AfterFunc(p.ctx, cancel)
@@ -182,7 +194,7 @@ func (p *dnsProbePool) worker() {
 			return
 		case task := <-p.jobs:
 			rtt, err := time.Duration(0), errDNSProbeNotStarted
-			if task.ctx.Err() == nil {
+			if dnsProbeContextActive(task.ctx) {
 				rtt, err = task.work(task.ctx)
 			}
 			p.finish(task, rtt, err)

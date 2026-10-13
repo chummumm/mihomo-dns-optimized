@@ -527,7 +527,7 @@ func speedCheckQueryProtected(message *D.Msg) bool {
 }
 
 func (s *directSpeedChecker) checkMode(ctx context.Context, ip netip.Addr, mode speedCheckMode, probe speedCheckProbe) (time.Duration, error) {
-	if err := ctx.Err(); err != nil {
+	if !dnsProbeContextActive(ctx) {
 		return 0, errDNSProbeNotStarted
 	}
 	select {
@@ -538,7 +538,7 @@ func (s *directSpeedChecker) checkMode(ctx context.Context, ip netip.Addr, mode 
 	default:
 		return 0, errDNSProbeBusy
 	}
-	if ctx.Err() != nil {
+	if !dnsProbeContextActive(ctx) {
 		return 0, errDNSProbeNotStarted
 	}
 	return probe(ctx, ip, mode)
