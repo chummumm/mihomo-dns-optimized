@@ -21,6 +21,7 @@ func TestDNSOptimizationDefaultsAndExplicitValues(t *testing.T) {
   speed-check-concurrency: 8
   max-reply-ip-num: 4
   prefetch-domain: true
+  serve-expired-prefetch-time: 60
   serve-expired: false
   serve-expired-ttl: 604800
   serve-expired-reply-ttl: 0
@@ -45,10 +46,10 @@ func TestDNSOptimizationDefaultsAndExplicitValues(t *testing.T) {
 				if got.SpeedCheck.ResponseMode != dns.ResponseModeFastestIP {
 					t.Fatalf("explicit response mode lost: %q", got.SpeedCheck.ResponseMode)
 				}
-				if len(got.SpeedCheck.Mode) != 3 || got.SpeedCheck.Timeout != 800*time.Millisecond || got.SpeedCheck.Concurrency != 8 || !got.CacheOptions.Prefetch || got.CacheOptions.ServeExpired || got.CacheOptions.ServeExpiredTTL != 7*24*time.Hour || got.CacheOptions.ServeExpiredReplyTTL != 0 {
+				if len(got.SpeedCheck.Mode) != 3 || got.SpeedCheck.Timeout != 800*time.Millisecond || got.SpeedCheck.Concurrency != 8 || !got.CacheOptions.Prefetch || got.CacheOptions.ServeExpiredPrefetchTime != time.Minute || got.CacheOptions.ServeExpired || got.CacheOptions.ServeExpiredTTL != 7*24*time.Hour || got.CacheOptions.ServeExpiredReplyTTL != 0 {
 					t.Fatalf("explicit DNS options lost: %+v %+v", got.SpeedCheck, got.CacheOptions)
 				}
-			} else if got.SpeedCheck.Mode != nil || got.CacheOptions.Prefetch || !got.CacheOptions.ServeExpired || got.CacheOptions.ServeExpiredTTL != 0 || got.CacheOptions.ServeExpiredReplyTTL != 1 {
+			} else if got.SpeedCheck.Mode != nil || got.CacheOptions.Prefetch || got.CacheOptions.ServeExpiredPrefetchTime != 0 || !got.CacheOptions.ServeExpired || got.CacheOptions.ServeExpiredTTL != 0 || got.CacheOptions.ServeExpiredReplyTTL != 1 {
 				t.Fatalf("upgrade changed default behavior: %+v %+v", got.SpeedCheck, got.CacheOptions)
 			}
 			if !test.explicit && got.SpeedCheck.ResponseMode != dns.ResponseModeFirstPing {
@@ -78,6 +79,8 @@ func TestDNSOptimizationRejectsInvalidConfiguration(t *testing.T) {
 		{"response-mode: FIRST-PING", "response-mode"},
 		{"serve-expired-ttl: -1", "serve-expired-ttl"},
 		{"serve-expired-ttl: 9223372036854775807", "serve-expired-ttl"},
+		{"serve-expired-prefetch-time: -1", "serve-expired-prefetch-time"},
+		{"serve-expired-prefetch-time: 2147483648", "serve-expired-prefetch-time"},
 		{"serve-expired-reply-ttl: -1", "serve-expired-reply-ttl"},
 		{"serve-expired-reply-ttl: 4294967296", "serve-expired-reply-ttl"},
 		{"cache-max-size: -1", "cache-max-size"},
@@ -98,10 +101,17 @@ func TestDNSOptimizationPrefetchSwitchPreservesOtherDefaults(t *testing.T) {
 	for _, test := range []struct {
 		name, fields string
 		enabled      bool
+		period       time.Duration
 	}{
-		{"omitted", "", false},
-		{"enabled", "  prefetch-domain: true\n", true},
-		{"disabled", "  prefetch-domain: false\n", false},
+		{"omitted", "", false, 0},
+		{"enabled", "  prefetch-domain: true\n", true, 0},
+		{"disabled", "  prefetch-domain: false\n", false, 0},
+		{"explicit-zero", "  prefetch-domain: true\n  serve-expired-prefetch-time: 0\n", true, 0},
+		{"one-second", "  prefetch-domain: true\n  serve-expired-prefetch-time: 1\n", true, time.Second},
+		{"one-minute", "  prefetch-domain: true\n  serve-expired-prefetch-time: 60\n", true, time.Minute},
+		{"largest-interval", "  prefetch-domain: true\n  serve-expired-prefetch-time: 2147483647\n", true, 2147483647 * time.Second},
+		{"interval-does-not-enable-prefetch", "  serve-expired-prefetch-time: 60\n", false, time.Minute},
+		{"explicitly-disabled-with-interval", "  prefetch-domain: false\n  serve-expired-prefetch-time: 60\n", false, time.Minute},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			raw, err := UnmarshalRawConfig([]byte("dns:\n  enable: true\n  nameserver: [192.0.2.53]\n" + test.fields))
@@ -112,8 +122,8 @@ func TestDNSOptimizationPrefetchSwitchPreservesOtherDefaults(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.CacheOptions.Prefetch != test.enabled {
-				t.Fatalf("prefetch switch was ignored or enabled background work implicitly: %+v", got.CacheOptions)
+			if got.CacheOptions.Prefetch != test.enabled || got.CacheOptions.ServeExpiredPrefetchTime != test.period {
+				t.Fatalf("prefetch switch/interval was ignored or enabled background work implicitly: %+v", got.CacheOptions)
 			}
 			if !got.CacheOptions.ServeExpired || got.CacheOptions.ServeExpiredTTL != 0 || got.CacheOptions.ServeExpiredReplyTTL != 1 || got.SpeedCheck.Mode != nil {
 				t.Fatal("prefetch switch changed independent Mihomo cache/probe defaults")
@@ -125,7 +135,6 @@ func TestDNSOptimizationPrefetchSwitchPreservesOtherDefaults(t *testing.T) {
 func TestDNSOptimizationRemovedPrefetchOptionsRequireMigration(t *testing.T) {
 	for _, test := range []struct{ key, value string }{
 		{"prefetch-mode", `"smartdns"`},
-		{"serve-expired-prefetch-time", "60"},
 	} {
 		for _, value := range []string{test.value, "null"} {
 			t.Run("YAML/"+test.key+"/"+value, func(t *testing.T) {

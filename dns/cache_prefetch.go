@@ -324,15 +324,32 @@ func (c *cacheControl) storedPrefetchLocked(ctx context.Context, key string) {
 }
 
 func (c *cacheControl) schedulePrefetchLocked(entry *cacheHotEntry, now time.Time) {
-	delay := entry.expires.Sub(now)
-	// Refresh after 80% of the remaining TTL, independent of stale-answer
-	// retention. Subtraction avoids overflowing a valid uint32 DNS TTL.
-	delay -= delay / 5
+	// Fresh entries refresh halfway through their remaining TTL. The expired
+	// interval only applies when real demand activates an already stale answer;
+	// it neither changes fresh deadlines nor postpones overdue work or retries.
+	delay := entry.expires.Sub(now) / 2
+	if !entry.expires.After(now) {
+		delay = entry.expires.Add(c.expiredPrefetchPeriod()).Sub(now)
+	}
 	if delay < cacheRefreshMinPeriod {
 		delay = cacheRefreshMinPeriod
 	}
 	entry.next = now.Add(delay)
 	c.enqueuePrefetchLocked(entry)
+}
+
+func (c *cacheControl) expiredPrefetchPeriod() time.Duration {
+	period := c.options.ServeExpiredPrefetchTime
+	if period == 0 {
+		period = c.options.ServeExpiredTTL / 2
+		if period == 0 || period > 8*time.Hour {
+			period = 8 * time.Hour
+		}
+	}
+	if period < cacheRefreshMinPeriod {
+		period = cacheRefreshMinPeriod
+	}
+	return period
 }
 
 func (c *cacheControl) enqueuePrefetchLocked(entry *cacheHotEntry) {

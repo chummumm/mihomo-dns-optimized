@@ -59,7 +59,8 @@ dns:
   rr-ttl-reply-max: 0            # 仅限制客户端TTL，不缩短内部缓存
   rr-ttl-min: 0                 # 不抬高原TTL
   rr-ttl-max: 3600              # 正常回答与缓存的TTL上限，秒
-  prefetch-domain: true         # 仅实际DIRECT；首次成功缓存后按剩余TTL约80%提前刷新
+  prefetch-domain: true         # 仅实际DIRECT；新鲜缓存按剩余TTL的50%（至少1秒）预取
+  serve-expired-prefetch-time: 0 # 仅过期缓存重查，秒；0自动推导，本例8小时；正整数指定间隔
   serve-expired: true
   serve-expired-ttl: 604800      # 秒；示例最多使用过期7天的记录，0不限制
   serve-expired-reply-ttl: 1     # 返回过期回答的TTL，允许0

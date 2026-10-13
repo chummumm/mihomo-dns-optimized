@@ -16,11 +16,12 @@
 | `response-mode fastest-ip` | `response-mode: fastest-ip`；也支持 `first-ping`、`fastest-response`，开启测速后按所选时机回答 |
 | `max-reply-ip-num 8` | `max-reply-ip-num: 8`；优选时默认 8；显式设置也限制普通 A/AAAA 和静态 hosts，范围 1–2147483647；省略时不裁剪未优选答案 |
 | Global `-no-speed-check` | 代理 DNS 路径始终不做本地 IP 测速 |
-| `dualstack-ip-selection yes` | `dualstack-ip-selection: true`，仍需启用测速，仅作用于自动 DIRECT 查询 |
+| `dualstack-ip-selection yes` / `no` | 分别写为 `dualstack-ip-selection: true` / `dualstack-ip-selection: false`，使用不加引号的 YAML 布尔值；本项目省略时默认 `false`。开启后仍需启用测速，仅作用于自动 DIRECT 查询 |
 | `dualstack-ip-selection-threshold 10` | 同名字段，毫秒，默认 10，允许 0–1000 |
 | `dualstack-ip-allow-force-AAAA no` | `dualstack-ip-allow-force-AAAA: false`，默认保留 IPv4 |
 | Global `-no-dualstack-selection` | 代理路径不做双栈探测，也不为了本地优选额外查询另一族 |
-| `prefetch-domain yes` | `prefetch-domain: true`；仅 DIRECT，首次真实查询即可激活；统一按剩余 TTL 约 80% 提前刷新 |
+| `prefetch-domain yes` | `prefetch-domain: true`；仅 DIRECT，首次真实查询即可激活；默认按剩余 TTL 的 50% 提前刷新 |
+| `serve-expired-prefetch-time 28800` | 同名秒数字段，0–2147483647；保留过期缓存定时重查用途，28800 为 8 小时；0 / 省略从过期保留期一半自动推导，最多 8 小时、最少 1 秒，不限过期年龄时为 8 小时；不控制新鲜预取点 |
 | `serve-expired yes` | `serve-expired: true` |
 | `serve-expired-ttl 604800` | 同名字段，秒，允许最多使用过期 7 天的回答 |
 | `serve-expired-reply-ttl 0` | 同名字段，可显式设为 0；不延长原缓存过期点 |
@@ -76,7 +77,11 @@ DO / CD 查询以及 AD、RRSIG、SIG、TSIG 等受保护回答不进行地址�
 
 从 `1.0.12` 起，定时预取严格限于实际 DIRECT / Compatible 的自动上游池，只由带有效来源的真实 DNS 入站激活；首次成功缓存即可，不再要求一分钟三次访问，也不因一分钟无新访问就失去资格。真实需求补充有限热度，后台自身不补热；没有新需求时最多两次定时尝试。每次执行前重新选路，发现代理、拒绝或作用域改变后丢弃旧候选。匿名、内部、bootstrap 和 FakeIP 合成不会激活任务。
 
-从 `1.0.13` 起只保留统一的提前刷新策略，移除 `prefetch-mode` 选择器及其附属的 `serve-expired-prefetch-time`；配置中存在这两个旧键会明确报迁移错误，应删除后通过 `prefetch-domain` 控制预取。首次成功缓存后，按剩余 TTL 的约 80% 安排刷新，最小一秒；命中缓存不推迟原定时刻。这样不会因为过期缓存保留期很长而推迟新鲜记录的预取，也无需另设一个 SmartDNS 原版没有的模式字段。SmartDNS 的 `serve-expired-prefetch-time` 不再作为本项目支持的配置迁入，不赋予它新的语义。
+从 `1.0.13` 起移除 `prefetch-mode` 选择器；配置中存在该旧键会明确提示迁移，应删除后通过 `prefetch-domain` 控制定时预取。新鲜记录统一按剩余 TTL 的 50% 提前刷新，最小一秒，这是本项目明确采用的增强策略；命中缓存不推迟原定时刻。
+
+`serve-expired-prefetch-time` 保留 SmartDNS 同名字段的过期缓存重查用途。仅对已过期、仍允许使用且仍有需求热度的定时候选使用间隔 `P`：正整数显式指定秒数；0 / 省略取 `serve-expired-ttl / 2`，自动推导最多 8 小时、最少一秒，过期年龄不限时为 8 小时。过期候选首次期限按原到期点加 `P`，已经超过该期限时最快约一秒后尝试；得到新鲜答案就恢复剩余 TTL 50% 的预取点。显式间隔不会延后已有到期工作或失败退避，也不改变缓存的过期点。
+
+客户端命中过期缓存仍立即提交原来的按需刷新，不等待 `P`。因此 `serve-expired-prefetch-time: 28800` 不会让新鲜 TTL 为 300 秒的记录等 8 小时，也不会阻止客户端过期命中触发更新。新鲜预取、过期定时重查和客户端按需刷新共存，不需要模式切换；有限热度和 DIRECT 定时范围继续生效，不宣称复制 SmartDNS 的所有后台保活细节。
 
 本项目不复制没有新请求仍无限维持冷域名的行为。预取候选使用 16 MiB / resolver 记账预算，通常约 1.2 万至 1.6 万个普通短查询，不再固定 1024 项；按到期先后调度，共用 16 个活动后台刷新槽位。按需过期刷新优先，有限排队且不阻塞前台。
 

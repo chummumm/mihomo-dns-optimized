@@ -62,7 +62,7 @@ func validateDNSOptionNames(node *yaml.Node, visited map[*yaml.Node]bool) error 
 			if err := node.Content[i].Decode(&name); err != nil {
 				return err
 			}
-			if strings.EqualFold(name, "prefetch-mode") || strings.EqualFold(name, "serve-expired-prefetch-time") {
+			if strings.EqualFold(name, "prefetch-mode") {
 				return fmt.Errorf("dns.%s is no longer supported; remove it and use dns.prefetch-domain to enable the fixed DIRECT prefetch policy", name)
 			}
 			for _, canonical := range []string{"force-no-CNAME", "force-AAAA-SOA", "force-qtype-SOA", "dualstack-ip-allow-force-AAAA"} {

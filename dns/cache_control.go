@@ -23,6 +23,9 @@ type CacheOptions struct {
 	ServeExpiredTTL      time.Duration
 	ServeExpiredReplyTTL uint32
 	Prefetch             bool
+	// Expired-only scheduled interval; zero derives half the stale retention,
+	// capped at eight hours. It neither enables Prefetch nor delays demand.
+	ServeExpiredPrefetchTime time.Duration
 }
 
 // Shared by all resolver instances, including their separate upstream pools.
@@ -93,6 +96,11 @@ func newCacheControl(r *Resolver, options *CacheOptions) *cacheControl {
 	value := CacheOptions{ServeExpired: true, ServeExpiredReplyTTL: 1}
 	if options != nil {
 		value = *options
+	}
+	if value.ServeExpiredPrefetchTime < 0 {
+		// Parsed configurations reject negative intervals. Programmatic callers
+		// must not accidentally start an invalid proactive refresh policy.
+		value.Prefetch = false
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &cacheControl{
