@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,6 +59,10 @@ func finishDNSObservation(observation *dnsstats.Query, record dnsstats.Record, c
 		return
 	}
 	resolution := observation.Outcome()
+	record.Upstreams = observation.Upstreams()
+	if len(record.Upstreams) == 1 {
+		record.Upstream = record.Upstreams[0].Address
+	}
 	record.Outcome = resolution.String()
 	switch resolution {
 	case dnsstats.CacheFresh:
@@ -172,21 +177,36 @@ func summarizeDNSAnswers(records []D.RR) ([]dnsstats.Answer, bool) {
 
 // Measure concrete protocol-client exchanges below all DNS answer/candidate
 // caches. Protocol recovery retries remain one resolver exchange.
-func observeDNSUpstream(ctx context.Context, address string, dialers ...*dnsDialer) *dnsstats.Attempt {
-	var outbound dnsstats.Outbound
-	// Infrastructure lookups may carry their caller's route in context while
-	// deliberately using another resolver. Never attribute that inherited exit.
-	if !icontext.DNSBootstrap(ctx) {
-		if len(dialers) != 0 {
-			outbound = dialers[0].ObservabilityOutbound()
-		} else if route := queryRoute(ctx); route != nil && route.err == nil {
-			outbound = route.plan.ObservabilityOutbound()
-		}
-	}
-	return dnsstats.StartUpstream(ctx, address, outbound)
+type dnsUpstreamAttempt struct {
+	attempt *dnsstats.Attempt
+	ctx     context.Context
+	source  dnsstats.UpstreamSource
 }
 
-func finishDNSUpstream(attempt *dnsstats.Attempt, message *D.Msg, err error) {
+func observeDNSUpstream(ctx context.Context, address string, dialers ...*dnsDialer) *dnsUpstreamAttempt {
+	// Infrastructure resolution is excluded by purpose, not endpoint: the same
+	// server remains visible when it answers an ordinary business question.
+	if icontext.DNSBootstrap(ctx) {
+		return nil
+	}
+	var outbound dnsstats.Outbound
+	if len(dialers) != 0 {
+		outbound = dialers[0].ObservabilityOutbound()
+	} else if route := queryRoute(ctx); route != nil && route.err == nil {
+		outbound = route.plan.ObservabilityOutbound()
+	}
+	attempt := dnsstats.StartUpstream(ctx, address, outbound)
+	if attempt == nil {
+		return nil
+	}
+	return &dnsUpstreamAttempt{attempt: attempt, ctx: ctx, source: dnsstats.NewUpstreamSource(address, outbound)}
+}
+
+func finishDNSUpstream(observed *dnsUpstreamAttempt, message *D.Msg, err error) {
+	if observed == nil {
+		return
+	}
+	attempt := observed.attempt
 	if attempt == nil {
 		return
 	}
@@ -203,6 +223,81 @@ func finishDNSUpstream(attempt *dnsstats.Attempt, message *D.Msg, err error) {
 	default:
 		attempt.Complete(dnsstats.UpstreamSuccess)
 	}
+	if err == nil && message != nil {
+		setDNSAnswerSources(observed.ctx, message, []dnsstats.UpstreamSource{observed.source})
+	}
+}
+
+// Provenance belongs to one shared exchange. Copies and merged answers inherit
+// only contributing responses; the immutable result is delivered to each
+// waiter's own query event, never to the first waiter's detached event.
+type dnsAnswerSourcesKey struct{}
+type dnsAnswerSources struct {
+	mu      sync.Mutex
+	answers map[*D.Msg][]dnsstats.UpstreamSource
+}
+
+func withDNSAnswerSources(ctx context.Context) context.Context {
+	return context.WithValue(ctx, dnsAnswerSourcesKey{}, &dnsAnswerSources{})
+}
+
+func dnsAnswerSourcesFor(ctx context.Context, message *D.Msg) []dnsstats.UpstreamSource {
+	s, _ := ctx.Value(dnsAnswerSourcesKey{}).(*dnsAnswerSources)
+	if s == nil || message == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]dnsstats.UpstreamSource(nil), s.answers[message]...)
+}
+
+func setDNSAnswerSources(ctx context.Context, message *D.Msg, sources []dnsstats.UpstreamSource) {
+	s, _ := ctx.Value(dnsAnswerSourcesKey{}).(*dnsAnswerSources)
+	if s == nil || message == nil || len(sources) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.answers == nil {
+		s.answers = make(map[*D.Msg][]dnsstats.UpstreamSource)
+	}
+	merged := s.answers[message]
+	for _, source := range sources {
+		// One extra entry carries truncation to the bounded query record.
+		if len(merged) > dnsstats.MaxQueryUpstreams {
+			break
+		}
+		found := false
+		for _, previous := range merged {
+			if previous == source {
+				found = true
+				break
+			}
+		}
+		if !found {
+			merged = append(merged, source)
+		}
+	}
+	sort.Slice(merged, func(i, j int) bool {
+		a, b := merged[i], merged[j]
+		if a.Address != b.Address {
+			return a.Address < b.Address
+		}
+		if a.Outbound != b.Outbound {
+			return a.Outbound < b.Outbound
+		}
+		if a.OutboundType != b.OutboundType {
+			return a.OutboundType < b.OutboundType
+		}
+		return !a.Reused && b.Reused
+	})
+	s.answers[message] = merged
+}
+
+func inheritDNSAnswerSources(ctx context.Context, message, original *D.Msg) {
+	if message != original {
+		setDNSAnswerSources(ctx, message, dnsAnswerSourcesFor(ctx, original))
+	}
 }
 
 // A shared result carries immutable provenance to every waiter. The work-local
@@ -216,6 +311,7 @@ type dnsExchangeResult struct {
 	earlyReply bool
 	receivedAt time.Time
 	expires    time.Time
+	upstreams  []dnsstats.UpstreamSource
 }
 
 type dnsLocalAnswersKey struct{}

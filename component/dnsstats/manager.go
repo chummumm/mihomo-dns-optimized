@@ -168,6 +168,20 @@ func cleanRecord(record Record) (Record, Outcome, int64) {
 	if record.Upstream != "" {
 		record.Upstream = sanitizeAddress(record.Upstream)
 	}
+	sources := record.Upstreams
+	if len(sources) > MaxQueryUpstreams {
+		sources = sources[:MaxQueryUpstreams]
+		record.UpstreamsTruncated = true
+	}
+	record.Upstreams = make([]UpstreamSource, len(sources))
+	for i, source := range sources {
+		source.Address = sanitizeAddress(source.Address)
+		source.Outbound = bounded(source.Outbound, 128)
+		if source.OutboundType != "direct" && source.OutboundType != "proxy" {
+			source.Outbound, source.OutboundType = "", "unknown"
+		}
+		record.Upstreams[i] = source
+	}
 	outcome, ok := ParseOutcome(record.Outcome)
 	if !ok {
 		outcome = Local
@@ -199,6 +213,9 @@ func cleanRecord(record Record) (Record, Outcome, int64) {
 	}
 	record.Answers = make([]Answer, len(answers))
 	cost := int64(recordOverhead + len(record.QName) + len(record.Client) + len(record.QType) + len(record.Protocol) + len(record.Source) + len(record.RCode) + len(record.Error) + len(record.Upstream))
+	for _, source := range record.Upstreams {
+		cost += int64(64 + len(source.Address) + len(source.Outbound) + len(source.OutboundType))
+	}
 	for i, answer := range answers {
 		if len(answer.Value) > MaxAnswerBytes || !utf8.ValidString(answer.Value) {
 			record.AnswersTruncated = true
@@ -377,6 +394,7 @@ func (m *Manager) Queries(filter Filter) Page {
 					page.NextCursor = page.Items[len(page.Items)-1].ID
 				} else {
 					r.Answers = append([]Answer{}, r.Answers...)
+					r.Upstreams = append([]UpstreamSource(nil), r.Upstreams...)
 					page.Items = append(page.Items, r)
 				}
 			}

@@ -28,6 +28,8 @@ type CacheOptions struct {
 	ServeExpiredPrefetchTime time.Duration
 }
 
+const DefaultServeExpiredPrefetchTime = 8 * time.Hour
+
 // Shared by all resolver instances, including their separate upstream pools.
 // Admission is nonblocking: overload never creates an unbounded goroutine queue.
 var cacheBackgroundSlots = make(chan struct{}, 16)

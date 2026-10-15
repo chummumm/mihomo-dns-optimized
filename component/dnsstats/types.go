@@ -60,21 +60,32 @@ type Answer struct {
 }
 
 type Record struct {
-	ID               string    `json:"id"`
-	Time             time.Time `json:"time"`
-	QName            string    `json:"qname"`
-	Client           string    `json:"client"`
-	QType            string    `json:"qtype"`
-	Protocol         string    `json:"protocol"`
-	Source           string    `json:"source"`
-	Outcome          string    `json:"outcome"`
-	Cache            string    `json:"cache"`
-	RCode            string    `json:"rcode"`
-	ElapsedMS        float64   `json:"elapsed_ms"`
-	Answers          []Answer  `json:"answers"`
-	AnswersTruncated bool      `json:"answers_truncated"`
-	Error            string    `json:"error"`
-	Upstream         string    `json:"upstream"`
+	ID                 string           `json:"id"`
+	Time               time.Time        `json:"time"`
+	QName              string           `json:"qname"`
+	Client             string           `json:"client"`
+	QType              string           `json:"qtype"`
+	Protocol           string           `json:"protocol"`
+	Source             string           `json:"source"`
+	Outcome            string           `json:"outcome"`
+	Cache              string           `json:"cache"`
+	RCode              string           `json:"rcode"`
+	ElapsedMS          float64          `json:"elapsed_ms"`
+	Answers            []Answer         `json:"answers"`
+	AnswersTruncated   bool             `json:"answers_truncated"`
+	Error              string           `json:"error"`
+	Upstream           string           `json:"upstream"`
+	Upstreams          []UpstreamSource `json:"upstreams,omitempty"`
+	UpstreamsTruncated bool             `json:"upstreams_truncated,omitempty"`
+}
+
+const MaxQueryUpstreams = 8
+
+type UpstreamSource struct {
+	Address      string `json:"address"`
+	Outbound     string `json:"outbound"`
+	OutboundType string `json:"outbound_type"`
+	Reused       bool   `json:"reused,omitempty"`
 }
 
 type Counts struct {
@@ -198,13 +209,28 @@ func contextScope(ctx context.Context) scope {
 }
 
 type Query struct {
-	scope    scope
-	start    time.Time
-	outcome  atomic.Uint32
-	finished atomic.Bool
+	scope     scope
+	start     time.Time
+	outcome   atomic.Uint32
+	finished  atomic.Bool
+	upstreams atomic.Pointer[[]UpstreamSource]
 }
 
 func (q *Query) Outcome() Outcome { return Outcome(q.outcome.Load()) }
+
+func (q *Query) Upstreams() []UpstreamSource {
+	if sources := q.upstreams.Load(); sources != nil {
+		return append([]UpstreamSource(nil), (*sources)...)
+	}
+	return nil
+}
+
+func MarkUpstreams(ctx context.Context, sources []UpstreamSource) {
+	if q, _ := ctx.Value(queryKey{}).(*Query); q != nil && !q.finished.Load() {
+		owned := append([]UpstreamSource(nil), sources...)
+		q.upstreams.Store(&owned)
+	}
+}
 
 func StartQuery(ctx context.Context) (context.Context, *Query) {
 	s := contextScope(ctx)
