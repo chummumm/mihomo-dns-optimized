@@ -251,11 +251,15 @@ def run(binary, fill):
                 record = harness.last("cold.observation.test")
                 assert record["outcome"] == "upstream" and record["rcode"] == "NOERROR", record
                 assert record["client"] == "127.0.0.2" and record["protocol"].lower() == "udp", record
+                endpoint = f"udp://127.0.0.1:{harness.upstream_port}"
+                assert record["upstream"] == endpoint, record
+                assert record["upstreams"] == [{"address": endpoint, "outbound": "DIRECT", "outbound_type": "direct"}], record
                 before = upstream.count()
                 upstream_before = harness.api("/dns/observability/upstreams")
                 harness.query("cold.observation.test")
                 cached = harness.last("cold.observation.test")
                 assert cached["outcome"] == "cache_fresh" and cached["cache"] == "fresh", cached
+                assert not cached.get("upstreams") and not cached["upstream"], cached
                 assert upstream.count() == before, "cache hit sent an upstream query"
                 upstream_after = harness.api("/dns/observability/upstreams")
                 assert upstream_before == upstream_after, "cache hit counted as an upstream attempt"

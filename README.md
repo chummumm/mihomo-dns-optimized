@@ -281,7 +281,7 @@ dns:
 
   # 缓存和预取；以下 TTL 均为秒。
   prefetch-domain: true  # 只对实际 DIRECT；新鲜缓存按剩余 TTL 的 50% 提前预取。
-  serve-expired-prefetch-time: 0  # 仅过期缓存重查，秒；0 从过期保留期自动推导，本例为 8 小时。
+  serve-expired-prefetch-time: 28800  # 仅过期缓存重查，默认 8 小时；显式 0 按过期保留期自动推导。
   serve-expired: true
   serve-expired-ttl: 604800
   serve-expired-reply-ttl: 1
@@ -385,7 +385,7 @@ FakeIP 的 IPv6 与 HTTPS / SVCB 处理也保持原行为：应使用虚拟地�
 | 缓存字段 | 默认值 | 含义与单位 |
 | --- | --- | --- |
 | `prefetch-domain` | `false` | 只为实际 DIRECT / Compatible 的真实 DNS 来源定时预取 |
-| `serve-expired-prefetch-time` | 0 | 秒，0–2147483647；仅控制仍允许使用的过期候选定时重查。正整数指定间隔；0 / 省略取 `serve-expired-ttl / 2`，最多 8 小时、最少 1 秒，过期年龄不限时为 8 小时；不改变新鲜缓存的 50% 预取点 |
+| `serve-expired-prefetch-time` | 28800（8 小时） | 秒，0–2147483647；仅控制仍允许使用的过期候选定时重查。正整数指定间隔；显式 0 取 `serve-expired-ttl / 2`，最多 8 小时、最少 1 秒，过期年龄不限时为 8 小时；不改变新鲜缓存的 50% 预取点 |
 | `serve-expired` | `true` | 允许返回过期缓存并触发有界后台更新 |
 | `serve-expired-ttl` | 0 | 秒；0 不限过期年龄，保留上游缺省行为；604800 表示最多过期 7 天 |
 | `serve-expired-reply-ttl` | 1 | 秒；过期回答交给客户端的 TTL，允许 0，不延长原记录过期时间 |

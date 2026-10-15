@@ -59,6 +59,13 @@ func TestDNSObservabilityCacheAndInternalQueryBoundaries(t *testing.T) {
 		if record.QName != "cache-observation.example" || record.Client != "192.0.2.10" || record.Protocol != "udp" || record.Source != "DNS" || record.RCode != "NOERROR" || len(record.Answers) == 0 {
 			t.Fatalf("lost query summary: %+v", record)
 		}
+		if record.Cache == "miss" {
+			if len(record.Upstreams) != 1 || record.Upstreams[0].Address != "udp://192.0.2.53:53" || record.Upstreams[0].Outbound != "observed" || record.Upstreams[0].OutboundType != "direct" || record.Upstream != record.Upstreams[0].Address {
+				t.Fatalf("actual response lost its upstream/exit: %+v", record)
+			}
+		} else if len(record.Upstreams) != 0 || record.Upstream != "" {
+			t.Fatalf("cache hit claimed a new network exchange: %+v", record)
+		}
 	}
 	// Force a still-retained cache entry into its stale window. Its refresh is
 	// real upstream work, but must not create another client query event.
@@ -157,6 +164,11 @@ func TestDNSObservabilitySharedQueriesHaveSeparateClientEvents(t *testing.T) {
 	if got := m.Upstreams(); len(got.Items) != 1 || got.Items[0].Attempts != 1 {
 		t.Fatalf("shared/answer cache work duplicated upstream count: %+v", got)
 	}
+	for _, record := range m.Queries(dnsstats.Filter{}).Items {
+		if len(record.Upstreams) != 1 || record.Upstreams[0].Outbound != "shared-observation" {
+			t.Fatalf("shared flight failed to deliver provenance to every waiter: %+v", record)
+		}
+	}
 }
 
 func TestDNSObservabilityCandidateCacheDoesNotCountNetwork(t *testing.T) {
@@ -167,7 +179,12 @@ func TestDNSObservabilityCandidateCacheDoesNotCountNetwork(t *testing.T) {
 	query := routingTestQuery("cache.example", 101)
 	for i := 0; i < 2; i++ {
 		query.Id++
-		candidateCacheTestExchange(t, ctx, checker, []dnsClient{client}, query)
+		work := withDNSAnswerSources(ctx)
+		answer := candidateCacheTestExchange(t, work, checker, []dnsClient{client}, query)
+		sources := dnsAnswerSourcesFor(work, answer)
+		if len(sources) != 1 || sources[0].Reused != (i == 1) || sources[0].Outbound != "candidate-cache" {
+			t.Fatalf("candidate provenance/reuse marker lost: %+v", sources)
+		}
 	}
 	upstreams := m.Upstreams()
 	if len(upstreams.Items) != 1 || upstreams.Items[0].Attempts != 1 {

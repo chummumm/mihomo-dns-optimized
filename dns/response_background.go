@@ -72,7 +72,7 @@ func (p *dnsResponsePublisher) offer(message *D.Msg) bool {
 	// Each waiter ages once from that clock. Aging an already aged snapshot
 	// again from publication would lose the fractional second at each step.
 	// Every consumer receives a private copy, including late flight joiners.
-	result := &dnsExchangeResult{Msg: adjusted.Copy(), local: local != nil && local.has(answer), receivedAt: dnsAnswerReceivedAt(writeContext, message), expires: expires, earlyReply: true}
+	result := &dnsExchangeResult{Msg: adjusted.Copy(), local: local != nil && local.has(answer), receivedAt: dnsAnswerReceivedAt(writeContext, message), expires: expires, earlyReply: true, upstreams: dnsAnswerSourcesFor(p.ctx, message)}
 	p.release()
 	return p.publish(result)
 }

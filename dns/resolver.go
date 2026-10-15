@@ -307,6 +307,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 			original := result
 			result = r.answerPolicy.apply(m, result)
 			result = ageDNSAnswerAfterPolicy(ctx, original, result)
+			inheritDNSAnswerSources(ctx, result, original)
 			inheritDNSLocalAnswer(ctx, result, original)
 			if cache {
 				cacheAnswer := result
@@ -345,8 +346,9 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 	}
 	fn := func(publish func(*dnsExchangeResult) bool) (*dnsExchangeResult, error) {
 		local := &dnsLocalAnswers{}
-		message, err := exchange(context.WithValue(ctx, dnsLocalAnswersKey{}, local), publish)
-		return &dnsExchangeResult{Msg: message, local: local.has(message)}, err
+		work := withDNSAnswerSources(context.WithValue(ctx, dnsLocalAnswersKey{}, local))
+		message, err := exchange(work, publish)
+		return &dnsExchangeResult{Msg: message, local: local.has(message), upstreams: dnsAnswerSourcesFor(work, message)}, err
 	}
 
 	ch := r.group.DoChanEarlyWithReuse(flightKey, fn, dnsEarlyResultReusable)
@@ -380,6 +382,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 	}
 
 	if err == nil {
+		dnsstats.MarkUpstreams(ctx, ret.upstreams)
 		msg = ret.Msg
 		if ret.local {
 			if msg.Rcode == D.RcodeRefused {

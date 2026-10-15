@@ -12,12 +12,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/metacubex/mihomo/component/dnsstats"
 	C "github.com/metacubex/mihomo/constant"
 	D "github.com/miekg/dns"
 )
 
 type dnsCandidateEntry struct {
 	message                               *D.Msg
+	upstreams                             []dnsstats.UpstreamSource
 	receivedAt, reuseUntil, answerExpires time.Time
 }
 type dnsCandidateCache struct {
@@ -39,6 +41,11 @@ func (c *dnsCandidateCache) get(key string) (*D.Msg, uint64) {
 // time at completion. Returning a pre-aged raw copy here would age twice or
 // allow rr-ttl-min to refill a partially consumed lifetime.
 func (c *dnsCandidateCache) getRaw(key string) (*D.Msg, uint64, time.Time) {
+	answer, generation, receivedAt, _ := c.getWithSources(key)
+	return answer, generation, receivedAt
+}
+
+func (c *dnsCandidateCache) getWithSources(key string) (*D.Msg, uint64, time.Time, []dnsstats.UpstreamSource) {
 	c.mu.RLock()
 	entry, ok := c.entries[key]
 	generation := c.generation
@@ -46,15 +53,15 @@ func (c *dnsCandidateCache) getRaw(key string) (*D.Msg, uint64, time.Time) {
 	c.mu.RUnlock()
 	now := time.Now()
 	if closed || !ok || !now.Before(entry.reuseUntil) || !now.Before(entry.answerExpires) {
-		return nil, generation, time.Time{}
+		return nil, generation, time.Time{}, nil
 	}
-	return entry.message.Copy(), generation, entry.receivedAt
+	return entry.message.Copy(), generation, entry.receivedAt, append([]dnsstats.UpstreamSource(nil), entry.upstreams...)
 }
 func (c *dnsCandidateCache) store(key string, generation uint64, query, answer *D.Msg) {
 	c.storeReceived(key, generation, query, answer, time.Now())
 }
 
-func (c *dnsCandidateCache) storeReceived(key string, generation uint64, query, answer *D.Msg, receivedAt time.Time) {
+func (c *dnsCandidateCache) storeReceived(key string, generation uint64, query, answer *D.Msg, receivedAt time.Time, sources ...dnsstats.UpstreamSource) {
 	if query == nil || answer == nil || answer.Truncated || answer.Rcode != D.RcodeSuccess || !speedCheckResponseMatches(query, answer) {
 		return
 	}
@@ -95,6 +102,7 @@ func (c *dnsCandidateCache) storeReceived(key string, generation uint64, query, 
 	}
 	c.entries[key] = dnsCandidateEntry{
 		message: owned, receivedAt: receivedAt,
+		upstreams:  append([]dnsstats.UpstreamSource(nil), sources...),
 		reuseUntil: receivedAt.Add(time.Second), answerExpires: receivedAt.Add(time.Duration(ttl) * time.Second),
 	}
 }
@@ -135,7 +143,7 @@ func (c *dnsCandidateClient) ExchangeContext(ctx context.Context, query *D.Msg) 
 		return nil, err
 	}
 	key := makeDNSRouteKey(ctx, route, wire, true) + "|candidate-pool:" + c.poolKey + "|server:" + c.serverKey
-	cached, generation, receivedAt := c.cache.getRaw(key)
+	cached, generation, receivedAt, sources := c.cache.getWithSources(key)
 	if cached != nil {
 		if hasDNSAnswerLifetimes(ctx) {
 			recordDNSAnswerReceived(ctx, cached, receivedAt)
@@ -143,12 +151,16 @@ func (c *dnsCandidateClient) ExchangeContext(ctx context.Context, query *D.Msg) 
 			cached = ageDNSAnswerAt(cached, receivedAt, time.Now())
 		}
 		cached.Id = query.Id
+		for i := range sources {
+			sources[i].Reused = true
+		}
+		setDNSAnswerSources(ctx, cached, sources)
 		return cached, nil
 	}
 	answer, err := c.dnsClient.ExchangeContext(ctx, query)
 	if err == nil {
 		receivedAt = recordDNSAnswerReceived(ctx, answer, time.Now())
-		c.cache.storeReceived(key, generation, query, answer, receivedAt)
+		c.cache.storeReceived(key, generation, query, answer, receivedAt, dnsAnswerSourcesFor(ctx, answer)...)
 	}
 	return answer, err
 }

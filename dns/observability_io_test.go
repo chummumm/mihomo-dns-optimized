@@ -146,8 +146,8 @@ func TestDNSObservedOutboundUsesPhysicalLeafAndNotBootstrapCaller(t *testing.T) 
 	}
 	finishDNSUpstream(observeDNSUpstream(icontext.WithDNSBootstrap(ctx), "udp://192.0.2.53:53"), &D.Msg{}, nil)
 	rows = m.Upstreams().Items
-	if len(rows) != 2 {
-		t.Fatalf("bootstrap inherited the caller's exit: %+v", rows)
+	if len(rows) != 1 || rows[0].Attempts != 2 {
+		t.Fatalf("bootstrap appeared in business upstream statistics: %+v", rows)
 	}
 	for _, row := range rows {
 		if row.OutboundType == "unknown" && row.Outbound != "" {

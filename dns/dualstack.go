@@ -165,6 +165,7 @@ func (d *dualStackDecision) prefer(message *D.Msg, cache bool) (*D.Msg, bool) {
 
 func (d *dualStackDecision) answer(ctx context.Context, positive *D.Msg, cache bool) (*D.Msg, bool) {
 	message, cache := d.prefer(positive, cache)
+	inheritDNSAnswerSources(ctx, message, positive)
 	selection := &dnsDualStackSelection{positive: positive, measurements: d.primary, pool: d.pool}
 	if d.ready {
 		selection.otherQuery, selection.other, selection.otherMeasurements = d.otherQuery, d.auxiliary, d.other

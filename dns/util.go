@@ -112,6 +112,7 @@ func recordDNSAnswerReceived(ctx context.Context, message *D.Msg, receivedAt tim
 }
 
 func inheritDNSAnswerLifetime(ctx context.Context, message, original *D.Msg) {
+	inheritDNSAnswerSources(ctx, message, original)
 	lifetimes, _ := ctx.Value(dnsAnswerLifetimesKey{}).(*dnsAnswerLifetimes)
 	if lifetimes == nil || message == nil || original == nil || message == original {
 		return

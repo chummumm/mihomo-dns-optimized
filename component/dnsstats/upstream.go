@@ -64,6 +64,11 @@ func normalizeOutbound(outbound Outbound) Outbound {
 	return outbound
 }
 
+func NewUpstreamSource(address string, outbound Outbound) UpstreamSource {
+	outbound = normalizeOutbound(outbound)
+	return UpstreamSource{Address: sanitizeAddress(address), Outbound: outbound.Name, OutboundType: outbound.Type}
+}
+
 type Upstreams struct {
 	Items        []UpstreamStats `json:"items"`
 	Scope        string          `json:"scope"`
