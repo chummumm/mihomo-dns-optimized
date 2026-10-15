@@ -181,10 +181,10 @@ func (d *dualStackDecision) answer(ctx context.Context, positive *D.Msg, cache b
 // commit the selected positive pair, under its ordinary generation/write lock.
 // Existing checker slots bound all probes across both families and callers.
 func (s *directSpeedChecker) ExchangeDualStackWithProbe(ctx context.Context, clients []dnsClient, query *D.Msg, probe speedCheckProbe, config DualStackConfig) (*D.Msg, bool, error) {
-	if query != nil && speedCheckQuestion(query) {
+	if speedCheckAddressQuestion(query) {
 		clients = s.shareCandidateClients(ctx, clients)
 	}
-	eligible := s != nil && probe != nil && config.Enabled && query != nil && speedCheckQuestion(query)
+	eligible := s != nil && probe != nil && config.Enabled && speedCheckAddressQuestion(query)
 	if route := queryRoute(ctx); route != nil && (route.plan == nil || (route.plan.Type() != C.Direct && route.plan.Type() != C.Compatible)) {
 		eligible = false
 	}

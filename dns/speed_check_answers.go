@@ -78,6 +78,9 @@ type speedCheckAnswerRecord struct {
 
 func speedCheckAnswer(ctx context.Context, best speedCheckResult, question D.Question, responses []*D.Msg, measurements map[netip.Addr]time.Duration, limit int) *D.Msg {
 	winning := best.candidate.response
+	if question.Qtype == D.TypeHTTPS {
+		return speedCheckHTTPSAnswer(ctx, winning, question, measurements)
+	}
 	message := winning.Copy()
 	chain, valid := speedCheckResponseChain(winning, question)
 	if !valid || speedCheckProtected(winning) {

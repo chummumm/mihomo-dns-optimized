@@ -48,6 +48,9 @@ func (r *Resolver) exchangeBatch(ctx context.Context, clients []dnsClient, query
 	}
 	route := queryRoute(ctx)
 	probe := func(ctx context.Context, address netip.Addr, mode speedCheckMode) (time.Duration, error) {
+		if query.Question[0].Qtype == D.TypeHTTPS && address.Is6() && (!r.ipv6 || r.answerPolicy.ForceAAAASOA) {
+			return 0, errDNSProbeNotStarted
+		}
 		if mode.port == 0 {
 			options, err := route.plan.DirectProbeOptions()
 			if err != nil {

@@ -21,7 +21,7 @@ const (
 func limitDNSEarlyReplyTTL(query, answer *D.Msg) *D.Msg {
 	if !answerPolicyCanRewrite(query, answer) || answer.Rcode != D.RcodeSuccess ||
 		query.Question[0].Qclass != D.ClassINET ||
-		(query.Question[0].Qtype != D.TypeA && query.Question[0].Qtype != D.TypeAAAA) ||
+		!speedCheckQuestion(query) ||
 		len(speedCheckCandidates(answer, query.Question[0])) == 0 {
 		return answer
 	}

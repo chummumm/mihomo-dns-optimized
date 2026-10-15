@@ -441,7 +441,7 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 }
 
 func speedCheckQuestion(message *D.Msg) bool {
-	if message.CheckingDisabled || speedCheckQueryProtected(message) {
+	if message == nil || message.CheckingDisabled || speedCheckQueryProtected(message) {
 		return false
 	}
 	if opt := message.IsEdns0(); opt != nil && opt.Do() {
@@ -449,7 +449,13 @@ func speedCheckQuestion(message *D.Msg) bool {
 	}
 	return len(message.Question) == 1 && message.Opcode == D.OpcodeQuery &&
 		message.Question[0].Qclass == D.ClassINET &&
-		(message.Question[0].Qtype == D.TypeA || message.Question[0].Qtype == D.TypeAAAA)
+		(message.Question[0].Qtype == D.TypeA || message.Question[0].Qtype == D.TypeAAAA || message.Question[0].Qtype == D.TypeHTTPS)
+}
+
+// HTTPS carries both families in one service record. Only address questions
+// may create an auxiliary A/AAAA exchange or a family-preference cache entry.
+func speedCheckAddressQuestion(message *D.Msg) bool {
+	return speedCheckQuestion(message) && message.Question[0].Qtype != D.TypeHTTPS
 }
 
 func speedCheckResponseMatches(query, response *D.Msg) bool {
@@ -475,6 +481,9 @@ func speedCheckCandidates(message *D.Msg, question D.Question) []speedCheckCandi
 		return nil
 	}
 	owner := chain.owner
+	if question.Qtype == D.TypeHTTPS {
+		return speedCheckHTTPSCandidates(message, owner)
+	}
 	var result []speedCheckCandidate
 	for _, rr := range message.Answer {
 		if rr.Header().Class != D.ClassINET || rr.Header().Rrtype != question.Qtype || !strings.EqualFold(rr.Header().Name, owner) {

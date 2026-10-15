@@ -15,6 +15,11 @@ import (
 // never combine votes across incompatible alias paths. With no agreement,
 // retain the normal first valid answer instead of inventing reachability.
 func speedCheckUnmeasuredAnswer(ctx context.Context, first *D.Msg, question D.Question, responses []*D.Msg, limit int) *D.Msg {
+	// A service binding's hints cannot be voted on independently of its
+	// endpoint and TLS parameters. No successful probe means no hint rewrite.
+	if question.Qtype == D.TypeHTTPS {
+		return first
+	}
 	type vote struct {
 		candidate speedCheckCandidate
 		count     int
