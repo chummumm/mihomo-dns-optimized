@@ -260,7 +260,7 @@ func cachedDNSDualStackFamily(ctx context.Context, clients []dnsClient, query *D
 // This never performs network I/O, changes routing, or stores the transient SOA.
 func (r *Resolver) preferCachedDualStack(ctx context.Context, query, answer *D.Msg, key string, expires time.Time) *D.Msg {
 	if r.cacheControl == nil || !r.dualStack.Enabled || !r.ipv6 || r.speedChecker == nil ||
-		!speedCheckQuestion(query) || !answerPolicyCanRewrite(query, answer) ||
+		!speedCheckAddressQuestion(query) || !answerPolicyCanRewrite(query, answer) ||
 		len(speedCheckCandidates(answer, query.Question[0])) == 0 ||
 		r.answerPolicy.forcesQtype(D.TypeA) || r.answerPolicy.forcesQtype(D.TypeAAAA) ||
 		(query.Question[0].Qtype == D.TypeA && !r.dualStack.AllowForceAAAA) {
@@ -304,7 +304,7 @@ func (r *Resolver) storeDualStackAuxiliary(ctx context.Context, original *D.Msg)
 		return
 	}
 	query, message := selection.otherQuery, selection.other.message
-	if !speedCheckQuestion(query) || !answerPolicyCanRewrite(query, message) || len(speedCheckCandidates(message, query.Question[0])) == 0 {
+	if !speedCheckAddressQuestion(query) || !answerPolicyCanRewrite(query, message) || len(speedCheckCandidates(message, query.Question[0])) == 0 {
 		return
 	}
 	otherCtx, ok := otherFamilyCacheContext(ctx, query)
