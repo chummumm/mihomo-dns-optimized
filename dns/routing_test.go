@@ -448,12 +448,14 @@ func TestDNSRuleRoutingSingleflightSeparatesSources(t *testing.T) {
 	defer release()
 	results := make(chan error, 10)
 	start := make(chan struct{})
+	joined := make(chan struct{}, 10)
 	for index := 0; index < 10; index++ {
 		md := routingTestOrigin()
 		if index >= 8 {
 			md.SpecialRules = fmt.Sprintf("tenant-%d", index)
 		}
-		ctx, query := routingTestContext(a, md), routingTestQuery("shared.example", uint16(index+100))
+		ctx := &observabilityJoinedContext{Context: routingTestContext(a, md), joined: joined}
+		query := routingTestQuery("shared.example", uint16(index+100))
 		go func() {
 			<-start
 			answer, err := r.ExchangeContext(ctx, query)
@@ -466,6 +468,15 @@ func TestDNSRuleRoutingSingleflightSeparatesSources(t *testing.T) {
 	close(start)
 	for index := 0; index < 3; index++ {
 		routingTestNextQuestion(t, a)
+	}
+	// Three upstream questions establish the source partitions, but do not
+	// prove that the other seven callers have joined their shared flight.
+	for index := 0; index < 10; index++ {
+		select {
+		case <-joined:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("only %d callers joined before releasing upstream replies", index)
+		}
 	}
 	release()
 	for index := 0; index < 10; index++ {

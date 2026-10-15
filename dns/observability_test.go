@@ -104,7 +104,7 @@ type observabilityJoinedContext struct {
 }
 
 func (c *observabilityJoinedContext) Done() <-chan struct{} {
-	// In this non-routing foreground path the original request's Done is
+	// In these foreground resolver paths the original request's Done is
 	// first read by exchangeWithoutCache's select, after DoChan has joined
 	// the group. Shared work uses WithoutCancel and cannot signal this hook.
 	c.once.Do(func() { c.joined <- struct{}{} })
