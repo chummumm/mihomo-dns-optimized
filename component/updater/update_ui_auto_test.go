@@ -127,6 +127,16 @@ func uiTestAutomaticSettled(u *UIUpdater) bool {
 	return s.checking == nil && !s.updating.Load()
 }
 
+// On Windows, an inspection's open file can prevent renaming its parent
+// directory. Inspect under the install commit lock so polling cannot make the
+// update fail; the read still verifies the actual installed content.
+func uiTestAutomaticContent(u *UIUpdater) string {
+	uiActivation.Lock()
+	defer uiActivation.Unlock()
+	data, _ := os.ReadFile(filepath.Join(u.externalUIPath, "index.html"))
+	return string(data)
+}
+
 func TestUIUpdaterAutomaticDefaultsAndBootstrap(t *testing.T) {
 	t.Run("disabled by default", func(t *testing.T) {
 		u := uiTestUpdater(t, uiTestAutomaticFiles("0.3.6", "existing"))
@@ -175,8 +185,7 @@ func TestUIUpdaterAutomaticDefaultsAndBootstrap(t *testing.T) {
 		u.StartAutoDownloadUI()
 		u.StartAutoDownloadUI()
 		uiTestAutomaticWait(t, func() bool {
-			data, _ := os.ReadFile(filepath.Join(u.externalUIPath, "index.html"))
-			return requests.Load() == 1 && string(data) == "bootstrap" && uiTestAutomaticSettled(u)
+			return requests.Load() == 1 && uiTestAutomaticContent(u) == "bootstrap" && uiTestAutomaticSettled(u)
 		})
 		if requests.Load() != 1 || uiTestIndex(t, u) != "bootstrap" {
 			t.Fatal("empty-directory bootstrap did not install exactly once")
@@ -280,8 +289,7 @@ func TestUIUpdaterAutomaticVersionGateAndConditionalChecks(t *testing.T) {
 			uiTestActivateUpdater(t, u)
 			ticker := clock.ticker(t, 0)
 			uiTestAutomaticWait(t, func() bool {
-				data, _ := os.ReadFile(filepath.Join(u.externalUIPath, "index.html"))
-				return requests.Load() == 1 && string(data) == test.want && uiTestAutomaticSettled(u)
+				return requests.Load() == 1 && uiTestAutomaticContent(u) == test.want && uiTestAutomaticSettled(u)
 			})
 			uiTestExpireCheck(u)
 			ticker.fire(t, *u.automatic.next.Load())
@@ -447,7 +455,6 @@ func TestUIUpdaterAutomaticRetriesOnNextCycle(t *testing.T) {
 	uiTestExpireCheck(u)
 	ticker.fire(t, *u.automatic.next.Load())
 	uiTestAutomaticWait(t, func() bool {
-		data, _ := os.ReadFile(filepath.Join(u.externalUIPath, "index.html"))
-		return requests.Load() == 2 && string(data) == "recovered" && uiTestAutomaticSettled(u)
+		return requests.Load() == 2 && uiTestAutomaticContent(u) == "recovered" && uiTestAutomaticSettled(u)
 	})
 }
