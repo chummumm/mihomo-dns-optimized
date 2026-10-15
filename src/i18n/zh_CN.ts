@@ -82,7 +82,7 @@ const CN = {
         upstream: '上游',
         unknown: '未知',
         unknownUpstream: '未知 / 未归因',
-        cacheNoExchange: '缓存命中（本次未访问上游）',
+        cacheNoExchange: '缓存命中',
         localNoExchange: '本地应答（本次未访问上游）',
         reusedAnswer: '复用候选答案',
         upstreamsTruncated: '此处只保留了部分上游来源。',

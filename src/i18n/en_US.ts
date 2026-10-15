@@ -82,7 +82,7 @@ const EN = {
         upstream: 'Upstream',
         unknown: 'Unknown',
         unknownUpstream: 'Unknown / not attributed',
-        cacheNoExchange: 'Cache hit (no upstream exchange for this query)',
+        cacheNoExchange: 'Cache hit',
         localNoExchange: 'Local answer (no upstream exchange for this query)',
         reusedAnswer: 'Reused candidate answer',
         upstreamsTruncated: 'Only part of the upstream provenance was retained.',
