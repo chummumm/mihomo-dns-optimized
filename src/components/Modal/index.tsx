@@ -94,17 +94,20 @@ export function Modal (props: ModalProps) {
     }
 
     const modal = (
-        <div
+        <motion.div
             className={classnames('modal-mask', { 'modal-show': show })}
             ref={maskRef}
             onMouseDown={handleMaskMouseDown}
             aria-hidden={!show}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
         >
             <motion.div
                 className={classnames('modal', `modal-${size}`, className)}
                 style={style}
                 initial={hidden}
                 animate={show ? { opacity: 1, scale: 1, y: 0 } : hidden}
+                exit={hidden}
                 transition={springs.sheet}
             >
                 <div className="modal-title">{title}</div>
@@ -124,7 +127,7 @@ export function Modal (props: ModalProps) {
                     )
                 }
             </motion.div>
-        </div>
+        </motion.div>
     )
 
     return createPortal(modal, portalRef.current)

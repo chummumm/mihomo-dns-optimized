@@ -35,6 +35,10 @@ function makeRecords (prefix, count) {
                 ? [{ type: 'AAAA', value: '2001:db8::42', ttl: 64 }, { type: 'TXT', value: maliciousAnswer, ttl: 30 }]
                 : [{ type: 'A', value: '192.0.2.42', ttl: 300 }],
             answers_truncated: fresh, error: '', upstream: fresh ? '' : 'https://resolver.example/dns-query',
+            upstreams: fresh ? [] : [
+                { address: 'https://resolver.example/dns-query', outbound: 'node-a', outbound_type: 'proxy' },
+                { address: 'udp://resolver-two.example:53', outbound: 'DIRECT', outbound_type: 'direct', reused: true },
+            ],
         }
     })
 }
@@ -287,16 +291,26 @@ async function run () {
         const detail = page.getByRole('dialog', { name: 'DNS query details' })
         await until(async () => await detail.isVisible(), 'query details visible')
         assert.match(await detail.textContent(), /NOERROR/)
-        assert.match(await detail.textContent(), /Unknown \/ not attributed/)
+        assert.match(await detail.textContent(), /Cache hit \(no upstream exchange for this query\)/)
+        assert.match(await detail.textContent(), /Actual outbound/)
         assert.match(await detail.textContent(), /Fresh hit/)
         assert.equal(await detail.locator('.dns-answer-table tbody tr').first().locator('td').last().textContent(), '64', 'answer TTL is preserved')
         assert.match(await detail.textContent(), /Only part of the answer was retained/)
         assert.equal(await detail.locator('img').count(), 0, 'DNS answer text is escaped')
         assert.equal(await page.evaluate(() => window.__dnsXSS), undefined)
         await detail.getByRole('button', { name: 'Close', exact: true }).click()
+        assert.equal(await detail.count(), 1, 'closing keeps the portal mounted for the exit animation')
+        await until(async () => await detail.count() === 0, 'exit animation releases the portal')
         await queryButtons().nth(1).click()
         assert.match(await page.getByRole('dialog').textContent(), /https:\/\/resolver.example\/dns-query/)
-        await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click()
+        assert.match(await page.getByRole('dialog').textContent(), /node-a/)
+        assert.match(await page.getByRole('dialog').textContent(), /DIRECT/)
+        assert.match(await page.getByRole('dialog').textContent(), /Reused candidate answer/)
+        await page.keyboard.press('Escape')
+        await until(async () => await detail.count() === 0, 'Escape completes the exit animation')
+        await queryButtons().nth(1).click()
+        await page.locator('.modal-mask.modal-show').click({ position: { x: 5, y: 5 } })
+        await until(async () => await detail.count() === 0, 'mask click completes the exit animation')
         await page.getByRole('button', { name: 'Next', exact: true }).click()
         await until(async () => (await queryButtons().allTextContents())[0] === stateA.records[50].qname, 'cursor page 2')
         const pageTwoNames = await queryButtons().allTextContents()
