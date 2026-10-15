@@ -275,7 +275,7 @@ func TestSpeedCheckFallbackModeGetsTimeAfterBlackhole(t *testing.T) {
 }
 
 func TestSpeedCheckPreservesDNSSECAndNonAddressQuestions(t *testing.T) {
-	for _, name := range []string{"DO", "CD", "TSIG", "HTTPS"} {
+	for _, name := range []string{"DO", "CD", "TSIG", "TXT"} {
 		t.Run(name, func(t *testing.T) {
 			query := new(D.Msg).SetQuestion("example.", D.TypeA)
 			switch name {
@@ -285,8 +285,8 @@ func TestSpeedCheckPreservesDNSSECAndNonAddressQuestions(t *testing.T) {
 				query.CheckingDisabled = true
 			case "TSIG":
 				query.SetTsig("key.", D.HmacSHA256, 300, time.Now().Unix())
-			case "HTTPS":
-				query.SetQuestion("example.", D.TypeHTTPS)
+			case "TXT":
+				query.SetQuestion("example.", D.TypeTXT)
 			}
 			response := speedCheckTestReply(t, query, "example. 60 IN A 192.0.2.1", "example. 60 IN A 192.0.2.2")
 			s := speedCheckTestChecker(t, time.Second, 1)

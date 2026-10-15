@@ -183,6 +183,9 @@ func TestSpeedCheckHTTPSPreservesProtectedQueriesAndAnswers(t *testing.T) {
 				query.Question[0].Qtype = D.TypeSVCB
 			}
 			answer := speedCheckTestReply(t, query, "www.example. 60 IN HTTPS 1 . ipv4hint=192.0.2.1,192.0.2.2 ipv6hint=2001:db8::1")
+			if name == "SVCB" {
+				answer = speedCheckTestReply(t, query, "www.example. 60 IN SVCB 1 . ipv4hint=192.0.2.1,192.0.2.2 ipv6hint=2001:db8::1")
+			}
 			switch name {
 			case "AD":
 				answer.AuthenticatedData = true
@@ -226,12 +229,20 @@ func TestSpeedCheckHTTPSDoesNotVoteAcrossServiceBindings(t *testing.T) {
 
 func TestSpeedCheckHTTPSMandatoryHintRemoval(t *testing.T) {
 	query := new(D.Msg).SetQuestion("www.example.", D.TypeHTTPS)
-	for _, preferred := range []string{"192.0.2.1", "2001:db8::1"} {
-		t.Run(preferred, func(t *testing.T) {
-			answer := speedCheckTestReply(t, query, "www.example. 60 IN HTTPS 1 . mandatory=ipv4hint,ipv6hint ipv4hint=192.0.2.1 ipv6hint=2001:db8::1")
+	for _, tc := range []struct {
+		preferred, mandatory string
+		keys                 []D.SVCBKey
+	}{
+		{"192.0.2.1", "ipv4hint,ipv6hint", []D.SVCBKey{D.SVCB_IPV4HINT}},
+		{"2001:db8::1", "ipv4hint,ipv6hint", []D.SVCBKey{D.SVCB_IPV6HINT}},
+		{"192.0.2.1", "ipv6hint", nil},
+		{"2001:db8::1", "ipv4hint", nil},
+	} {
+		t.Run(tc.preferred+"/"+tc.mandatory, func(t *testing.T) {
+			answer := speedCheckTestReply(t, query, "www.example. 60 IN HTTPS 1 . mandatory="+tc.mandatory+" ipv4hint=192.0.2.1 ipv6hint=2001:db8::1")
 			s := speedCheckHTTPSTestChecker(t)
 			s.probe = func(_ context.Context, ip netip.Addr, _ speedCheckMode) (time.Duration, error) {
-				if ip.String() == preferred {
+				if ip.String() == tc.preferred {
 					return time.Millisecond, nil
 				}
 				return time.Second, nil
@@ -241,11 +252,11 @@ func TestSpeedCheckHTTPSMandatoryHintRemoval(t *testing.T) {
 				t.Fatal(err)
 			}
 			record := got.Answer[0].(*D.HTTPS)
-			key := D.SVCB_IPV4HINT
-			if preferred == "2001:db8::1" {
-				key = D.SVCB_IPV6HINT
-			}
-			if !reflect.DeepEqual(record.Value[0].(*D.SVCBMandatory).Code, []D.SVCBKey{key}) || len(record.Value) != 2 {
+			if tc.keys == nil {
+				if len(record.Value) != 1 || record.Value[0].Key() == D.SVCB_MANDATORY {
+					t.Fatalf("empty mandatory parameter was retained: %v", record)
+				}
+			} else if !reflect.DeepEqual(record.Value[0].(*D.SVCBMandatory).Code, tc.keys) || len(record.Value) != 2 {
 				t.Fatalf("removed family is still mandatory: %v", record)
 			}
 		})
