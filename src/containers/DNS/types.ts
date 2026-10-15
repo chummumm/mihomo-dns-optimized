@@ -41,6 +41,8 @@ export interface DNSQuery {
     answers_truncated: boolean
     error: string
     upstream: string
+    upstreams?: Array<{ address: string, outbound: string, outbound_type: 'direct' | 'proxy' | 'unknown', reused?: boolean }>
+    upstreams_truncated?: boolean
 }
 
 export interface DNSQueryParams {

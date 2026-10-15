@@ -1,4 +1,5 @@
 import { type ColumnDef } from '@tanstack/react-table'
+import { AnimatePresence } from 'motion/react'
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 
 import { Button, Card, Icon, Modal } from '@components'
@@ -23,14 +24,12 @@ interface QueriesProps {
 
 function QueryDetails ({ query, close }: { query: DNSQuery, close: () => void }) {
     const { t } = useDNSI18n()
-
-    useEffect(() => {
-        function keydown (event: KeyboardEvent) {
-            if (event.key === 'Escape') close()
-        }
-        document.addEventListener('keydown', keydown)
-        return () => document.removeEventListener('keydown', keydown)
-    }, [close])
+    const cached = query.cache === 'fresh' || query.cache === 'stale'
+    const local = ['hosts', 'fake_ip', 'local', 'reject', 'drop'].includes(query.outcome)
+    const noExchange = cached ? t('cacheNoExchange') : local ? t('localNoExchange') : t('unknownUpstream')
+    const upstreams = query.upstreams ?? []
+    const addresses = upstreams.map(source => `${source.address}${source.reused ? ` (${t('reusedAnswer')})` : ''}`)
+    const exits = upstreams.map(source => `${source.outbound || t('unknownUpstream')}${source.reused ? ` (${t('reusedAnswer')})` : ''}`)
 
     const fields = [
         [t('time'), formatDNSTime(query.time, true)],
@@ -43,7 +42,8 @@ function QueryDetails ({ query, close }: { query: DNSQuery, close: () => void })
         [t('cache'), t(`cacheValue.${query.cache}`)],
         ['RCODE', query.rcode || t('noResponse')],
         [t('latency'), `${formatDNSNumber(query.elapsed_ms, 2)} ms`],
-        [t('upstream'), query.upstream || t('unknownUpstream')],
+        [t('upstream'), addresses.length ? addresses.join('\n') : query.upstream || noExchange],
+        [t('actualOutbound'), exits.length ? [...new Set(exits)].join('\n') : noExchange],
         [t('errorClass'), query.error || '—'],
     ]
 
@@ -64,6 +64,7 @@ function QueryDetails ({ query, close }: { query: DNSQuery, close: () => void })
                     </table>
                 </div>}
             {query.answers_truncated && <p className="dns-notice">{t('answersTruncated')}</p>}
+            {query.upstreams_truncated && <p className="dns-notice">{t('upstreamsTruncated')}</p>}
             <p className="dns-muted dns-caption">{t('upstreamAttribution')}</p>
             <div className="dns-details-footer"><Button onClick={close}>{t('close')}</Button></div>
         </div>
@@ -273,6 +274,7 @@ export function DNSQueriesPage ({ client, instanceID, instanceChanged }: Queries
         </Card>
         {data && !responseIndex && <p className="dns-muted dns-caption">{t('paginationUnavailable')}</p>}
         <p className="dns-muted dns-caption">{t('retainedScope')} · {t('retained')}: {data ? formatDNSNumber(data.retained) : '—'} · {t('evicted')}: {data ? formatDNSNumber(data.evicted) : '—'}</p>
-        {selected && <QueryDetails query={selected} close={closeDetails} />}
+        {/* A new kernel identity discards old details immediately, including while capability refresh is failing. */}
+        <AnimatePresence key={resource.data?.instance_id ?? instanceID}>{!instanceMismatch && selected && <QueryDetails key={selected.id} query={selected} close={closeDetails} />}</AnimatePresence>
     </>
 }

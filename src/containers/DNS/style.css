@@ -997,6 +997,7 @@ select.dns-input {
 }
 
 .dns-details-fields dd {
+    white-space: pre-line;
     font-family: var(--font-mono);
     font-size: var(--t-xs);
     line-height: 20px;
