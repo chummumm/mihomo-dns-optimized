@@ -368,8 +368,8 @@ jobs:
 
           - 多上游查询优先采用 NOERROR（含 NODATA）或 NXDOMAIN。FORMERR、NOTIMP 等原先允许透传的失败返回码先作为兜底保存，继续等待其他上游的合格答复，避免快速错误抢先结束整轮查询。
           - 覆盖普通多上游竞速及 DIRECT 优选的 first-ping、fastest-response、fastest-ip 三种响应模式。SERVFAIL、REFUSED 维持原失败处理；单上游与显式本地 rcode:// 策略保持原语义。
-          - 本轮期限到达时可使用已经收到的可透传错误答复，不延长查询预算；主动取消或面板关闭逻辑查询仍优先结束，不能被错误兜底遮盖。
-          - 保留既有 main/fallback 选择与过滤边界，错误答复不抢占其他路径的合格结果。兜底答复继续携带原始接收时间和上游来源，等待时间计入 TTL 老化。
+          - 本轮期限到达时可使用已经收到的可透传错误答复，不延长查询预算；错误兜底不会遮盖主动取消，包括通过面板关闭逻辑查询。
+          - 错误兜底仍经过既有 main/fallback 选择与过滤，不绕过配置策略跨池选取。兜底答复继续携带原始接收时间和上游来源，等待时间计入 TTL 老化。
 
           [1.0.16 发行说明](https://github.com/chummumm/mihomo-optimized/blob/mihomo-optimized-v1.0.16/docs/releases.md)
 
