@@ -218,7 +218,7 @@ func finishDNSUpstream(observed *dnsUpstreamAttempt, message *D.Msg, err error) 
 		attempt.Complete(dnsstats.UpstreamTimeout)
 	case err != nil || message == nil:
 		attempt.Complete(dnsstats.UpstreamError)
-	case message.Rcode != D.RcodeSuccess && message.Rcode != D.RcodeNameError:
+	case !isSuccessfulRCode(message.Rcode):
 		attempt.Complete(dnsstats.UpstreamRCodeError)
 	default:
 		attempt.Complete(dnsstats.UpstreamSuccess)

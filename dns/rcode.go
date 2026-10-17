@@ -7,6 +7,11 @@ import (
 	D "github.com/miekg/dns"
 )
 
+// NXDOMAIN is a completed negative answer, not an upstream failure.
+func isSuccessfulRCode(rcode int) bool {
+	return rcode == D.RcodeSuccess || rcode == D.RcodeNameError
+}
+
 func newRCodeClient(addr string) rcodeClient {
 	var rcode int
 	switch addr {
