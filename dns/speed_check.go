@@ -284,6 +284,7 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 
 	var firstResponse *D.Msg
 	var firstAddressResponse *D.Msg
+	var firstErrorResponse *D.Msg
 	var firstError error
 	policyRejected := false
 	var best *speedCheckResult
@@ -303,6 +304,17 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 			answer := speedCheckLimitAnswer(firstResponse, query.Question[0], s.maxReplyIPNum)
 			inheritDNSAnswerLifetime(ctx, answer, firstResponse)
 			return answer, true, nil
+		}
+		if firstErrorResponse != nil {
+			// An already received error reply remains useful at the DNS
+			// deadline, but must not hide an explicit cancellation or close.
+			if dnsQueryClosed(ctx) {
+				return nil, true, tunnel.ErrDNSNativeQueryClosed
+			}
+			if ctx.Err() == context.Canceled {
+				return nil, true, context.Canceled
+			}
+			return firstErrorResponse, true, nil
 		}
 		if firstError != nil {
 			return nil, true, fmt.Errorf("all DNS requests failed: %w", firstError)
@@ -350,6 +362,23 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 		}
 		select {
 		case <-ctx.Done():
+			if ctx.Err() == context.DeadlineExceeded && firstResponse == nil && firstErrorResponse != nil {
+				// A normal reply may already be queued when the deadline wins
+				// the select. Prefer that reply without starting late probes.
+				for {
+					select {
+					case result := <-upstreams:
+						if result.err == nil && speedCheckResponseMatches(query, result.message) &&
+							isSuccessfulRCode(result.message.Rcode) && speedCheckAcceptResponse(ctx, result.message) {
+							recordDNSAnswerReceived(ctx, result.message, result.receivedAt)
+							firstResponse = result.message
+							return finish()
+						}
+					default:
+						return finish()
+					}
+				}
+			}
 			return finish()
 		case <-probeDone:
 			optimizing, probeDone = false, nil
@@ -381,6 +410,20 @@ func (s *directSpeedChecker) ExchangeWithProbe(ctx context.Context, clients []dn
 				continue
 			}
 			recordDNSAnswerReceived(ctx, result.message, result.receivedAt)
+			if !isSuccessfulRCode(result.message.Rcode) {
+				// Preserve formerly pass-through errors only as a final fallback.
+				// They cannot publish an early answer or end the DNS batch when
+				// the optional selection budget expires. The main pool's filter
+				// still applies, so this fallback cannot bypass a configured pool.
+				if !speedCheckAcceptResponse(ctx, result.message) {
+					if firstError == nil {
+						firstError = errors.New("DNS upstream response requires fallback")
+					}
+				} else if firstErrorResponse == nil {
+					firstErrorResponse = result.message
+				}
+				continue
+			}
 			if !speedCheckAcceptResponse(ctx, result.message) {
 				policyRejected = true
 				if firstError == nil {

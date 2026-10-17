@@ -14,6 +14,7 @@ import (
 	"github.com/metacubex/mihomo/component/ech/echparser"
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/log"
+	"github.com/metacubex/mihomo/tunnel"
 
 	D "github.com/miekg/dns"
 	"github.com/samber/lo"
@@ -638,15 +639,22 @@ func msgToLogString(msg *D.Msg) string {
 
 func batchExchange(ctx context.Context, clients []dnsClient, m *D.Msg) (msg *D.Msg, cache bool, err error) {
 	cache = true
-	fast, ctx := picker.WithTimeout[*D.Msg](ctx, resolver.DefaultDNSTimeout)
-	defer fast.Close()
-	domain := msgToDomain(m)
-	_, qTypeStr := msgToQtype(m)
+	// A configured local answer is authoritative for this pool. Check before
+	// starting workers: rcodeClient also mutates the original question.
 	for _, client := range clients {
 		if _, isRCodeClient := client.(rcodeClient); isRCodeClient {
 			msg, err = client.ExchangeContext(ctx, m)
 			return msg, false, err
 		}
+	}
+	callerContext := ctx
+	fast, ctx := picker.WithTimeout[*D.Msg](ctx, resolver.DefaultDNSTimeout)
+	defer fast.Close()
+	var failureReply *D.Msg
+	var failureReplyOnce sync.Once
+	domain := msgToDomain(m)
+	_, qTypeStr := msgToQtype(m)
+	for _, client := range clients {
 		client := client // shadow define client to ensure the value captured by the closure will not be changed in the next loop
 		fast.Go(func() (*D.Msg, error) {
 			if queryRoute(ctx) == nil || log.DNSDebugEnabled() {
@@ -660,10 +668,18 @@ func batchExchange(ctx context.Context, clients []dnsClient, m *D.Msg) (msg *D.M
 			}
 			if err != nil {
 				return nil, err
-			} else if cache && (m.Rcode == D.RcodeServerFailure || m.Rcode == D.RcodeRefused) {
-				// currently, cache indicates whether this msg was from a RCode client,
-				// so we would ignore RCode errors from RCode clients.
-				return nil, errors.New("server failure: " + D.RcodeToString[m.Rcode])
+			}
+			if m == nil {
+				return nil, errors.New("empty DNS upstream response")
+			}
+			if !isSuccessfulRCode(m.Rcode) {
+				// Preserve returnable DNS errors, but never let them cancel a
+				// sibling that can still supply a normal answer. SERVFAIL and
+				// REFUSED retain the existing resolver failure/fallback behavior.
+				if m.Rcode != D.RcodeServerFailure && m.Rcode != D.RcodeRefused {
+					failureReplyOnce.Do(func() { failureReply = m })
+				}
+				return nil, fmt.Errorf("server failure: %s", dnsResponseCode(m.Rcode))
 			}
 			if queryRoute(ctx) == nil || log.DNSDebugEnabled() {
 				log.Debugln("[DNS] %s --> %s from %s", domain, msgToLogString(m), client.Address())
@@ -674,6 +690,18 @@ func batchExchange(ctx context.Context, clients []dnsClient, m *D.Msg) (msg *D.M
 
 	msg = fast.Wait()
 	if msg == nil {
+		// Wait joined all workers, so the first stored reply is immutable here.
+		// A deadline bounds the search; explicit cancellation withdraws demand.
+		// Do not inspect the picker context, which Wait cancels even on success.
+		if failureReply != nil {
+			if dnsQueryClosed(callerContext) {
+				return nil, true, tunnel.ErrDNSNativeQueryClosed
+			}
+			if errors.Is(callerContext.Err(), context.Canceled) {
+				return nil, true, callerContext.Err()
+			}
+			return failureReply, true, nil
+		}
 		err = errors.New("all DNS requests failed")
 		if fErr := fast.Error(); fErr != nil {
 			err = fmt.Errorf("%w, first error: %w", err, fErr)

@@ -364,7 +364,18 @@ jobs:
             {
               printf 'mihomo-optimized `%s`\n\n' "$BUILD_VERSION"
               printf 'Source commit: `%s`\n\n' "$BUILD_SHA"
-              printf '%s\n\n' 'Core 1.0.13 makes omitted speed-check-mode, auto and [auto] select the same automatic policy: TCP ports 443 and 80, then ping. TCP stages use real SYN RTT when available, choosing ordinary connect only when platform/raw-socket capability or permission is definitively unavailable before any SYN is sent. Selection occurs during the actual probe rather than from a startup-wide capability snapshot.'
+              printf '%s\n\n' '## 本次更新：1.0.16
+
+          - 多上游查询优先采用 NOERROR（含 NODATA）或 NXDOMAIN。FORMERR、NOTIMP 等原先允许透传的失败返回码先作为兜底保存，继续等待其他上游的合格答复，避免快速错误抢先结束整轮查询。
+          - 覆盖普通多上游竞速及 DIRECT 优选的 first-ping、fastest-response、fastest-ip 三种响应模式。SERVFAIL、REFUSED 维持原失败处理；单上游与显式本地 rcode:// 策略保持原语义。
+          - 本轮期限到达时可使用已经收到的可透传错误答复，不延长查询预算；错误兜底不会遮盖主动取消，包括通过面板关闭逻辑查询。
+          - 错误兜底仍经过既有 main/fallback 选择与过滤，不绕过配置策略跨池选取。兜底答复继续携带原始接收时间和上游来源，等待时间计入 TTL 老化。
+
+          [1.0.16 发行说明](https://github.com/chummumm/mihomo-optimized/blob/mihomo-optimized-v1.0.16/docs/releases.md)
+
+          ## 历史更新
+
+          Core 1.0.13 makes omitted speed-check-mode, auto and [auto] select the same automatic policy: TCP ports 443 and 80, then ping. TCP stages use real SYN RTT when available, choosing ordinary connect only when platform/raw-socket capability or permission is definitively unavailable before any SYN is sent. Selection occurs during the actual probe rather than from a startup-wide capability snapshot.'
               printf '%s\n\n' 'Once SYN is sent, timeout, network failure or cancellation does not trigger another connect probe. Resource exhaustion and interface/mark setup errors do not trigger this fallback either. Both choices retain the same deadline, actual-probe concurrency slot and selected DIRECT route. Explicit tcp, tcp-syn and ping lists retain their existing meanings; auto is exclusive and accepts no port suffix.'
               printf '%s\n\n' 'Upgrade behavior: configurations that already enable dns-rule-routing and omit speed-check-mode now use automatic IP probes for eligible DIRECT/Compatible automatic upstream pools. An explicitly present empty field, null, empty string or [] disables probes; the former none value is no longer accepted. The dns-rule-routing switch itself still defaults to false. Dual-stack selection and scheduled prefetch remain opt-in; scheduled prefetch stays DIRECT-only, while request-triggered stale refresh preserves the original proxy and other routes. Proxy-group URL tests, node health checks and native tcp-concurrent behavior on other proxy paths remain unchanged. Companion panel remains 0.4.8.'
               printf '%s\n\n' 'Transparent-proxy tcp and udp now use an explicitly present empty field, null or empty string to disable capture for that protocol. Omitted fields still default to tproxy and tun respectively. The old off configuration value is rejected with a migration message. Boolean switches still use false; empty response-mode retains its existing default strategy. Native protocol parameters and observation labels containing none or off retain their original meanings.'
